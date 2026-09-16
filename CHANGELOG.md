@@ -10,8 +10,10 @@ excludes, so this release reproduces every 1.2.x pin: dataset D `e43672a0`, run 
 defaults, `8c1b047f` and `bff54a1f` with `-dnoise:ms1 false`. A binary and repository rename breaks
 every script that called `diaspextractor` and every `DIASPEXTRACTOR_*` export, so it ships as its own
 minor release with a migration section rather than folded into the next change to the spectra. Apart
-from this rename and one `.gitignore` line (`docs/**/*.log`), nothing the release carries changed since
-1.2.1; only the private development records grew.
+from this rename, the release carries two small changes since 1.2.1: one `.gitignore` line
+(`docs/**/*.log`), and CI that runs the four-platform test matrix and the weekly OpenMS build on this
+public repository and on a manual dispatch, while the development repository runs the Linux legs only
+(`CONTRIBUTING.md`). Options, defaults and spectra are unchanged.
 
 ### Migrating from 1.2.x
 

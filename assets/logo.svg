@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"
-     role="img" aria-label="DIAspeXtractor">
-  <title>DIAspeXtractor</title>
+     role="img" aria-label="DIAspeXtract">
+  <title>DIAspeXtract</title>
   <!-- What the tool does, in one picture: the wide soft band is the isolation window a diaPASEF
        acquisition actually measures; the sharp irregular lines are the fragment spectrum extracted
        from it; the tall accent line with the marker is the precursor that spectrum belongs to. -->

@@ -1,9 +1,9 @@
-# DIAspeXtractor: three changes to OpenMS ElutionPeakDetection.
+# DIAspeXtract: three changes to OpenMS ElutionPeakDetection.
 #
 # 1. Make detectPeaks(vector) lock-free for nested parallel callers.
 #
 # It guarded a shared output vector with a PROGRAM-GLOBAL named critical. Called from inside
-# DIAspeXtractor's per-band trace loop (96 concurrent callers) that one lock serialised the whole
+# DIAspeXtract's per-band trace loop (96 concurrent callers) that one lock serialised the whole
 # tool: 195M context switches, 37% system time. At top level this now collects into per-thread
 # buffers and merges; when already nested it runs serially into the caller's own vector. No output
 # vector is ever shared across threads, so the critical is unnecessary. Numerically identical:
@@ -44,7 +44,7 @@
  
      defaults_.setValue("masstrace_snr_filtering", "false", "Apply post-filtering by signal-to-noise ratio after smoothing.", {"advanced"});
      defaults_.setValidStrings("masstrace_snr_filtering", {"true","false"});
-+    // [DIAspeXtractor] The smoothing window is chrom_fwhm / scan time. Derived from the trace's own
++    // [DIAspeXtract] The smoothing window is chrom_fwhm / scan time. Derived from the trace's own
 +    // points, the scan time of a trace with gaps is inflated by the gaps (the caller may hand over
 +    // real points only), so a long, gappy trace gets a NARROWER window than its neighbours and a
 +    // sub-range of it is smoothed differently from the whole -- the split is then a function of
@@ -60,8 +60,8 @@
 -#pragma omp parallel for
 -#endif
 -    for (SignedSize i = 0; i < (SignedSize) mt_vec.size(); ++i)
-+    // [DIAspeXtractor lock-free] The push_back below used a PROGRAM-GLOBAL named critical. Called from
-+    // inside another parallel region (DIAspeXtractor's per-band trace loop, 96 concurrent callers) that
++    // [DIAspeXtract lock-free] The push_back below used a PROGRAM-GLOBAL named critical. Called from
++    // inside another parallel region (DIAspeXtract's per-band trace loop, 96 concurrent callers) that
 +    // one lock serialised everything -> 195M context switches, 37% system time. Fix: at TOP LEVEL,
 +    // collect into per-thread buffers and merge (no shared vector, no lock); when already NESTED,
 +    // run serially into the caller's own vector (also no sharing). detectElutionPeaks_ no longer
@@ -124,7 +124,7 @@
 -        {
 -          single_mtraces.push_back(mt);
 -        }
-+        single_mtraces.push_back(mt);   // [DIAspeXtractor] lock-free: vector is thread-private
++        single_mtraces.push_back(mt);   // [DIAspeXtract] lock-free: vector is thread-private
  
        }
      }
@@ -138,7 +138,7 @@
 -          {
 -            single_mtraces.push_back(new_mt);
 -          }
-+            single_mtraces.push_back(new_mt);   // [DIAspeXtractor] lock-free: vector is thread-private
++            single_mtraces.push_back(new_mt);   // [DIAspeXtract] lock-free: vector is thread-private
          }
        }
      }
@@ -157,7 +157,7 @@
 -    param.setValue("polynomial_order", 2);
 -    param.setValue("frame_length", std::max(3, win_size)); // frame length must be at least polynomial_order+1, otherwise SG will fail
 -    sg.setParameters(param);
-+    // [DIAspeXtractor] The filter coefficients depend only on (frame_length, polynomial_order), but
++    // [DIAspeXtract] The filter coefficients depend only on (frame_length, polynomial_order), but
 +    // setParameters() -> updateMembers_() recomputes them with one Eigen SVD per half-window on
 +    // EVERY call. smoothData() runs once per mass trace -- hundreds of millions of times on a full
 +    // acquisition -- while the configuration takes only a handful of distinct values. Cache the
@@ -192,7 +192,7 @@
  
      double min_fwhm_;
      double max_fwhm_;
-+    double scan_time_ = 0.0;   ///< [DIAspeXtractor] fixed scan time for the smoothing window; 0 = per trace
++    double scan_time_ = 0.0;   ///< [DIAspeXtract] fixed scan time for the smoothing window; 0 = per trace
  
      /// Type of width filtering
      String pw_filtering_;

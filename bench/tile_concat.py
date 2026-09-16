@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Concatenate RT-tiled DIAspeXtractor outputs into one mzML, keeping each tile's CORE precursors.
+"""Concatenate RT-tiled DIAspeXtract outputs into one mzML, keeping each tile's CORE precursors.
 
     tile_concat.py OUT.mzML TILE.mzML:LO:HI [TILE.mzML:LO:HI ...]
 

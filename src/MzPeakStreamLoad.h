@@ -1,4 +1,4 @@
-// DIAspeXtractor: streaming diaPASEF load from an .mzpeak archive through the mzPeak C++ library
+// DIAspeXtract: streaming diaPASEF load from an .mzpeak archive through the mzPeak C++ library
 // (github.com/OpenMS/mzpeak, fork okohlbacher/mzpeak-openms). Mirrors BrukerTimsFile::
 // loadDIAStreaming's contract so PickCompactConsumer sees the same stream: every MS1 spectrum
 // first (frame order), then one MSSpectrum per (MS2 frame, isolation window) holding only the
@@ -12,7 +12,7 @@
 // ponytail: decode is parallel over contiguous frame ranges with one Index per thread (decodes
 // serialise on a reader's mutex); the hand-off is serial. No caching beyond the library's own.
 #pragma once
-#ifdef DIASPEXTRACTOR_WITH_MZPEAK
+#ifdef DIASPEXTRACT_WITH_MZPEAK
 
 #include "TdfLoad.h"
 #include <mzpeak/open.h>
@@ -60,7 +60,7 @@ namespace spx
   struct MzPeakExactMz
   {
     double c0 = 0, c1 = 0;
-    diaspextractor::TdfMzCalibration cal;
+    diaspextract::TdfMzCalibration cal;
     std::vector<double> t1_by_frame;          // index = Frames.Id
     double acq_lo = std::numeric_limits<double>::quiet_NaN(), acq_hi = std::numeric_limits<double>::quiet_NaN();   // GlobalMetadata MzAcqRange
     long n_bins = 0; std::string bounds_why;                                                                        // DigitizerNumSamples, or why not
@@ -109,11 +109,11 @@ namespace spx
         if (std::sscanf(tp->c_str(), "%lf,%lf", &c0, &c1) != 2 || !(c1 > 0)) throw std::runtime_error("mzpeak: bad transform_params " + *tp);
 
         // (2) the vendor tdf: gunzip vendor/analysis.tdf.gz to a temp file, read MzCalibration + Frames.T1
-        // --no-vendor archives have no embedded tdf: accept a sidecar via DIASPEXTRACTOR_MZPEAK_TDF=<analysis.tdf.gz>
+        // --no-vendor archives have no embedded tdf: accept a sidecar via DIASPEXTRACT_MZPEAK_TDF=<analysis.tdf.gz>
         std::vector<char> gz;
-        if (const char* side = std::getenv("DIASPEXTRACTOR_MZPEAK_TDF"))
+        if (const char* side = std::getenv("DIASPEXTRACT_MZPEAK_TDF"))
         {
-          FILE* sf = std::fopen(side, "rb"); if (!sf) throw std::runtime_error(std::string("mzpeak: cannot read DIASPEXTRACTOR_MZPEAK_TDF ") + side);
+          FILE* sf = std::fopen(side, "rb"); if (!sf) throw std::runtime_error(std::string("mzpeak: cannot read DIASPEXTRACT_MZPEAK_TDF ") + side);
           char b[1 << 16]; size_t n; while ((n = std::fread(b, 1, sizeof b, sf)) > 0) gz.insert(gz.end(), b, b + n); std::fclose(sf);
         }
         else gz = readMember_(z, "vendor/analysis.tdf.gz");
@@ -126,10 +126,10 @@ namespace spx
                std::fwrite(ob.data(), 1, ob.size() - zs.avail_out, out); } while (rc != Z_STREAM_END);
           inflateEnd(&zs); std::fclose(out); }
         { std::string why;
-          if (!diaspextractor::loadTdfCalibration(std::string(tmpl), cal, t1_by_frame, why))
+          if (!diaspextract::loadTdfCalibration(std::string(tmpl), cal, t1_by_frame, why))
             throw std::runtime_error("mzpeak: " + why);
-          std::string w2; diaspextractor::TdfAxisBounds bd;
-          if (diaspextractor::loadTdfAxisBounds(std::string(tmpl), bd, w2)) { acq_lo = bd.mz_lo; acq_hi = bd.mz_hi; n_bins = bd.n_bins; } else bounds_why = w2; }
+          std::string w2; diaspextract::TdfAxisBounds bd;
+          if (diaspextract::loadTdfAxisBounds(std::string(tmpl), bd, w2)) { acq_lo = bd.mz_lo; acq_hi = bd.mz_hi; n_bins = bd.n_bins; } else bounds_why = w2; }
         std::remove(tmpl);
       }
       catch (...) { zip_close(z); throw; }
@@ -269,14 +269,14 @@ namespace spx
     meta->n_peaks.assign(n, -1);
     std::shared_ptr<MzPeakExactMz>& exact = meta->exact;
     // Exact TDF model by default, fail closed like the .d path; the refusal below names the cost and both escapes.
-    const char* ex = std::getenv("DIASPEXTRACTOR_MZPEAK_EXACT");
+    const char* ex = std::getenv("DIASPEXTRACT_MZPEAK_EXACT");
     if (!(ex && std::string(ex) == "0"))
     {
       try { exact = std::make_shared<MzPeakExactMz>(path); }
       catch (const std::exception& e)
       {
         throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-          std::string("mzPeak input: cannot recover the exact TDF calibration (") + e.what() + "). The archive's two-point transform is ~7 ppm off and costs ~12% peptides; set DIASPEXTRACTOR_MZPEAK_TDF=<analysis.tdf.gz> or DIASPEXTRACTOR_MZPEAK_EXACT=0 to accept it.", path);
+          std::string("mzPeak input: cannot recover the exact TDF calibration (") + e.what() + "). The archive's two-point transform is ~7 ppm off and costs ~12% peptides; set DIASPEXTRACT_MZPEAK_TDF=<analysis.tdf.gz> or DIASPEXTRACT_MZPEAK_EXACT=0 to accept it.", path);
       }
       lastMzPeakCalibration() = "tdf_table_modeltype1 (recovered from the archive's two-point transform + embedded vendor/analysis.tdf.gz) archive=" + path.substr(path.find_last_of('/') + 1);
     }
@@ -383,4 +383,4 @@ namespace spx
     run(m.ms2);
   }
 } // namespace spx
-#endif // DIASPEXTRACTOR_WITH_MZPEAK
+#endif // DIASPEXTRACT_WITH_MZPEAK

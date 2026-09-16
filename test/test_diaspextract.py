@@ -23,8 +23,9 @@ checks that fail if the things most likely to break do break:
       20. dnoise:ms1       on by default, it filters a Bruker .d only: an mzML is skipped, logged, stamped, unchanged
       21. dnoise SDK       a .d holding only its analysis.tdf: with a Bruker SDK path set, dnoise:ms1 refuses before the
                            load; without one the run gets past the dnoise setup and fails in the loader
-      22. old variables    a set SPEXTRACTOR_* variable refuses the run before anything, naming it and its DIASPEXTRACTOR_
-                           name; DIASPEXTRACTOR_DET runs and prints its [det] lines
+      22. old variables    a set SPEXTRACTOR_* (SpeXtractor) or DIASPEXTRACTOR_* (DIAspeXtractor) variable refuses the run
+                           before anything, naming it and its DIASPEXTRACT_ name; DIASPEXTRACT_DET runs and prints its
+                           [det] lines
 
 These exercise the default (OpenMS) detector only. `trace:detector=integer` refuses to run
 without the vendor flight-time calibration, which a synthetic mzML cannot carry, so it is judged on
@@ -34,7 +35,7 @@ An mzML is never streamed: every check here takes the RESIDENT load (the stream 
 before any frame is delivered), so the MS1 prune inside the streaming consumer (flushMS1_, its
 cross-batch sample offsets) is covered only by the cluster gates on real .d input.
 
-Usage: test_diaspextractor.py /path/to/diaspextractor [workdir]
+Usage: test_diaspextract.py /path/to/diaspextract [workdir]
 Exit status is 0 only if every check passes.
 """
 import base64, hashlib, json, os, re, struct, subprocess, sys, tempfile
@@ -135,10 +136,10 @@ def synth(path, n_cycles=14, cycle_s=1.4, gap_cycles=(), groups=None, z1_shift=0
                               prec=win, group=groups[c % 2] if groups else 0)); idx += 1
     body = "\n".join(specs)
     open(path, "w").write(f"""<?xml version="1.0" encoding="ISO-8859-1"?>
-<indexedmzML xmlns="http://psi.hupo.org/ms/mzml"><mzML version="1.1.0" id="diaspextractor_test">
+<indexedmzML xmlns="http://psi.hupo.org/ms/mzml"><mzML version="1.1.0" id="diaspextract_test">
 <cvList count="1"><cv id="MS" fullName="Proteomics Standards Initiative Mass Spectrometry Ontology" URI="https://raw.githubusercontent.com/HUPO-PSI/psi-ms-CV/master/psi-ms.obo"/></cvList>
 <fileDescription><fileContent><cvParam cvRef="MS" accession="MS:1000580" name="MSn spectrum"/></fileContent></fileDescription>
-<softwareList count="1"><software id="so_test" version="0"><cvParam cvRef="MS" accession="MS:1000799" name="custom unreleased software tool" value="diaspextractor-test"/></software></softwareList>
+<softwareList count="1"><software id="so_test" version="0"><cvParam cvRef="MS" accession="MS:1000799" name="custom unreleased software tool" value="diaspextract-test"/></software></softwareList>
 <instrumentConfigurationList count="1"><instrumentConfiguration id="ic_test"><cvParam cvRef="MS" accession="MS:1000031" name="instrument model"/></instrumentConfiguration></instrumentConfigurationList>
 <dataProcessingList count="1"><dataProcessing id="dp_test"><processingMethod order="0" softwareRef="so_test"><cvParam cvRef="MS" accession="MS:1000544" name="Conversion to mzML"/></processingMethod></dataProcessing></dataProcessingList>
 <run id="run_test" defaultInstrumentConfigurationRef="ic_test">
@@ -299,7 +300,7 @@ def stamp(path, key):
 def main():
     if len(sys.argv) < 2: sys.exit(__doc__)
     binary = sys.argv[1]
-    work = sys.argv[2] if len(sys.argv) > 2 else tempfile.mkdtemp(prefix="diaspextractor_test_")
+    work = sys.argv[2] if len(sys.argv) > 2 else tempfile.mkdtemp(prefix="diaspextract_test_")
     os.makedirs(work, exist_ok=True)
     inp = os.path.join(work, "synth.mzML")
     z2_mono, z1_mono = synth(inp)
@@ -314,7 +315,7 @@ def main():
             print(f"  FAIL  {name}: {e}"); fails.append(name)
 
     def tdf_env():   # the synthetic analysis.tdf, handed to the tool through the sidecar variable
-        return dict(os.environ, DIASPEXTRACTOR_MZPEAK_TDF=synth_tdf(os.path.join(work, "analysis.tdf"), n_frames=64))
+        return dict(os.environ, DIASPEXTRACT_MZPEAK_TDF=synth_tdf(os.path.join(work, "analysis.tdf"), n_frames=64))
 
     # 1 + 2: the default drops the z=1 envelope and keeps one precursor per envelope
     out_def = os.path.join(work, "default.mzML")
@@ -545,7 +546,7 @@ def main():
         r = run(binary, inp_t, os.path.join(work, "tiles_c.mzML"), extra=("-tile:rt_sec", "10", "-tile:cells_per_tile", "1"), threads=2, env=env)
         carried = [int(x) for x in re.findall(r"carried in (\d+)", r.stdout + r.stderr)]
         assert carried and max(carried) > 0, "no tile reported carried-in fragments:\n" + (r.stdout + r.stderr)[-800:]
-        env_nc = dict(env, DIASPEXTRACTOR_TILE_NO_CARRY="1")
+        env_nc = dict(env, DIASPEXTRACT_TILE_NO_CARRY="1")
         nc = os.path.join(work, "tiles_nocarry.mzML")
         run(binary, inp_t, nc, extra=("-tile:rt_sec", "10", "-tile:cells_per_tile", "1"), threads=2, env=env_nc)
         assert digest(nc) != digest(one), "switching the carry off changed nothing: the fixture does not exercise it"
@@ -600,7 +601,7 @@ def main():
     #     50 and at exactly 100.0; 400.24-400.38 at 50, of which the chain drops 400.24). A band spectrum
     #     whose peaks are all at or below the threshold is still a SCAN to MassTraceDetection: 3 hits in 9
     #     scans fail min_sample_rate 0.5. Without those spectra it is 3 of 3 and a trace -- so the
-    #     no-witness control (DIASPEXTRACTOR_MS1_PRUNE_NO_WITNESS=1, survivors only) must change the MS1
+    #     no-witness control (DIASPEXTRACT_MS1_PRUNE_NO_WITNESS=1, survivors only) must change the MS1
     #     traces or the band spectra, and the witness chain must change nothing. Each cycle's lowest peak
     #     is its stride-97 m/z sample and places the band edges: 450 in cycles 0-5 / 15-20 (an edge above
     #     the trace, and misses that end its extension), 300 in 6/10/14, 200 in 8. The hit in cycle 14 is
@@ -620,15 +621,15 @@ def main():
         if c in (7, 9): return [(400.2, 50.0, 0.95)]
         return [(400.2, 100.0, 0.95), (400.24, 50.0, 0.95), (400.28, 50.0, 0.95), (400.38, 50.0, 0.95)]
     def prune_arm(inp_p, tag, bands, prune, env_extra=None):
-        """One DIASPEXTRACTOR_DET run: (output, {key: line or None}, every [det] and [ms1-edges] line, log)."""
+        """One DIASPEXTRACT_DET run: (output, {key: line or None}, every [det] and [ms1-edges] line, log)."""
         out = os.path.join(work, f"{tag}_b{bands}_{prune}.mzML")
-        env = dict(os.environ, DIASPEXTRACTOR_DET="1")
-        for v in ("DIASPEXTRACTOR_MS1_PRUNE_NO_WITNESS", "DIASPEXTRACTOR_MS1_PRUNE_NO_CHAIN"): env.pop(v, None)
+        env = dict(os.environ, DIASPEXTRACT_DET="1")
+        for v in ("DIASPEXTRACT_MS1_PRUNE_NO_WITNESS", "DIASPEXTRACT_MS1_PRUNE_NO_CHAIN"): env.pop(v, None)
         env.update(env_extra or {})
         r = run(binary, inp_p, out, extra=("-perf:ms1_trace_bands", str(bands), "-perf:ms1_prune", prune, "-diag:dump_ms1_tsv", out), env=env)
         log = r.stdout + r.stderr
         got = {k: (m.group(0) if m else None) for k, m in ((k, re.search(p, log)) for k, p in PRUNE_KEYS.items())}
-        assert got["traces"] and got["prec"], f"{tag} bands {bands} prune {prune}: no [det] MS1/precursor line under DIASPEXTRACTOR_DET:\n" + log[-800:]
+        assert got["traces"] and got["prec"], f"{tag} bands {bands} prune {prune}: no [det] MS1/precursor line under DIASPEXTRACT_DET:\n" + log[-800:]
         assert (got["bands"] is not None) == (bands > 1) and (got["edges"] is not None) == (bands > 1), \
             f"{tag} bands {bands} prune {prune}: [det] MS1 band spectra / [ms1-edges] expected iff bands > 1: {got}"
         return out, got, re.findall(r"\[(?:det|ms1-edges)\][^\n]*", log), log
@@ -653,8 +654,8 @@ def main():
                 f"bands {bands}: with every witness kept the 400.25 trace must fail min_sample_rate (3 hits in 9 scans)"
             prune_ref[(bands, "false")], prune_ref[(bands, "true")] = (digest(off), det_off), (digest(on), det_on)
             if bands > 1:
-                nw, g_nw, _, log_nw = prune_arm(inp_p, "prune_nowit", bands, "true", {"DIASPEXTRACTOR_MS1_PRUNE_NO_WITNESS": "1"})
-                assert "DIASPEXTRACTOR_MS1_PRUNE_NO_WITNESS: survivors only" in log_nw, "the no-witness control did not announce itself"
+                nw, g_nw, _, log_nw = prune_arm(inp_p, "prune_nowit", bands, "true", {"DIASPEXTRACT_MS1_PRUNE_NO_WITNESS": "1"})
+                assert "DIASPEXTRACT_MS1_PRUNE_NO_WITNESS: survivors only" in log_nw, "the no-witness control did not announce itself"
                 near_nw = ms1_traces_near(nw + ".traces.tsv", 400.25)
                 assert n_of(g_nw["traces"]) == n_of(g_off["traces"]) + 1 and n_of(g_nw["prec"]) == n_of(g_off["prec"]) + 1 and near_nw == [3], \
                     f"bands {bands}: dropping the witnesses must add exactly the 400.25 trace (3 of 3) and one precursor:\n" \
@@ -670,7 +671,7 @@ def main():
     #      inside that range, nothing but the links of a sub-threshold chain 399.70..400.80 at 0.05 Th (hop at 400 =
     #      0.12 Th): its first peak 200.0, its gap far side 399.70 and its last peak (612.61) all lie OUTSIDE the range.
     #      With every link kept those six frames stay SCANS (3 hits in 9: no trace); with only the links dropped
-    #      (DIASPEXTRACTOR_MS1_PRUNE_NO_CHAIN=1, anchors kept) they vanish from 26 bands and the trace is 3 of 3. At 1 and 2
+    #      (DIASPEXTRACT_MS1_PRUNE_NO_CHAIN=1, anchors kept) they vanish from 26 bands and the trace is 3 of 3. At 1 and 2
     #      bands the outer ranges always hold a frame's first or last peak, so links can never matter there.
     def c19b():
         chain = [round(399.70 + 0.05 * k, 2) for k in range(23)]
@@ -691,9 +692,9 @@ def main():
                 assert g_on[k] == g_off[k], f"bands {bands}: {k} differs with the prune on:\n  off {g_off[k]}\n  on  {g_on[k]}"
             assert near(off) == near(on) == [], f"bands {bands}: with every link kept the 400.25 trace must be invalid: {near(off)} {near(on)}"
         # the control, at 48 bands (the loop's last arms)
-        nc, g_nc, _, log_nc = prune_arm(inp_c, "chain_nochain", 48, "true", {"DIASPEXTRACTOR_MS1_PRUNE_NO_CHAIN": "1"})
+        nc, g_nc, _, log_nc = prune_arm(inp_c, "chain_nochain", 48, "true", {"DIASPEXTRACT_MS1_PRUNE_NO_CHAIN": "1"})
         m_on, m_nc = re.search(PRUNE_RE, log_on), re.search(PRUNE_RE, log_nc)
-        assert m_on and m_nc and "DIASPEXTRACTOR_MS1_PRUNE_NO_CHAIN: interior chain links dropped" in log_nc, \
+        assert m_on and m_nc and "DIASPEXTRACT_MS1_PRUNE_NO_CHAIN: interior chain links dropped" in log_nc, \
             "no [ms1-prune] counters, or the no-chain control did not announce itself:\n" + log_nc[-800:]
         surv_on, wit_on, surv_nc, wit_nc = int(m_on.group(2)), int(m_on.group(3)), int(m_nc.group(2)), int(m_nc.group(3))
         assert surv_nc == surv_on and wit_nc == 9 + 6 and wit_on > wit_nc, \
@@ -767,7 +768,7 @@ def main():
     def c21():
         fake = synth_fake_d(os.path.join(work, "fake.d"))
         env = dict(os.environ)
-        for v in ("OPENMS_BRUKER_SDK_PATH", "DIASPEXTRACTOR_MZPEAK_TDF", "DIASPEXTRACTOR_TILE_RESIDENT"): env.pop(v, None)
+        for v in ("OPENMS_BRUKER_SDK_PATH", "DIASPEXTRACT_MZPEAK_TDF", "DIASPEXTRACT_TILE_RESIDENT"): env.pop(v, None)
         setup_line = "MS1 path on the raw frames, before the pick"
         r = run(binary, fake, os.path.join(work, "fake_sdk.mzML"), expect_fail=True, env=dict(env, OPENMS_BRUKER_SDK_PATH="/nonexistent"))
         log = r.stdout + r.stderr
@@ -779,20 +780,27 @@ def main():
         assert "[stream] streaming load failed" in log, "no Bruker SDK path: the run did not fail in the loader (no analysis.tdf_bin):\n" + log[-800:]
     check("dnoise:ms1 refuses a Bruker SDK calibration before the load, and gets past its setup without one", c21)
 
-    # 22: the rename's fail-closed guard. Every SPEXTRACTOR_* variable is DIASPEXTRACTOR_* since SpeXtractor became
-    #     DIAspeXtractor, and an old name would be ignored without a word. A run with one set must refuse before anything
-    #     else, naming the variable and its new name; the same switch under the new name must run and print its [det] lines.
+    # 22: the renames' fail-closed guard. Every variable is DIASPEXTRACT_* since the tool became DIAspeXtract; before that
+    #     it was SPEXTRACTOR_* (SpeXtractor) and DIASPEXTRACTOR_* (DIAspeXtractor), and an old name would be ignored
+    #     without a word. A run with one set under EITHER old prefix -- and with both -- must refuse before anything else,
+    #     naming each variable and its DIASPEXTRACT_ name; the same switch under the new name must run and print its
+    #     [det] lines.
     def c22():
-        env = {k: v for k, v in os.environ.items() if not k.startswith("SPEXTRACTOR_")}
-        old = os.path.join(work, "old_env.mzML")
-        r = run(binary, inp, old, expect_fail=True, env=dict(env, SPEXTRACTOR_DET="1"))
-        log = r.stdout + r.stderr
-        assert re.search(r"(?<!DIA)SPEXTRACTOR_DET\b", log) and "DIASPEXTRACTOR_DET" in log, \
-            "SPEXTRACTOR_DET=1: not refused naming the variable and its DIASPEXTRACTOR_ name:\n" + log[-800:]
-        assert "[det]" not in log and not os.path.exists(old), "SPEXTRACTOR_DET=1: refused only after the run had started:\n" + log[-800:]
-        r = run(binary, inp, os.path.join(work, "new_env.mzML"), env=dict(env, DIASPEXTRACTOR_DET="1"))
-        assert "[det] " in r.stdout + r.stderr, "DIASPEXTRACTOR_DET=1 ran but printed no [det] line:\n" + (r.stdout + r.stderr)[-800:]
-    check("a leftover SPEXTRACTOR_* variable refuses the run; its DIASPEXTRACTOR_ name works", c22)
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("SPEXTRACTOR_", "DIASPEXTRACTOR_"))}
+        for tag, old_vars in (("spextractor", {"SPEXTRACTOR_DET": "1"}),
+                              ("diaspextractor", {"DIASPEXTRACTOR_DET": "1"}),
+                              ("both", {"SPEXTRACTOR_LEDGER": "x", "DIASPEXTRACTOR_TILE_RESIDENT": "1"})):
+            old = os.path.join(work, f"old_env_{tag}.mzML")
+            r = run(binary, inp, old, expect_fail=True, env=dict(env, **old_vars))
+            log = r.stdout + r.stderr
+            for v in old_vars:
+                new_name = "DIASPEXTRACT_" + v.split("_", 1)[1]
+                assert re.search(r"(?<![A-Z])" + v + r"\b", log) and re.search(r"(?<![A-Z])" + new_name + r"\b", log), \
+                    f"{v}=1: not refused naming the variable and its {new_name} name:\n" + log[-800:]
+            assert "[det]" not in log and not os.path.exists(old), f"{tag}: refused only after the run had started:\n" + log[-800:]
+        r = run(binary, inp, os.path.join(work, "new_env.mzML"), env=dict(env, DIASPEXTRACT_DET="1"))
+        assert "[det] " in r.stdout + r.stderr, "DIASPEXTRACT_DET=1 ran but printed no [det] line:\n" + (r.stdout + r.stderr)[-800:]
+    check("a leftover SPEXTRACTOR_* or DIASPEXTRACTOR_* variable refuses the run; its DIASPEXTRACT_ name works", c22)
 
     print(f"\n{len(ran) - len(fails)}/{len(ran)} checks passed" + (f"; FAILED: {', '.join(fails)}" if fails else ""))
     return 1 if fails else 0

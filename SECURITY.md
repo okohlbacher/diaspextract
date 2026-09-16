@@ -8,7 +8,7 @@ titled "security contact request" with no details in it, and we will arrange a p
 
 ## Scope
 
-DIAspeXtractor is a batch command-line tool. It reads instrument data and writes mzML or mzPeak; it opens no
+DIAspeXtract is a batch command-line tool. It reads instrument data and writes mzML or mzPeak; it opens no
 sockets, runs no server, and requires no credentials. The realistic security surface is therefore
 **untrusted input files**: a malformed or hostile Bruker `.d`, `.mzML` or `.mzpeak` reaching the
 parser. Reports of crashes, out-of-bounds reads or unbounded allocation triggered by an input file
@@ -19,5 +19,5 @@ route it upstream.
 
 ## Data handling
 
-DIAspeXtractor reads local files and writes local files. It does not phone home, collect telemetry, or
+DIAspeXtract reads local files and writes local files. It does not phone home, collect telemetry, or
 transmit anything. If you find otherwise, that is a security bug — report it.

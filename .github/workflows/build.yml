@@ -1,9 +1,9 @@
 name: full build
 
-# Builds OpenMS from source at the commit pinned in patches/openms.lock, applies the DIAspeXtractor
+# Builds OpenMS from source at the commit pinned in patches/openms.lock, applies the DIAspeXtract
 # patches, builds the tool, and runs the end-to-end suite against the binary it just built.
 #
-# DIAspeXtractor cannot be built against a RELEASED OpenMS package, and that is a property of the tool
+# DIAspeXtract cannot be built against a RELEASED OpenMS package, and that is a property of the tool
 # rather than of CI: it uses BrukerTimsFile::loadDIAStreaming and PeakPickerIM, which postdate
 # OpenMS 3.5.0, the newest tag; and it needs the four patches in patches/, one of which adds
 # BrukerTimsFile::lastMzCalibration(). Hence a source build at a pinned commit.
@@ -26,11 +26,15 @@ on:
 jobs:
   linux:
     name: ubuntu-latest, OpenMS from source + patches
+    # The weekly build runs only on the public repository (.../diaspextract): this file is exported there
+    # unchanged, and the private development repository pays for its Actions minutes. Tag pushes and
+    # manual dispatches run everywhere.
+    if: github.event_name != 'schedule' || endsWith(github.repository, '/diaspextract')
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
-        with: { path: diaspextractor }
+        with: { path: diaspextract }
 
       - name: Build dependencies
         run: |
@@ -59,13 +63,13 @@ jobs:
         # change. Pass openms_ref to test against a newer commit deliberately.
         run: |
           REF="${{ github.event.inputs.openms_ref }}"
-          [ -n "$REF" ] || REF=$(sed -n 's/^OPENMS_BASE=//p' diaspextractor/patches/openms.lock)
+          [ -n "$REF" ] || REF=$(sed -n 's/^OPENMS_BASE=//p' diaspextract/patches/openms.lock)
           echo "building against OpenMS $REF"
           git clone https://github.com/OpenMS/OpenMS.git
           git -C OpenMS checkout "$REF"
 
-      - name: Apply the DIAspeXtractor patches to OpenMS
-        run: diaspextractor/scripts/apply_openms_patches.sh "$GITHUB_WORKSPACE/OpenMS"
+      - name: Apply the DIAspeXtract patches to OpenMS
+        run: diaspextract/scripts/apply_openms_patches.sh "$GITHUB_WORKSPACE/OpenMS"
 
       - name: Build OpenMS
         run: |
@@ -74,12 +78,12 @@ jobs:
             -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           cmake --build OpenMS/build --target OpenMS
 
-      - name: Build DIAspeXtractor
+      - name: Build DIAspeXtract
         run: |
-          cmake -S diaspextractor -B diaspextractor/build -G Ninja \
+          cmake -S diaspextract -B diaspextract/build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release -DOpenMS_DIR="$GITHUB_WORKSPACE/OpenMS/build" \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-          cmake --build diaspextractor/build
+          cmake --build diaspextract/build
 
       # The C++ unit tests again, under the tool build's own flags (tests.yml builds them without OpenMS):
       # dnoise_ms1 pins D's FMA-sensitive gate boxes, tdf_load the analysis.tdf metadata loader. Each must
@@ -87,7 +91,7 @@ jobs:
       - name: C++ unit tests in the tool build (dnoise MS1 port, analysis.tdf loader)
         run: |
           set -o pipefail
-          ctest --test-dir diaspextractor/build --output-on-failure --no-tests=error -R 'dnoise|tdf_load' | tee "$RUNNER_TEMP/ctest.txt"
+          ctest --test-dir diaspextract/build --output-on-failure --no-tests=error -R 'dnoise|tdf_load' | tee "$RUNNER_TEMP/ctest.txt"
           for t in dnoise_ms1 tdf_load; do
             grep -Eq "Test +#[0-9]+: $t" "$RUNNER_TEMP/ctest.txt" \
               || { echo "::error::no $t test ran in the tool build"; exit 1; }
@@ -110,19 +114,21 @@ jobs:
           env -i HOME="$HOME" \
                  OPENMS_DATA_PATH="$GITHUB_WORKSPACE/OpenMS/share/OpenMS" \
                  LD_LIBRARY_PATH="$GITHUB_WORKSPACE/OpenMS/build/lib" \
-                 diaspextractor/build/diaspextractor --help > help.txt 2>&1 \
+                 diaspextract/build/diaspextract --help > help.txt 2>&1 \
             || { echo "::error::the tool does not run from a clean environment"; cat help.txt; exit 1; }
           head -6 help.txt
 
-          grep -q '^DIAspeXtractor' help.txt \
-            || { echo "::error::the tool does not identify itself as DIAspeXtractor"; cat help.txt; exit 1; }
+          # the space matters: '^DIAspeXtract' alone would also accept the pre-rename 'DIAspeXtractor -- ...' header
+          grep -q '^DIAspeXtract ' help.txt \
+            || { echo "::error::the tool does not identify itself as DIAspeXtract"; cat help.txt; exit 1; }
 
           # OUR version, not the OpenMS one TOPPBase prints by default.
-          V=$(sed -n 's/^project(DIAspeXtractor VERSION \([0-9.]*\).*/\1/p' diaspextractor/CMakeLists.txt)
-          grep -q "^Version: $V" help.txt \
+          V=$(sed -n 's/^project(DIAspeXtract VERSION \([0-9.]*\).*/\1/p' diaspextract/CMakeLists.txt)
+          VE=${V//./\\.}   # 1.3.0 -> 1\.3\.0: the dots are literal in both greps below
+          grep -q "^Version: $VE" help.txt \
             || { echo "::error::wrong version (want $V, likely OpenMS's)"; cat help.txt; exit 1; }
           # and the OpenMS build alongside it, because a bug report needs both numbers
-          grep -qE "^Version: $V \\(OpenMS .+\\)" help.txt \
+          grep -qE "^Version: $VE \\(OpenMS .+\\)" help.txt \
             || { echo "::error::Version line does not carry the OpenMS build"; cat help.txt; exit 1; }
 
           # OpenMS builds with ENABLE_UPDATE_CHECK=ON by default and TOPPBase then makes a network
@@ -139,13 +145,13 @@ jobs:
           env -i HOME="$HOME" \
                  OPENMS_DATA_PATH="$GITHUB_WORKSPACE/OpenMS/share/OpenMS" \
                  LD_LIBRARY_PATH="$GITHUB_WORKSPACE/OpenMS/build/lib" \
-                 diaspextractor/build/diaspextractor -write_ini "$RUNNER_TEMP/ini.xml"
-          python3 diaspextractor/scripts/check_option_tokens.py --ini "$RUNNER_TEMP/ini.xml"
+                 diaspextract/build/diaspextract -write_ini "$RUNNER_TEMP/ini.xml"
+          python3 diaspextract/scripts/check_option_tokens.py --ini "$RUNNER_TEMP/ini.xml"
 
       - name: End-to-end suite against the freshly built binary
         env:
           OPENMS_DATA_PATH: ${{ github.workspace }}/OpenMS/share/OpenMS
-        run: python3 diaspextractor/test/test_diaspextractor.py diaspextractor/build/diaspextractor
+        run: python3 diaspextract/test/test_diaspextract.py diaspextract/build/diaspextract
 
       # A tool that only builds against a PATCHED development OpenMS has one more way to ship
       # broken: the patches silently not applying. apply_openms_patches.sh is what CI runs above,
@@ -154,7 +160,7 @@ jobs:
         run: |
           set -o pipefail
           fail=0
-          for f in diaspextractor/patches/*.patch; do
+          for f in diaspextract/patches/*.patch; do
             base=$(basename "$f")
             # every patch must at least apply cleanly in reverse -- i.e. it IS applied
             if ! git -C OpenMS apply --reverse --check "$GITHUB_WORKSPACE/$f" 2>/dev/null; then

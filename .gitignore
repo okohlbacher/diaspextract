@@ -14,8 +14,8 @@ bench/run_open.sh
 # Frozen run records: kept locally, not in the repository.
 evidence/
 
-# Review dispatch/stderr logs: the .md reviews are the artefact.
-docs/reviews/**/*.log
+# Review dispatch/stderr logs under docs/: the .md reviews are the artefact.
+docs/**/*.log
 
 # Review inputs that quote the sample registry: they stay local. No tracked file names a raw
 # acquisition path.

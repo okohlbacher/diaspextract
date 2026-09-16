@@ -1,5 +1,5 @@
 #!/bin/bash
-# Apply DIAspeXtractor's OpenMS patches to an OpenMS source tree and install the shared calibration header.
+# Apply DIAspeXtract's OpenMS patches to an OpenMS source tree and install the shared calibration header.
 #
 # WITHOUT the calibration and MassTrace patches the tool does not build; without the EPD patch it builds and runs, but the Bruker .d reader falls back to a two-point
 # linear-in-sqrt TOF->m/z chord that is -5..-11 ppm biased on the files we measured -- which costs
@@ -36,5 +36,5 @@ for p in patches/*.patch; do
     echo "FAILED to apply $p -- the tree may be a different OpenMS version" >&2; exit 1
   fi
 done
-echo "done. Rebuild OpenMS (the patches change its headers and libOpenMS), then build diaspextractor and verify the run log says:"
+echo "done. Rebuild OpenMS (the patches change its headers and libOpenMS), then build diaspextract and verify the run log says:"
 echo "  TOF m/z calibration: TDF MzCalibration table model (exact, license-free)"

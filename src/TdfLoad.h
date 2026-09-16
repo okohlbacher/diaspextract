@@ -13,7 +13,7 @@
 #include <string>
 #include <vector>
 
-namespace diaspextractor
+namespace diaspextract
 {
 // ---------------------------------------------------------------------------------------------
 // sqlite3 directly, not SQLiteCpp: SQLiteCpp is an OpenMS in-tree extern absent from an installed OpenMS,
@@ -279,4 +279,4 @@ inline bool loadTdfDnoise(const std::string& tdf, TdfDnoiseInputs& out, std::str
   if (out.frames.size() < 2) { why = "no Frames rows"; return false; }
   return true;
 }
-} // namespace diaspextractor
+} // namespace diaspextract

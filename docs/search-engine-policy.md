@@ -21,7 +21,7 @@ Sage never ordered two configurations differently from MSFragger.
   ideas cheaply.
 * **Every status refresh → run BOTH**, and refresh the recorded
   baseline from that pair — the whole status table, not just the changed arm.
-* **Never quote a Sage-only ratio as a headline.** MSFragger puts DIAspeXtractor/the reference implementation **6.4
+* **Never quote a Sage-only ratio as a headline.** MSFragger puts DIAspeXtract/the reference implementation **6.4
   points lower** on all three samples. Sage systematically flatters us.
 
 ## Why the rank agreement is not sufficient on its own
@@ -46,6 +46,6 @@ Documented asymmetry, not corrected: **no rescoring is applied to either side**,
 Sage on absolute counts. Adding Percolator to MSFragger alone would reintroduce the confound this
 design removes; adding it to both is the correct fix and is not done.
 
-Operational note: **MSFragger cannot read DIAspeXtractor mzML** without
+Operational note: **MSFragger cannot read DIAspeXtract mzML** without
 `bench/fix_mzml_cvparams.py` — OpenMS writes valueless cvParams, which is legal mzML but crashes
 batmass-io.

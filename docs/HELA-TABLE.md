@@ -13,7 +13,7 @@ Sage column is from the selected-ion-patched pass (see docs/BASELINE.md).
 Not re-measured at the v2.0.0 defaults (min_charge 1 + mobility veto); the table script is not part
 of this repository.
 
-| scheme | load | run | DIAspeXtractor spectra | SpeX wall | SpeX RSS | ref wall | ref RSS | Sage SpeX | Sage ref | MSFragger SpeX | MSFragger ref |
+| scheme | load | run | DIAspeXtract spectra | SpeX wall | SpeX RSS | ref wall | ref RSS | Sage SpeX | Sage ref | MSFragger SpeX | MSFragger ref |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | 2019 25pc | 100ng | 31 | 1,182,808 | 46:45.89 | 113.5 | 5:47.54 | 174.4 | 18,540 | 13,724 | 14,675 | 15,871 |
 | 2019 25pc | 100ng | 32 | 1,109,772 | 32:49.31 | 106.6 | 5:35.56 | 167.7 | 17,953 | 13,186 | 13,982 | 15,526 |

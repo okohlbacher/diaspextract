@@ -1,4 +1,4 @@
-// Copyright (c) 2026, DIAspeXtractor authors. BSD-3-Clause.
+// Copyright (c) 2026, DIAspeXtract authors. BSD-3-Clause.
 //
 // PORTED CODE: this file is a C++ port of the default MS1 path of dnoise v0.1.0
 //   Garrett, Diedrich & Yates III, bioRxiv 2026.08.27.747603; github.com/pgarrett-scripts/dnoise,
@@ -333,7 +333,7 @@ inline GateBuild buildMs1WindowGate(const RunMeta& meta, const std::vector<Windo
 }
 
 /// [dnoise] Point recovery. The Bruker loader delivers m/z, a float32 1/K0 and a corrected intensity, not the (scan, TOF
-/// bin, raw count) dnoise filters, so the tool (DnoiseRun in diaspextractor.cpp) inverts all three per point and refuses the
+/// bin, raw count) dnoise filters, so the tool (DnoiseRun in diaspextract.cpp) inverts all three per point and refuses the
 /// run on anything that does not recover exactly. The arithmetic lives here -- dependency-free, contraction off, pinned by
 /// tests/test_dnoise_ms1.cpp against the loader's forward maths on both benchmark files' metadata -- and the caller turns a
 /// Refusal into its message.

@@ -24,6 +24,6 @@ bench/semantic_digest.py before.mzML after.mzML
 
 ## Checks
 
-- [ ] `python3 test/test_diaspextractor.py <binary>` passes
+- [ ] `python3 test/test_diaspextract.py <binary>` passes
 - [ ] A run with only `-in`, `-out` and `-threads` still reproduces the benchmarked configuration
 - [ ] No acquisition or specimen identifiers added to tracked files

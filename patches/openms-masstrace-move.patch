@@ -1,10 +1,10 @@
-# DIAspeXtractor: give OpenMS MassTrace move operations.
+# DIAspeXtract: give OpenMS MassTrace move operations.
 #
 # MassTrace declares a defaulted destructor, copy constructor and copy assignment, which suppresses
 # the implicit move operations: every std::move of a MassTrace -- in MassTraceDetection's and
-# ElutionPeakDetection's own vector growth and in DIAspeXtractor's band/split gathering -- was a deep
+# ElutionPeakDetection's own vector growth and in DIAspeXtract's band/split gathering -- was a deep
 # copy of trace_peaks_ (24 B/point) and smoothed_intensities_ (8 B/point). Two defaulted moves make
-# those transfers; the values are bitwise the same, so the output is identical. DIAspeXtractor
+# those transfers; the values are bitwise the same, so the output is identical. DIAspeXtract
 # static_asserts std::is_nothrow_move_constructible<MassTrace>, so a tree without this patch does
 # not build the tool.
 #
@@ -16,7 +16,7 @@
      /// Assignment operator
      MassTrace & operator=(const MassTrace &) = default;
  
-+    /// Move operations (DIAspeXtractor patch). The defaulted destructor and copy operations above
++    /// Move operations (DIAspeXtract patch). The defaulted destructor and copy operations above
 +    /// suppress the implicit moves, so every std::move of a MassTrace was a deep copy of
 +    /// trace_peaks_ and smoothed_intensities_; deduced noexcept, since every member is nothrow-movable.
 +    MassTrace(MassTrace &&) = default;

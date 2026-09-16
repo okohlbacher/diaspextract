@@ -1,9 +1,10 @@
 # dataset D is the decision file
 
-> **Naming.** The tool was renamed DIAspeXtractor on 2026-09-11, and this record calls it that in prose throughout.
-> Commands, variables and paths quoted from earlier runs keep the names they ran under: SpeXtractor (speXtract before
-> 2026-09-06), binary `spextractor` (earlier `spextract`), and `SPEXTRACTOR_*` variables, now `DIASPEXTRACTOR_*`.
-> CHANGELOG.md maps the old names to the new ones.
+> **Naming.** The tool was renamed DIAspeXtractor on 2026-09-11 and DIAspeXtract on 2026-09-15, and this record calls
+> it DIAspeXtract in prose throughout. Commands, variables and paths quoted from earlier runs keep the names they ran
+> under: SpeXtractor (speXtract before 2026-09-06, DIAspeXtractor from 2026-09-11 to 1.2.1), binary `spextractor`
+> (earlier `spextract`, then `diaspextractor`), and `SPEXTRACTOR_*` / `DIASPEXTRACTOR_*` variables, now
+> `DIASPEXTRACT_*`. CHANGELOG.md maps the old names to the new ones.
 >
 > **Not all of this is reproducible on the shipped binary.** Many measurements below were driven by
 > `SPEXTRACTOR_*` probe environment variables (`FRAG_DUMP`, `WINDOW_FILE`, `PRECURSOR_LIST`,
@@ -173,8 +174,8 @@ PSMs by precursor coordinate ACROSS RT (charge + expmass 10 ppm + IM 0.01, singl
 **The multiple-testing-burden hypothesis is REFUTED.** Every arm's FDR CI sits at ~0.6-1.3%: collapse
 removes true AND entrapment PSMs PROPORTIONALLY, so the FDR does not improve -- peptides are simply
 lost. Emitting fewer spectra does NOT buy open-search sensitivity.
-**It is INTRINSIC, not a DIAspeXtractor defect:** the reference implementation collapses the same way (-24% at top10, -54% at
-apex) and BOTH tools reduce to the SAME ~87k precursor features (spx 86,842 / dt 87,112) -- DIAspeXtractor
+**It is INTRINSIC, not a DIAspeXtract defect:** the reference implementation collapses the same way (-24% at top10, -54% at
+apex) and BOTH tools reduce to the SAME ~87k precursor features (spx 86,842 / dt 87,112) -- DIAspeXtract
 just emits 1.33x more spectra per feature (6.43 vs 4.84). The across-cycle multiplicity is INDEPENDENT
 EVIDENCE (each cycle = a different noise realisation + co-isolation mixture, another shot at a different
 co-eluting peptide), not redundancy. Consistent with the long-standing "across-cycle spread 2.66 is
@@ -249,7 +250,7 @@ Unit = (peptide, delta-bin); classes scored separately: unmod (|d|<=8 mDa), near
 mass-error tail, NOT a mod), artifact (iso lattice +-k*1.00335, k=1..9), known (curated Unimod list),
 other (off-lattice, per-BIN FDR walks for top bins -- pooled class FDR let junk bins ride; the spx
 -485..-499 Da window-edge wall at ~36% raw entrap collapses to ~30-80 @1% under per-bin walks).
-| class @1% corrected FDR | DIAspeXtractor | the reference implementation | ratio |
+| class @1% corrected FDR | DIAspeXtract | the reference implementation | ratio |
 |---|---|---|---|
 | unmodified | 4,885 | 7,015 | 70% |
 | known-PTM (the raison-d'etre number) | 2,692 | 3,092 | **87%** |
@@ -298,7 +299,7 @@ bootstrap CIs, min-evidence rule (per-name @1% only when accepted e>=10), proven
 (1) 70.1% of spx nearzero peptides ARE dt's unmod peptides; (2) 89.4% same-scan concordance with our
 OWN closed search (same scan -> same peptide; 0.7% different -> chimeric explanation dead);
 (3) deltas 93.8% negative, median -16.2 mDa, slope -18.3 ppm vs calcmass (dt control ~symmetric).
-=> DIAspeXtractor's reported precursor masses carry a SYSTEMATIC ~-18 ppm CALIBRATION BIAS introduced by
+=> DIAspeXtract's reported precursor masses carry a SYSTEMATIC ~-18 ppm CALIBRATION BIAS introduced by
 our pipeline (same raw data as dt). Fixable (per-run linear recalibration of reported mono m/z);
 distinct from the old falsified "mass recalibration" lever (different target, corrupt metric).
 Scheduled as its own arm AFTER step 02 (do not confound the pre-registered arm).
@@ -310,12 +311,12 @@ sequence-level and is within 2% of 12,752 — unit mismatch closed, ratios now l
 **Step-01 bottom line:** the old "89% on open search" dissolves. At peptide level we are at ~parity
 on unmodified; known-PTM scale is comparable (ambiguity-limited both ways); BOTH tools' open-search
 delta dimension is dominated by non-PTM structure (lattice + integer-Da junk = 5-9x the legitimate
-classes) — a tool-CLASS finding worth publishing; and DIAspeXtractor's one distinctive open-search defect
+classes) — a tool-CLASS finding worth publishing; and DIAspeXtract's one distinctive open-search defect
 is the -18 ppm mass bias (fixable), vs the reference implementation's up-ladder envelope artifacts. Step 02 (emission
 arm) runs AS REGISTERED with a nearzero-stratified secondary readout, scored under this v3 metric.
 
 ## THE -8 ppm MASS BIAS: mechanism found + fixed (2026-09-01, follows the step-01 nearzero finding)
-**Every DIAspeXtractor-reported m/z to date carries a systematic, m/z-dependent -5..-11 ppm error**
+**Every DIAspeXtract-reported m/z to date carries a systematic, m/z-dependent -5..-11 ppm error**
 (median -8.3 ppm on identified precursors; dt control -1.1 ppm on the same raw data).
 **Mechanism (proven by direct comparison against Bruker's timsdata library via ctypes):** the loader
 (BrukerTimsFile -> opentims++) converts TOF->m/z with `OpenSourceTof2MzConverter (linear-in-sqrt)` --
@@ -373,7 +374,7 @@ step over-claimed in four ways, now corrected:
 2. **12,128 = provisional dataset D/vendor-SDK regression oracle, NOT a validated reference** until: cp0
    ablation (running), the IM-isolation arm, and dataset A/dataset B re-validation under vendor-cal.
 3. **"Leads the reference implementation" is not citable.** Maximum defensible wording: "On dataset D, using Sage and
-   the vendor-SDK calibration configuration, DIAspeXtractor yielded 5.3% more closed-search peptides; under
+   the vendor-SDK calibration configuration, DIAspeXtract yielded 5.3% more closed-search peptides; under
    MSFragger it yielded 17.7% fewer." Per-1k-spectra efficiency: spx 13.2 vs dt 16.4 (dt +25%) -- the
    emission column stays in any public row. MSFragger flatness is UNINFORMATIVE (its default
    calibrate_mass auto-corrects input bias), not evidence against the fix.
@@ -417,12 +418,12 @@ head-to-head running to test whether part of it is instrument/per-file rather th
 
 ### FIRST 3-FILE HEAD-TO-HEAD vs the reference implementation (Sage closed, corrected calibration, 2026-09-01)
 the reference implementation had ONLY ever been measured on dataset D; dataset A/dataset B references created here under identical config.
-| file | DIAspeXtractor (table model) | the reference implementation | ratio | our ppm | dt ppm |
+| file | DIAspeXtract (table model) | the reference implementation | ratio | our ppm | dt ppm |
 |---|---|---|---|---|---|
 | dataset D | **11,976** | 11,517 | **104.0%** | +1.49 | -1.37 |
 | dataset A | **10,333** | 10,242 | **100.9%** | +3.19 | +0.27 |
 | dataset B | **9,891**  |  8,948 | **110.5%** | +2.29 | -0.60 |
-**DIAspeXtractor reaches 100.9-110.5% of the reference implementation on closed Sage across the three files** -- no vendor
+**DIAspeXtract reaches 100.9-110.5% of the reference implementation on closed Sage across the three files** -- no vendor
 library, open BSD path. STATISTICALLY (n=3 paired): mean 105.1%, 95% CI [93.0, 117.3] = consistent
 with PARITY, not an advantage; the earlier phrasing "matches or exceeds on ALL THREE files" was
 over-claiming on dataset A's +91. CORRECTION: the "ours 1.26% [1.00-1.51]" entrapment figure
@@ -542,7 +543,7 @@ FragPipe 24.0 headless, Basic-Search (MSFragger 25 ppm, our human_decoy FASTA) -
 (sequential, picked, 1% peptide), MSBooster OFF for both (it aborts on our pepXML, see above):
 | dataset D arm | peptides @1% | PSMs @1% | PSMs / peptide | ratio spx/dt |
 |---|---|---|---|---|
-| DIAspeXtractor apex | 13,211 | 113,685 | 8.6 | — |
+| DIAspeXtract apex | 13,211 | 113,685 | 8.6 | — |
 | the reference implementation | 15,947 | 31,700 | 2.0 | **82.8%** |
 | (raw-hyperscore walk, for reference) | 11,927 vs 13,932 | | | 85.6% |
 | (the reference implementation + MSBooster RT+spectra) | 18,670 | 37,086 | 2.0 | ours unavailable |
@@ -1178,14 +1179,14 @@ What it says, in order of weight:
    five schemes; the engine disagreement is therefore NOT "natural variance" here -- MSFragger
    consistently gets ~1.4-1.9x more out of the reference spectra than out of ours, which points at
    spectrum CONTENT (fragment completeness per spectrum), the same conclusion as content candidate 2.
-2. **Load dependence.** At 10 ng DIAspeXtractor loses on both engines and both schemes (py3 10 ng: Sage
+2. **Load dependence.** At 10 ng DIAspeXtract loses on both engines and both schemes (py3 10 ng: Sage
    4.8k vs 9.2k, MSFragger 2.7k vs 8.1k); at 50-100 ng on 25pc it wins with Sage by 21%. The
    isotope-support gate and the z>=2 floor, both wins in-house at 200 ng, are the obvious suspects
    at low load: on file 22 the gate dropped 2.09 M guessed precursors and kept 466 k.
 3. **Emission** is 1.7-2.6x the reference's spectrum count at 50-100 ng 2019 (1.1-1.2 M vs the
    reference's ~425 k precursors), consistent with the over-generation finding; at 10 ng py3 it is
    160 k vs 63 k.
-4. **Cost.** DIAspeXtractor runs in 1/3 to 1/6 of the reference's RSS on every file (2019 100 ng:
+4. **Cost.** DIAspeXtract runs in 1/3 to 1/6 of the reference's RSS on every file (2019 100 ng:
    66-114 GB vs 168-197 GB; 10 ng: 27 GB vs 99-147 GB) and is faster on the 2020 files and py3;
    the 25pc 100 ng walls of 33-47 min are from a node running three jobs (uncontended: 13:38).
 5. **Reference-side Sage replicates disagree by up to 35%** (2732: 10,394 vs 15,939/15,140; 2738:
@@ -1211,7 +1212,7 @@ extractors and both engines overnight on three nodes (16 h wall, ~30-38 min per 
 Driver-log numbers, Sage peptides at 1% (the MSFragger column is PSM rows until the peptide-level
 table lands -- the peptide-level table script is running):
 
-| | reference | DIAspeXtractor |
+| | reference | DIAspeXtract |
 |---|---|---|
 | Sage peptides, 16 runs | 293,065 | **318,252** (ratio 1.086) |
 | per run, mean | 18,317 | 19,891 |
@@ -1219,7 +1220,7 @@ table lands -- the peptide-level table script is running):
 | wall per run | 18-30 min | 26-38 min |
 | RSS per run | 238-307 GB | 204-287 GB |
 
-DIAspeXtractor is ahead on Sage on 16 of 16 runs (smallest margin 001: 15,468 vs 14,633; largest
+DIAspeXtract is ahead on Sage on 16 of 16 runs (smallest margin 001: 15,468 vs 14,633; largest
 010: 20,352 vs 16,308). The paper's headline is proteins: FragPipe + the reference implementation quantified an
 average of **9,296 proteins per run** (Spectronaut directDIA 8,997, DIA-NN library-free 9,520; all
 with quantification/MBR, tryptic). Our comparable figure is Sage protein groups at 1% protein q per
@@ -1231,7 +1232,7 @@ run, pending in the table; identified-only, so expect it below a quantified-with
 groups at 1% protein q ahead on 16/16 (per run 3.7-6.0k vs 3.5-5.8k); MSFragger peptides
 **334,607 vs 392,897 (0.85)**, behind on 16/16 -- the in-house MSFragger ratio (0.85-0.90)
 reproduces exactly on the paper's own data, so the engine split is a property of our spectra, not of
-a dataset. Runtime on these 130-min files: DIAspeXtractor 26-38 min vs 18-30 min (median 1.4x slower),
+a dataset. Runtime on these 130-min files: DIAspeXtract 26-38 min vs 18-30 min (median 1.4x slower),
 RSS 204-287 vs 238-307 GB (0.9x). The paper's 9,296 proteins/run is a quantified-with-MBR FragPipe
 figure over the cohort and is not the same statistic as identified protein groups at 1% in one run.
 
@@ -1813,14 +1814,14 @@ the error that produced one withdrawn claim -- so it was re-measured.
 | | rep 1 | rep 2 | mean |
 |---|---|---|---|
 | reference implementation | 21:12.24 / 357.7 GB | 20:41.46 / 323.4 GB | 20:56.9 / 340.6 GB |
-| **DIAspeXtractor (min_charge 2)** | 11:24.97 / 179.1 GB | 10:36.92 / 178.5 GB | **11:00.9 / 178.8 GB** |
+| **DIAspeXtract (min_charge 2)** | 11:24.97 / 179.1 GB | 10:36.92 / 178.5 GB | **11:00.9 / 178.8 GB** |
 
 **1.90x faster at 0.53x the peak memory.** For context this file was 1.46x SLOWER than the reference
 before this week's work (31:26.98 against 21:28.00).
 
 One caveat on the memory ratio: the reference is a JVM run with `-Xmx400G`, so its peak RSS partly
 reflects what it was allowed rather than what it needs -- the same flags gave 268.2 GB in the earlier
-campaign. DIAspeXtractor's 179 GB is a genuine requirement. The honest statement is "roughly half, and
+campaign. DIAspeXtract's 179 GB is a genuine requirement. The honest statement is "roughly half, and
 not sensitive to a heap flag".
 
 
@@ -1945,7 +1946,7 @@ to ~90x because there is more scoring work to fill its tail with.
 
 ### Head to head at the new default (2026-09-08, one node, both tools 100 threads)
 
-| | reference implementation | DIAspeXtractor | ratio |
+| | reference implementation | DIAspeXtract | ratio |
 |---|---|---|---|
 | wall | 21:12.24 / 20:41.46 (mean 20:56.9) | **12:42.21** | **0.61x** |
 | peak RSS | 357.7 / 323.4 GB (mean 340.6) | **187.9 GB** | **0.55x** |
@@ -3102,9 +3103,9 @@ science knob. Details: internal review record.
 | MS2 only | −5.4% | −13.0% | 32.13 (10.51) | −10.0% | −20.9% | 67.80 (26.97) |
 | MS1 + MS2 | −7.2% | −15.3% | 8.13 (10.29) | −7.8% | −15.3% | 19.87 (26.32) |
 
-Peak is DIAspeXtractor's tiled peak, with dnoise's own run in brackets; the pipeline peak is the larger of the
+Peak is DIAspeXtract's tiled peak, with dnoise's own run in brackets; the pipeline peak is the larger of the
 two. TNBC's MS1-only and MS1 + MS2 arms ran on node 3, the rest on node 2, each against a control on its own
-node. The no-op reproduces both pins, so dnoise's rewrite changes nothing DIAspeXtractor reads. Entrapment
+node. The no-op reproduces both pins, so dnoise's rewrite changes nothing DIAspeXtract reads. Entrapment
 never rises above the control's 95% interval: D's arms stay inside it (at most +0.16 points), and TNBC's
 all fall just below it (0.92-0.93% against 1.09%).
 
@@ -3124,7 +3125,7 @@ As a preprocessor, MS1 only fails the S gate on D. The user decided to run it in
 `src/DnoiseMs1.h` ports dnoise v0.1.0's default MS1 path exactly. The tool recovers each MS1 point's flight-time
 index, scan index and raw intensity from the loader's values and filters before picking (`dnoise:ms1`, default
 true). The port reproduces dnoise's keep masks with 0 differing points on 28 D and 24 TNBC 009 frames. The
-whole-file gates reproduce DIAspeXtractor run on dnoise's own filtered file:
+whole-file gates reproduce DIAspeXtract run on dnoise's own filtered file:
 
 | file | arm (one cell per tile, 100 threads) | digest | kept MS1 points | peak | wall |
 |---|---|---|---:|---:|---:|

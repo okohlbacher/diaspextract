@@ -1,13 +1,20 @@
 name: tests
 
-on: [push, pull_request]
+# Every push and pull request, plus a manual run. The same file is exported to the public repository
+# unchanged, so it decides by repository what to run: the Linux job always runs; the macOS and Windows
+# job runs on the public repository (.../diaspextract, whose Actions minutes are free) and on a manual
+# dispatch anywhere. The private development repository (.../diaspextract-dev) pays for every minute of
+# the macOS and Windows runners, and the release gate is the public repository's CI on the exported code,
+# so on push the private repository runs Linux only. The two jobs' step lists are identical on purpose
+# (Actions has no YAML anchors): a change to one belongs in both.
+on: [push, pull_request, workflow_dispatch]
 
 jobs:
   # Everything here runs WITHOUT OpenMS, so it can run on every platform on every push.
   # The calibration model is the code that actually ships: it is a self-contained header, and
   # compiling it under GCC, AppleClang and MSVC is what catches the portability bugs a
   # single-platform build never sees.
-  portability:
+  linux:
     name: ${{ matrix.os }} (${{ matrix.cc }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -16,6 +23,103 @@ jobs:
         include:
           - { os: ubuntu-latest,  cc: gcc }
           - { os: ubuntu-22.04,   cc: gcc-11 }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Configure and build the OpenMS-independent targets
+        run: cmake -B build -DDIASPEXTRACT_TESTS_ONLY=ON -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: C++ golden tests -- calibration model and dnoise MS1 port (the C++ that ships)
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      # DnoiseMs1.h refuses to compile under value-changing floating-point flags (its #error); assert it does, for
+      # every flag whose predefined macro this compiler sets (a '+' joins flags that only act together). GCC sets
+      # __RECIPROCAL_MATH__, __ASSOCIATIVE_MATH__, __NO_SIGNED_ZEROS__ for their flags. clang sets none of these,
+      # and __ARM_FP_FAST for -funsafe-math-optimizations and -ffp-model=fast only on arm64, so its list is what
+      # the guard can see there. The compile without a flag comes first, so a refusal below is the flag's.
+      - name: DnoiseMs1.h refuses unsafe floating-point flags
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          case "${{ matrix.cc }}" in
+            gcc*)             FLAGS="-ffast-math -Ofast -ffinite-math-only -freciprocal-math -funsafe-math-optimizations -fno-signed-zeros -fassociative-math+-fno-signed-zeros+-fno-trapping-math" ;;
+            appleclang-arm64) FLAGS="-ffast-math -Ofast -ffinite-math-only -funsafe-math-optimizations -ffp-model=fast" ;;
+            *) echo "::error::no unsafe-flag list for ${{ matrix.cc }}"; exit 1 ;;
+          esac
+          G="$RUNNER_TEMP/guard.cpp"
+          printf '#include "DnoiseMs1.h"\n' > "$G"
+          c++ -std=c++20 -fsyntax-only -I src "$G" || { echo "::error::DnoiseMs1.h does not compile on its own"; exit 1; }
+          # The #error can only see a flag the compiler announces through a predefined macro, and compilers
+          # differ: GCC 11 announces none of -freciprocal-math, -funsafe-math-optimizations,
+          # -fno-signed-zeros or -fassociative-math, GCC 16 announces all four, clang announces neither
+          # of the first three. Assert refusal exactly for the flags THIS compiler announces, and print
+          # the rest as unprotected rather than pretending the guard covers them.
+          MACROS='__FAST_MATH__|__FINITE_MATH_ONLY__|_M_FP_FAST|__RECIPROCAL_MATH__|__ASSOCIATIVE_MATH__|__NO_SIGNED_ZEROS__|__ARM_FP_FAST|__FLT_EVAL_METHOD__'
+          guard_macros() { c++ -std=c++20 $1 -dM -E -x c++ /dev/null | grep -E "^#define ($MACROS)" | sort; }
+          # against the no-flag baseline, because clang defines __FLT_EVAL_METHOD__ 0 unconditionally and a
+          # guard macro set to 0 does not trip the #error
+          guard_macros "" > "$RUNNER_TEMP/base.txt"
+          fail=0
+          for f in $FLAGS; do
+            # shellcheck disable=SC2086  # ${f//+/ } splits a '+'-joined combination into its flags
+            guard_macros "${f//+/ }" > "$RUNNER_TEMP/with.txt"
+            announced=$(comm -13 "$RUNNER_TEMP/base.txt" "$RUNNER_TEMP/with.txt" | grep -Ev '^#define (__FLT_EVAL_METHOD__|__FINITE_MATH_ONLY__) 0$' | grep -c . || true)
+            if c++ -std=c++20 -fsyntax-only ${f//+/ } -I src "$G" 2> "$G.err"; then
+              if [ "$announced" -eq 0 ]; then
+                echo "  unprotected: $f is not announced by this compiler, so no #error can catch it"
+                continue
+              fi
+              echo "::error::DnoiseMs1.h compiled under $f although the compiler announces it"; fail=1
+            elif grep -Eq 'DnoiseMs1\.h:[0-9]+:[0-9]+: (fatal )?error:' "$G.err" && grep -q '#error' "$G.err"; then
+              echo "  ok: $f refused by the #error"
+            else
+              cat "$G.err"; echo "::error::$f broke the compile, but not through the DnoiseMs1.h #error"; fail=1
+            fi
+          done
+          exit $fail
+
+      # scripts/sync_cluster.sh's deploy transaction (stage, lock, unit tests from the stage, rollback, fail-closed
+      # provenance) against a fake node; it never contacts a host. One leg is enough: it tests a bash script.
+      # Skipped where scripts/sync_cluster.sh is absent (the public repository).
+      - name: Deploy transaction harness (scripts/sync_cluster.sh against a fake node)
+        if: matrix.os == 'ubuntu-latest' && hashFiles('scripts/sync_cluster.sh') != ''
+        run: bash tests/test_sync_cluster_txn.sh
+
+      # An option removed from the tool but left in a shipped example is not a wart: the tool refuses
+      # an unknown option and aborts before doing any work, so the example is dead. 1.2.0 shipped a
+      # release commit that edited bench/run_open.sh.example without noticing it still passed
+      # -assembly:open_search_safe, removed in the same release. This reads the registrations out of
+      # the source, so it needs no OpenMS; build.yml runs the same check against the binary's own
+      # -write_ini inventory.
+      - name: Option tokens in the shipped examples and README are registered options
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/check_option_tokens.py
+
+      - name: Calibration golden test (Python reference implementation)
+        run: python3 tests/test_calibration.py
+
+      - name: Entrapment estimator self-check
+        run: python3 tests/test_entrapment.py
+
+      - name: Analysis and test scripts parse cleanly
+        shell: bash
+        run: python3 -m py_compile $(git ls-files '*.py')
+
+  # The paid legs. Same steps as above; see the header comment for where this job runs.
+  cross-platform:
+    name: ${{ matrix.os }} (${{ matrix.cc }})
+    if: github.event_name == 'workflow_dispatch' || endsWith(github.repository, '/diaspextract')
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
           - { os: macos-latest,   cc: appleclang-arm64 }
           - { os: windows-latest, cc: msvc }
     steps:
@@ -25,7 +129,7 @@ jobs:
           python-version: '3.12'
 
       - name: Configure and build the OpenMS-independent targets
-        run: cmake -B build -DDIASPEXTRACTOR_TESTS_ONLY=ON -DCMAKE_BUILD_TYPE=Release
+        run: cmake -B build -DDIASPEXTRACT_TESTS_ONLY=ON -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         run: cmake --build build --config Release

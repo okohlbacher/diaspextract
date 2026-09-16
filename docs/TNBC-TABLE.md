@@ -10,7 +10,7 @@ These walls and RSS predate the 2026-09-06/07 memory and speed work: run 009 her
 268.0 GB / Sage 23,063; the same file at the shipped v2.0.0 defaults is 12:42.21 / 187.9 GB / Sage
 27,855 pooled (see docs/BASELINE.md). Not re-measured at those defaults.
 
-| scheme | load | run | DIAspeXtractor spectra | SpeX wall | SpeX RSS | ref wall | ref RSS | Sage SpeX | Sage ref | Sage prot SpeX | Sage prot ref | MSFragger SpeX | MSFragger ref |
+| scheme | load | run | DIAspeXtract spectra | SpeX wall | SpeX RSS | ref wall | ref RSS | Sage SpeX | Sage ref | Sage prot SpeX | Sage prot ref | MSFragger SpeX | MSFragger ref |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | TNBC | - | 001 | 2,132,877 | 26:12.08 | 229.9 | 18:17.52 | 295.2 | 15,622 | 14,764 | 4,083 | 3,802 | 16,462 | 19,516 |
 | TNBC | - | 002 | 2,362,980 | 31:25.74 | 274.1 | 22:34.86 | 283.1 | 22,157 | 21,588 | 5,418 | 5,123 | 23,604 | 26,947 |

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Per-spectrum diff of two DIAspeXtractor mzML outputs, aligned by (RT, precursor m/z, charge).
+"""Per-spectrum diff of two DIAspeXtract mzML outputs, aligned by (RT, precursor m/z, charge).
 
     mzml_specdiff.py A.mzML B.mzML [--tile SEC]
 

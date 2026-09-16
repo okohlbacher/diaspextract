@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarise a DIASPEXTRACTOR_LEDGER trace: which structure holds the memory, when, and for how long.
+"""Summarise a DIASPEXTRACT_LEDGER trace: which structure holds the memory, when, and for how long.
 
     ledger_report.py <ledger.tsv> [more.tsv ...]
 

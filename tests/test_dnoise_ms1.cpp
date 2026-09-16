@@ -666,7 +666,7 @@ static void testRandomAgainstReference(std::size_t& frames, std::size_t& points,
 struct RecoverFile
 {
   const char* name;
-  diaspextractor::TdfMzCalibration cal;
+  diaspextract::TdfMzCalibration cal;
   double t1;                        ///< frame 1's T1
   long n_bins;                      ///< DigitizerNumSamples
   std::array<double, 10> tims;      ///< TimsCalibration C0..C9

@@ -14,7 +14,7 @@
 #include <vector>
 
 namespace dn = spx::dnoise;
-using diaspextractor::TdfDnoiseInputs;
+using diaspextract::TdfDnoiseInputs;
 
 static int g_fail = 0;
 #define CHECK(cond, ...) do { if (!(cond)) { std::fprintf(stderr, "FAIL line %d: ", __LINE__); std::fprintf(stderr, __VA_ARGS__); std::fputc('\n', stderr); ++g_fail; } } while (0)
@@ -122,7 +122,7 @@ static void corruptMiddleLeaf(const std::string& path, const char* table)
 
 static bool has(const std::string& s, const char* part) { return s.find(part) != std::string::npos; }
 
-static bool loads(const std::string& path, TdfDnoiseInputs& in, std::string& why) { return diaspextractor::loadTdfDnoise(path, in, why); }
+static bool loads(const std::string& path, TdfDnoiseInputs& in, std::string& why) { return diaspextract::loadTdfDnoise(path, in, why); }
 
 /// loadTdfDnoise must refuse @p sql's tdf with a reason that contains @p part.
 static void refused(const char* name, const std::string& sql, const char* part)
@@ -205,7 +205,7 @@ static void testFrames()
   refused("modeltype", dShaped() + "UPDATE TimsCalibration SET ModelType = 1;", "ModelType 1");
   {
     std::string w;
-    CHECK(!diaspextractor::loadTdfDnoise((g_dir / "does_not_exist.tdf").string(), in, w) && has(w, "cannot open"), "a missing file: %s", w.c_str());
+    CHECK(!diaspextract::loadTdfDnoise((g_dir / "does_not_exist.tdf").string(), in, w) && has(w, "cannot open"), "a missing file: %s", w.c_str());
   }
 
   // a scan table per TimsCalibration row over its own MS1 frames' scans: MS1 frames on a TNBC-shaped row with 918 scans,
@@ -229,16 +229,16 @@ static void testFrames()
   // corruption in the middle of Frames: refused at setup, and by the calibration read (whose T1 loop used to stop early)
   const std::string ok3000 = makeTdf("frames3000.tdf", dShaped(3000));
   {
-    diaspextractor::TdfMzCalibration cal;
+    diaspextract::TdfMzCalibration cal;
     std::vector<double> t1;
     std::string w;
     CHECK(loads(ok3000, in, why) && in.frames.size() == 3001, "frames3000: %s", why.c_str());
-    CHECK(diaspextractor::loadTdfCalibration(ok3000, cal, t1, w) && t1.size() == 3001 && t1[3000] == 25.727120813485598 + 3000 * 1e-6 && cal.C1 == 155279.13067653627,
+    CHECK(diaspextract::loadTdfCalibration(ok3000, cal, t1, w) && t1.size() == 3001 && t1[3000] == 25.727120813485598 + 3000 * 1e-6 && cal.C1 == 155279.13067653627,
           "loadTdfCalibration frames3000: %s (%zu T1)", w.c_str(), t1.size());
     const std::string bad = makeTdf("framescorrupt3000.tdf", dShaped(3000));
     corruptMiddleLeaf(bad, "Frames");
     CHECK(!loads(bad, in, why) && has(why, "malformed"), "a corrupt Frames leaf: %s", why.c_str());
-    CHECK(!diaspextractor::loadTdfCalibration(bad, cal, t1, w) && has(w, "malformed"), "loadTdfCalibration, a corrupt Frames leaf: %s", w.c_str());
+    CHECK(!diaspextract::loadTdfCalibration(bad, cal, t1, w) && has(w, "malformed"), "loadTdfCalibration, a corrupt Frames leaf: %s", w.c_str());
   }
 }
 
@@ -269,8 +269,8 @@ static void testAccumulationTime()
       CHECK(loads(makeTdf("acc_de.tdf", dShaped() + "UPDATE Frames SET AccumulationTime = '99.953' WHERE Id = 6;"), in, why) &&
               in.frames[6].corr == 100.0 / 99.953 && in.frames[1].corr == 100.0 / 99.958, "under de_DE: %s", why.c_str());
       refused("acc_de_comma", dShaped() + "UPDATE Frames SET AccumulationTime = '99,953' WHERE Id = 6;", "AccumulationTime");
-      diaspextractor::TdfAxisBounds bd;   // the preflight's GlobalMetadata bounds parse in the C locale too
-      CHECK(diaspextractor::loadTdfAxisBounds(makeTdf("bounds_de.tdf", dShaped()), bd, why) && bd.mz_lo == 99.990834 && bd.mz_hi == 1700.0 && bd.n_bins == 634073,
+      diaspextract::TdfAxisBounds bd;   // the preflight's GlobalMetadata bounds parse in the C locale too
+      CHECK(diaspextract::loadTdfAxisBounds(makeTdf("bounds_de.tdf", dShaped()), bd, why) && bd.mz_lo == 99.990834 && bd.mz_hi == 1700.0 && bd.n_bins == 634073,
             "loadTdfAxisBounds under de_DE: %s", why.c_str());
     }
     std::setlocale(LC_NUMERIC, saved.c_str());
@@ -280,20 +280,20 @@ static void testAccumulationTime()
 
 static void testCalibrationAndBounds()
 {
-  diaspextractor::TdfMzCalibration cal;
+  diaspextract::TdfMzCalibration cal;
   std::vector<double> t1;
   std::string why;
   const std::string ok = makeTdf("cal_ok.tdf", dShaped());
-  CHECK(diaspextractor::loadTdfCalibration(ok, cal, t1, why) && t1.size() == 11 && cal.digitizer_timebase == 0.125 && cal.T1_ref == 25.693668980735552,
+  CHECK(diaspextract::loadTdfCalibration(ok, cal, t1, why) && t1.size() == 11 && cal.digitizer_timebase == 0.125 && cal.T1_ref == 25.693668980735552,
         "loadTdfCalibration: %s", why.c_str());
-  CHECK(diaspextractor::loadTdfCalibration(makeTdf("cal_nocol.tdf", dShaped() + keepColumns("Frames", "Id, MsMsType, NumScans, NumPeaks, AccumulationTime, TimsCalibration, T1")), cal, t1, why),
+  CHECK(diaspextract::loadTdfCalibration(makeTdf("cal_nocol.tdf", dShaped() + keepColumns("Frames", "Id, MsMsType, NumScans, NumPeaks, AccumulationTime, TimsCalibration, T1")), cal, t1, why),
         "no Frames.MzCalibration column and one MzCalibration row: %s", why.c_str());
-  CHECK(!diaspextractor::loadTdfCalibration(makeTdf("cal_nocol2.tdf", dShaped() + keepColumns("Frames", "Id, MsMsType, NumScans, NumPeaks, AccumulationTime, TimsCalibration, T1") +
+  CHECK(!diaspextract::loadTdfCalibration(makeTdf("cal_nocol2.tdf", dShaped() + keepColumns("Frames", "Id, MsMsType, NumScans, NumPeaks, AccumulationTime, TimsCalibration, T1") +
                                                  "INSERT INTO MzCalibration SELECT 2, ModelType, DigitizerTimebase, DigitizerDelay, T1, dC1, C0, C1, C2, dC2, C3, C4 FROM MzCalibration;"),
                                          cal, t1, why) && has(why, "need exactly 1"), "no column and two rows: %s", why.c_str());
   // a generated Frames.MzCalibration column (SQLite 3.31+) is the frames' reference like a stored one: PRAGMA table_info skips it
   if (sqlite3_libversion_number() >= 3031000)
-    CHECK(diaspextractor::loadTdfCalibration(makeTdf("cal_generated.tdf", dShaped() +
+    CHECK(diaspextract::loadTdfCalibration(makeTdf("cal_generated.tdf", dShaped() +
                                                    "INSERT INTO MzCalibration SELECT 2, ModelType, DigitizerTimebase, DigitizerDelay, T1, dC1, C0, 2 * C1, C2, dC2, C3, C4 FROM MzCalibration;"
                                                    "ALTER TABLE Frames RENAME TO F0;"
                                                    "CREATE TABLE Frames (Id INTEGER PRIMARY KEY, MsMsType, NumScans, NumPeaks, AccumulationTime, TimsCalibration, T1,"
@@ -301,15 +301,15 @@ static void testCalibrationAndBounds()
                                                    "INSERT INTO Frames SELECT Id, MsMsType, NumScans, NumPeaks, AccumulationTime, TimsCalibration, T1 FROM F0; DROP TABLE F0;"),
                                            cal, t1, why) && cal.C1 == 155279.13067653627 && t1.size() == 11,
           "a generated MzCalibration column and two rows: %s", why.c_str());
-  CHECK(!diaspextractor::loadTdfCalibration(makeTdf("cal_two.tdf", dShaped() + "INSERT INTO MzCalibration SELECT 2, ModelType, DigitizerTimebase, DigitizerDelay, T1, dC1, C0, C1, C2, dC2, C3, C4 FROM MzCalibration;"
+  CHECK(!diaspextract::loadTdfCalibration(makeTdf("cal_two.tdf", dShaped() + "INSERT INTO MzCalibration SELECT 2, ModelType, DigitizerTimebase, DigitizerDelay, T1, dC1, C0, C1, C2, dC2, C3, C4 FROM MzCalibration;"
                                                  "UPDATE Frames SET MzCalibration = 2 WHERE Id = 4;"), cal, t1, why) && has(why, "2 distinct"),
         "frames on two MzCalibration rows: %s", why.c_str());
-  CHECK(!diaspextractor::loadTdfCalibration(makeTdf("cal_notable.tdf", dShaped() + "DROP TABLE MzCalibration;"), cal, t1, why) && has(why, "MzCalibration"),
+  CHECK(!diaspextract::loadTdfCalibration(makeTdf("cal_notable.tdf", dShaped() + "DROP TABLE MzCalibration;"), cal, t1, why) && has(why, "MzCalibration"),
         "no MzCalibration table: %s", why.c_str());
 
-  diaspextractor::TdfAxisBounds bd;
-  CHECK(diaspextractor::loadTdfAxisBounds(ok, bd, why) && bd.n_bins == 634073 && bd.mz_lo == 99.990834 && bd.mz_hi == 1700.0, "loadTdfAxisBounds: %s", why.c_str());
-  CHECK(!diaspextractor::loadTdfAxisBounds(makeTdf("bounds_notable.tdf", dShaped() + "DROP TABLE GlobalMetadata;"), bd, why) && has(why, "GlobalMetadata"),
+  diaspextract::TdfAxisBounds bd;
+  CHECK(diaspextract::loadTdfAxisBounds(ok, bd, why) && bd.n_bins == 634073 && bd.mz_lo == 99.990834 && bd.mz_hi == 1700.0, "loadTdfAxisBounds: %s", why.c_str());
+  CHECK(!diaspextract::loadTdfAxisBounds(makeTdf("bounds_notable.tdf", dShaped() + "DROP TABLE GlobalMetadata;"), bd, why) && has(why, "GlobalMetadata"),
         "no GlobalMetadata: %s", why.c_str());
 }
 

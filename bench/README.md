@@ -65,7 +65,7 @@ is the error class this benchmark exists to eliminate.
 
 ## `joint_bench.py` — the success metric across the three datasets
 
-**3 samples × {the reference implementation, DIAspeXtractor} × {Sage, MSFragger}**, reporting the two numbers the
+**3 samples × {the reference implementation, DIAspeXtract} × {Sage, MSFragger}**, reporting the two numbers the
 project is scored on:
 
 * **PSMs** at ≤1% PSM-level FDR
@@ -84,7 +84,7 @@ For the same reason both engines search **one pre-built target+decoy FASTA** wit
 byte-identical search spaces.
 
 Peptide-level FDR is "picked": best-scoring PSM per distinct sequence, then target-decoy over
-that reduced list. That axis is the point — DIAspeXtractor emits ~4.6 PSMs/peptide against
+that reduced list. That axis is the point — DIAspeXtract emits ~4.6 PSMs/peptide against
 the reference implementation's 1.46, so PSM counts reward redundancy and peptide counts do not. **Both are
 reported so the gap is visible rather than hidden.**
 
@@ -98,7 +98,7 @@ hyperscore is not, which favours Sage on absolute counts. Adding Percolator to M
 would reintroduce the confound this design removes; adding it to *both* is the correct fix and
 is not done here.
 
-**The tool comparison is unaffected** — the reference implementation vs DIAspeXtractor is made *within* an engine, and
+**The tool comparison is unaffected** — the reference implementation vs DIAspeXtract is made *within* an engine, and
 that is the comparison this harness exists for. The engine axis is a secondary readout.
 
 ### Run

@@ -11,7 +11,7 @@ old = """  arrow::Result<std::shared_ptr<arrow::Table>> result =
   }
   return std::move(result).ValueOrDie();
 """
-new = """#if ARROW_VERSION_MAJOR < 24   // DIAspeXtractor cluster build: contrib Arrow 23 has only the out-parameter form
+new = """#if ARROW_VERSION_MAJOR < 24   // DIAspeXtract cluster build: contrib Arrow 23 has only the out-parameter form
   std::shared_ptr<arrow::Table> table;
   arrow::Status st = metadata.reader().ReadTable(&table);
   if (!st.ok()) {

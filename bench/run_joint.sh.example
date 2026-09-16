@@ -1,7 +1,7 @@
 # EXAMPLE driver. Copy without .example and fill in real paths.
 # The working copy is untracked: it names acquisitions and specimens.
 #!/usr/bin/env bash
-# Joint benchmark: 3 samples x {the reference implementation, DIAspeXtractor} x {Sage, MSFragger}
+# Joint benchmark: 3 samples x {the reference implementation, DIAspeXtract} x {Sage, MSFragger}
 # Metrics: FDR-corrected PSMs and FDR-corrected unique peptides, both at 1%, both computed by
 # ONE procedure in joint_bench.py so the engine is the only thing that varies.
 #
@@ -111,9 +111,9 @@ mkdir -p $B/joint
 run_cell reference dataset_A "$DTP/<acquisition-A>"
 run_cell reference dataset_B "$DTP/<acquisition-B>"
 run_cell reference dataset_D "$DTP/<acquisition-D>"
-run_cell diaspextractor dataset_A "$B/out/m_<dataset-A>_treat/pseudo.mzML"
-run_cell diaspextractor dataset_B "$B/out/open_split_count/pseudo.mzML"
-run_cell diaspextractor dataset_D "$B/out/m_<dataset-D>_treat/pseudo.mzML"
+run_cell diaspextract dataset_A "$B/out/m_<dataset-A>_treat/pseudo.mzML"
+run_cell diaspextract dataset_B "$B/out/open_split_count/pseudo.mzML"
+run_cell diaspextract dataset_D "$B/out/m_<dataset-D>_treat/pseudo.mzML"
 
 echo "--- TABLE ---" >> $L
 python3 $B/joint_bench.py collate $J >> $L 2>&1

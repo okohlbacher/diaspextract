@@ -243,7 +243,7 @@ if __name__ == "__main__":
 # * NO RESCORING. Sage's reported score is already discriminant-rescored; MSFragger's hyperscore
 #   is not. Sage is therefore favoured on absolute counts. Adding Percolator to MSFragger alone
 #   would reintroduce the confound this design removes; adding it to both is the correct fix and
-#   is not done here. The TOOL comparison (the reference implementation vs DIAspeXtractor) is unaffected, because it is
+#   is not done here. The TOOL comparison (the reference implementation vs DIAspeXtract) is unaffected, because it is
 #   made WITHIN an engine -- that is the comparison this harness exists for.
 # * Peptide-level FDR is "picked" (best PSM per sequence). Modified forms of one sequence collapse
 #   together; a peptidoform-level count would be larger for both.

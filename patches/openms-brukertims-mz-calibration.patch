@@ -1,4 +1,4 @@
-# DIAspeXtractor: vendor m/z calibration for the Bruker timsTOF reader.
+# DIAspeXtract: vendor m/z calibration for the Bruker timsTOF reader.
 #
 # Without this the reader converts flight time to m/z with a two-point linear-in-sqrt chord that is
 # -5 to -11 ppm biased (m/z dependent), costing roughly 6-11% of closed-search peptide
@@ -27,7 +27,7 @@
        int   ms1_centroid_max_peaks = 100000; ///< Upper bound on centroided peaks per MS1 spectrum. Caps retention at the top-intensity peaks; low-intensity tail is dropped when the limit is hit (a warning is emitted at that point). Sized for aggregated MS1 where frame-stacked grids commonly exceed 200k peaks; per-frame MS1 rarely hits even 10k.
  
        int dia_ms2_n_neighbors = 0;  ///< DIA MS2 frame aggregation: number of adjacent frames on each side (0 = disabled, 1 = 3-frame sum, 2 = 5-frame sum)
-+      /// [DIAspeXtractor] Stream only the DIA MS2 frames whose time lies in [dia_ms2_rt_lo, dia_ms2_rt_hi)
++      /// [DIAspeXtract] Stream only the DIA MS2 frames whose time lies in [dia_ms2_rt_lo, dia_ms2_rt_hi)
 +      /// (half-open, seconds; the defaults select every frame; lo > hi selects none -- an MS1-only
 +      /// pass that still exports the frame table). Frames outside the range are neither decoded nor
 +      /// emitted; everything about a selected frame is unchanged, so a caller that reads the run as
@@ -41,14 +41,14 @@
                            const Config& config);
  
      /// Load entire .d directory into MSExperiment
-+    /// [DIAspeXtractor] Which TOF->m/z calibration the most recent load used:
++    /// [DIAspeXtract] Which TOF->m/z calibration the most recent load used:
 +    /// "tdf_table_modeltype1" | "bruker_sdk" | "legacy_chord_APPROXIMATE" | "unset".
 +    /// Exported from libOpenMS on purpose: a header-inline static would be duplicated across the
 +    /// DSO boundary (OpenMS builds with hidden visibility), so the caller would read its own copy
 +    /// and always see "unset". Covers BOTH the load() and the streaming paths.
 +    static const std::string& lastMzCalibration();
 +
-+    /// [DIAspeXtractor] The DIA frame table of the most recent loadDIAStreaming(): per window group,
++    /// [DIAspeXtract] The DIA frame table of the most recent loadDIAStreaming(): per window group,
 +    /// its MS2 frames (vendor id, time, raw peak count) in the order the streaming loop emits them,
 +    /// and the isolation windows in table order. `time` is the double the emitted spectra carry as
 +    /// RT, so a consumer can freeze every window's frame table from metadata and pad the frames
@@ -83,23 +83,23 @@
      }
    }
  
-+// [DIAspeXtractor table-mz] License-free EXACT TOF->m/z from the TDF MzCalibration table.
-+// The MODEL lives in DIAspeXtractor's own repo (src/TdfMzCalibration.h, BSD-3, copied here by
++// [DIAspeXtract table-mz] License-free EXACT TOF->m/z from the TDF MzCalibration table.
++// The MODEL lives in DIAspeXtract's own repo (src/TdfMzCalibration.h, BSD-3, copied here by
 +// scripts/apply_openms_patches.sh) so the shipped code is the code the C++ unit test exercises.
 +// Fails CLOSED: an unsupported calibration (ModelType != 1, dC2 != 0, multi-row table) throws
-+// rather than silently using the -5..-11 ppm chord. DIASPEXTRACTOR_ALLOW_CHORD_FALLBACK=1 opts back in.
++// rather than silently using the -5..-11 ppm chord. DIASPEXTRACT_ALLOW_CHORD_FALLBACK=1 opts back in.
 +#include <sqlite3.h>
 +#include <OpenMS/FORMAT/TdfMzCalibration.h>
 +namespace {
 +// File-local (never crosses a DSO boundary, unlike an inline header static): which m/z
 +// calibration the last load used. Stamped onto the MSExperiment so it travels with the data.
 +std::string g_mz_calibration = "unset";
-+// [DIAspeXtractor frame-table] the last streamed run's DIA frame table and windows (see the header)
++// [DIAspeXtract frame-table] the last streamed run's DIA frame table and windows (see the header)
 +std::map<int, std::vector<BrukerTimsFile::DIAFrameRow>> g_dia_frame_table;
 +std::vector<BrukerTimsFile::DIAWindowRow> g_dia_windows;
 +class TdfTableTof2MzConverter final : public Tof2MzConverter
 +{
-+  diaspextractor::TdfMzCalibration cal_;
++  diaspextract::TdfMzCalibration cal_;
 +  std::vector<double> frame_t1_;
 +public:
 +  explicit TdfTableTof2MzConverter(const std::string& d_dir)
@@ -199,7 +199,7 @@
              BrukerScan2InvIonMobilityConverterFactory::instance(sdk_path)
                .produce(*handle, pcs);
 -          OPENMS_LOG_INFO << "TIMS calibration: Bruker SDK"
-+          // [DIAspeXtractor sdk-mz] The SDK branch previously upgraded ONLY the ion-mobility converter,
++          // [DIAspeXtract sdk-mz] The SDK branch previously upgraded ONLY the ion-mobility converter,
 +          // leaving m/z on the linear-in-sqrt two-point baseline -- measured -5..-11 ppm low across
 +          // the acquisition range (median -8.3 ppm on identified peptides vs the vendor conversion).
 +          // Swap the m/z converter too: tims_index_to_mz applies Bruker`s full per-frame calibration.
@@ -214,7 +214,7 @@
        }
      }
  
-+    // 2b. [DIAspeXtractor table-mz] EXACT license-free m/z from the MzCalibration table.
++    // 2b. [DIAspeXtract table-mz] EXACT license-free m/z from the MzCalibration table.
 +    // Gated on strategy: an explicit LINEAR request must still get the linear chord (otherwise we
 +    // silently override the user AND step 4 logs 'linear (GlobalMetadata)', which would be false).
 +    // (Only where the SDK did not already install a vendor m/z converter -- that path returns early.)
@@ -230,19 +230,19 @@
 +    {
 +      // FAIL CLOSED: the legacy chord is -5..-11 ppm wrong; emitting that silently is the defect
 +      // this converter exists to remove, so an unusable calibration is an error, not a warning.
-+      const char* allow_env = std::getenv("DIASPEXTRACTOR_ALLOW_CHORD_FALLBACK");
++      const char* allow_env = std::getenv("DIASPEXTRACT_ALLOW_CHORD_FALLBACK");
 +      // Only an explicit "1" opts in: getenv() != nullptr would treat
-+      // DIASPEXTRACTOR_ALLOW_CHORD_FALLBACK=0 (and "") as ENABLE, defeating the whole point.
++      // DIASPEXTRACT_ALLOW_CHORD_FALLBACK=0 (and "") as ENABLE, defeating the whole point.
 +      if (allow_env == nullptr || std::string(allow_env) != "1")
 +      {
 +        throw Exception::FileNotReadable(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
 +          String("exact TOF->m/z calibration unavailable (") + e.what() +
 +          "). The legacy linear-in-sqrt fallback is -5..-11 ppm biased; set "
-+          "DIASPEXTRACTOR_ALLOW_CHORD_FALLBACK=1 to use it anyway.");
++          "DIASPEXTRACT_ALLOW_CHORD_FALLBACK=1 to use it anyway.");
 +      }
 +      g_mz_calibration = "legacy_chord_APPROXIMATE";
 +      OPENMS_LOG_WARN << "TDF table m/z model unavailable (" << e.what()
-+                      << "); DIASPEXTRACTOR_ALLOW_CHORD_FALLBACK=1 -> linear-in-sqrt approximation"
++                      << "); DIASPEXTRACT_ALLOW_CHORD_FALLBACK=1 -> linear-in-sqrt approximation"
 +                      << " (-5..-11 ppm bias)" << std::endl;
 +    }
 +    }  // end strategy gate
@@ -332,11 +332,11 @@
 +    }
 +    else
 +    {
-+      // [DIAspeXtractor ms1-par] MS1 is 4% of the frames but 37% of the peaks; decoding + building it
++      // [DIAspeXtract ms1-par] MS1 is 4% of the frames but 37% of the peaks; decoding + building it
 +      // serially was ~425 s of LOAD (MS2 decode: 4 s). Same recipe as the MS2 block below.
 +      const size_t mb = 64;
 +      static const bool par_ok_ms1 = (g_mz_calibration.find("sdk") == std::string::npos)
-+                                     || std::getenv("DIASPEXTRACTOR_SDK_PARALLEL") != nullptr;
++                                     || std::getenv("DIASPEXTRACT_SDK_PARALLEL") != nullptr;
 +      int nthr = 1;
 +#ifdef _OPENMP
 +      nthr = std::max(1, omp_get_max_threads());
@@ -405,7 +405,7 @@
  
      auto group_to_frames = readFrameToWindowGroupMapping(db, windows);
  
-+    // [DIAspeXtractor frame-table] export the run's DIA frame table BEFORE anything is emitted: the
++    // [DIAspeXtract frame-table] export the run's DIA frame table BEFORE anything is emitted: the
 +    // frame descriptors are already in memory (no decode), `time` is the very double stamped on
 +    // the spectra below, and the group ids and windows are the loop's own.
 +    g_dia_frame_table.clear(); g_dia_windows.clear();
@@ -425,7 +425,7 @@
      Size progress_count = 0;
  
 -    for (const auto& [group, frame_ids] : group_to_frames)
-+    // [DIAspeXtractor par-load] FRAME-MAJOR, PARALLEL, DECODE-ONCE.
++    // [DIAspeXtract par-load] FRAME-MAJOR, PARALLEL, DECODE-ONCE.
 +    //
 +    // The original loop was window-major: for each window of a group, for each frame, decode the
 +    // frame. In diaPASEF every group has several windows (2 on the files measured), so each
@@ -437,10 +437,10 @@
 +    // uses itself). Spectra are handed to the consumer serially in (frame, window) order, so a
 +    // consumer that routes by window sees each window's frames in the same ascending order as
 +    // before: the compact store, and hence the output, is unchanged.
-+    // Batch size via DIASPEXTRACTOR_LOAD_BATCH (default 256): ponytail -- an env var until a
++    // Batch size via DIASPEXTRACT_LOAD_BATCH (default 256): ponytail -- an env var until a
 +    // measurement says it deserves a Config field.
 +    size_t batch = 256;
-+    if (const char* e = std::getenv("DIASPEXTRACTOR_LOAD_BATCH")) { const long v = std::atol(e); if (v > 0) batch = (size_t)v; }
++    if (const char* e = std::getenv("DIASPEXTRACT_LOAD_BATCH")) { const long v = std::atol(e); if (v > 0) batch = (size_t)v; }
 +
 +    for (const auto& [group, frame_ids_all] : group_to_frames)
      {
@@ -452,7 +452,7 @@
 -      {
 -        for (size_t i = 0; i < frame_ids.size(); ++i)
 +      const auto& dia_windows = wit->second;   // windows of this group, in table order
-+      // [DIAspeXtractor tile] the frames of this group whose time lies in the configured range (the
++      // [DIAspeXtract tile] the frames of this group whose time lies in the configured range (the
 +      // frame table above was exported for ALL of them); the batch loop below is unchanged, so a
 +      // selected frame is decoded, sliced and emitted exactly as in a whole-run call
 +      std::vector<uint32_t> frame_ids;
@@ -470,7 +470,7 @@
 +        // chunk 1: chunk 4 over a 256-frame batch made 64 chunks = 64 workers (plan review).
 +        // The vendor SDK converter's thread-safety is not vouched for here -> serial unless opted in.
 +        static const bool par_ok = (g_mz_calibration.find("sdk") == std::string::npos)
-+                                   || std::getenv("DIASPEXTRACTOR_SDK_PARALLEL") != nullptr;
++                                   || std::getenv("DIASPEXTRACT_SDK_PARALLEL") != nullptr;
 +        const auto _t0 = std::chrono::steady_clock::now();
 +        std::exception_ptr load_err;
 +        #pragma omp parallel for schedule(dynamic, 1) if(par_ok)
@@ -627,7 +627,7 @@
      int sgolay_polynomial_order_{3};
      double ppm_tolerance_cluster_{50.0};
      double im_tolerance_cluster_{0.1};
-+    std::string mz_mode_{"weighted"};   // [DIAspeXtractor pick-mz] weighted | seed | top3
++    std::string mz_mode_{"weighted"};   // [DIAspeXtract pick-mz] weighted | seed | top3
  
      double ppm_tolerance_elution_{50.0};
  
@@ -637,7 +637,7 @@
        // --- PickIMCluster parameters ---
        defaults_.setValue("pickIMCluster:ppm_tolerance_cluster", 50.0, "m/z tolerance in ppm for clustering");
        defaults_.setValue("pickIMCluster:im_tolerance_cluster", 0.1, "Ion mobility tolerance for clustering (in 1/K0 units). For CCS data, use larger values (e.g., 10-20).");
-+      defaults_.setValue("pickIMCluster:mz_mode", "weighted", "[DIAspeXtractor pick-mz] reported m/z of a cluster: weighted (intensity-weighted mean, default) | seed (most intense point) | top3 (weighted mean of the 3 most intense points)");
++      defaults_.setValue("pickIMCluster:mz_mode", "weighted", "[DIAspeXtract pick-mz] reported m/z of a cluster: weighted (intensity-weighted mean, default) | seed (most intense point) | top3 (weighted mean of the 3 most intense points)");
 +      defaults_.setValidStrings("pickIMCluster:mz_mode", {"weighted", "seed", "top3"});
        // --- PickIMElutionProfiles parameters ---
        defaults_.setValue("pickIMElutionProfiles:ppm_tolerance_elution", 50.0, "Mass trace m/z tolerance in ppm");
@@ -646,7 +646,7 @@
  
        ppm_tolerance_cluster_ = (double)param_.getValue("pickIMCluster:ppm_tolerance_cluster");
        im_tolerance_cluster_ = (double)param_.getValue("pickIMCluster:im_tolerance_cluster");
-+      mz_mode_ = param_.getValue("pickIMCluster:mz_mode").toString();   // [DIAspeXtractor pick-mz]
++      mz_mode_ = param_.getValue("pickIMCluster:mz_mode").toString();   // [DIAspeXtract pick-mz]
  
        ppm_tolerance_elution_ = (double)param_.getValue("pickIMElutionProfiles:ppm_tolerance_elution");
  
@@ -654,7 +654,7 @@
            }
  
            if (sum_intensity > std::numeric_limits<double>::epsilon()) {
-+            double out_mz = sum_mz_intensity / sum_intensity;   // [DIAspeXtractor pick-mz]
++            double out_mz = sum_mz_intensity / sum_intensity;   // [DIAspeXtract pick-mz]
 +            if (mz_mode_ == "seed") out_mz = points[seed_original_idx].mz;
 +            else if (mz_mode_ == "top3")
 +            {

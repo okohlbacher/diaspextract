@@ -39,7 +39,7 @@ echo "entrapment: $NT target / $NE foreign, ratio $RATIO" >> $L
 # split_count exists only on one node, from a different binary. Comparing across nodes/binaries is
 # precisely the error class this benchmark was built to eliminate, so it is re-extracted here
 # rather than copied.
-TOOL=/path/to/scratch/OpenMS/build/bin/diaspextractor
+TOOL=/path/to/scratch/OpenMS/build/bin/diaspextract
 DD=/path/to/scratch/rawd/<acquisition-B>
 COMMON="-trace:ms2_chrom_peak_snr 1.0 -trace:ms2_noise_threshold_int 10 -trace:ms2_min_length_sec 0 -trace:ms2_split_valleys 7.0"
 SC=$B/out/open_split_count

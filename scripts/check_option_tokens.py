@@ -14,7 +14,7 @@ purpose; flagging those would train everyone to ignore this check.
     scripts/check_option_tokens.py [--ini ini.xml] [file ...]
 
 With --ini (a `-write_ini` dump from the built binary) the option inventory is the binary's own;
-without it, the inventory is parsed from the register*_ calls in src/diaspextractor.cpp, so the check
+without it, the inventory is parsed from the register*_ calls in src/diaspextract.cpp, so the check
 runs in a tree with no build. Exit 1 if any token is not a registered option.
 """
 import argparse
@@ -46,7 +46,7 @@ def from_ini(path):
                 walk(child, name + ":" if prefix is not None else None)
 
     root = ET.parse(path).getroot()
-    for tool in root:                       # <NODE name="DIAspeXtractor">
+    for tool in root:                       # <NODE name="DIAspeXtract">
         for inst in tool:                   # <NODE name="1">
             walk(inst, None)
             for child in inst:
@@ -70,7 +70,7 @@ def main():
     if args.ini:
         known, where = from_ini(args.ini), args.ini
     else:
-        src = ROOT / "src" / "diaspextractor.cpp"
+        src = ROOT / "src" / "diaspextract.cpp"
         known, where = from_source(src), str(src)
     if not known:
         print(f"no options found in {where} -- the check would pass vacuously", file=sys.stderr)

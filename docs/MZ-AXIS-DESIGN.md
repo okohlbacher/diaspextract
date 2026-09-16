@@ -48,13 +48,13 @@ Three reasons the native axis is better in kind, not merely smaller:
    of the ppm tolerance is spent absorbing that drift. In bin space it is not spent at all.
 3. **An index of 5e5 is a usable subscript.** 1.7e8 is not.
 
-`diaspextractor::TdfMzCalibration` already provides both directions, `tofToMz(tof, b)` and
+`diaspextract::TdfMzCalibration` already provides both directions, `tofToMz(tof, b)` and
 `mzToTof(mz, b)`, plus `frameFactor(T1)`. So the axis is:
 
 ```cpp
 using TofIdx = uint32_t;
 struct TofAxis {
-  diaspextractor::TdfMzCalibration cal;
+  diaspextract::TdfMzCalibration cal;
   vector<double> b_by_frame;     // per vendor frame Id
   double factor(size_t frame_id) const;
   double mzOf(TofIdx tof, double b) const;      // report time only

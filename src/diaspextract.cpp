@@ -6,7 +6,7 @@
 // $Authors: OpenMS-the reference implementation project $
 // --------------------------------------------------------------------------
 
-#include "MzPeakStreamLoad.h"   // [mzpeak] streaming .mzpeak input (DIASPEXTRACTOR_WITH_MZPEAK)
+#include "MzPeakStreamLoad.h"   // [mzpeak] streaming .mzpeak input (DIASPEXTRACT_WITH_MZPEAK)
 #include <OpenMS/APPLICATIONS/TOPPBase.h>
 
 #include <OpenMS/FORMAT/FileHandler.h>
@@ -61,8 +61,8 @@ static_assert(std::is_nothrow_move_constructible_v<OpenMS::MassTrace> && std::is
 
 // The release version. The standalone CMake build passes it from project(VERSION); the in-tree
 // OpenMS build does not, so the fallback here is the same number.
-#ifndef DIASPEXTRACTOR_VERSION
-#define DIASPEXTRACTOR_VERSION "1.2.1"
+#ifndef DIASPEXTRACT_VERSION
+#define DIASPEXTRACT_VERSION "1.3.0"
 #endif
 
 using namespace OpenMS;
@@ -73,7 +73,7 @@ using namespace std;
 //-------------------------------------------------------------
 
 /**
-  @page TOPP_DIAspeXtractor DIAspeXtractor
+  @page TOPP_DIAspeXtract DIAspeXtract
 
   @brief Extracts pseudo-MS/MS ("pseudo-DDA") spectra from diaPASEF (ion-mobility DIA) data.
 
@@ -91,9 +91,9 @@ using namespace std;
   See docs/BASELINE.md for the measured decisions behind every default.
 
   <B>The command line parameters of this tool are:</B>
-  @verbinclude TOPP_DIAspeXtractor.cli
+  @verbinclude TOPP_DIAspeXtract.cli
   <B>INI file documentation of this tool:</B>
-  @htmlinclude TOPP_DIAspeXtractor.html
+  @htmlinclude TOPP_DIAspeXtract.html
 */
 
 /// @cond TOPPCLASSES
@@ -188,7 +188,7 @@ namespace
 #endif
   }
 
-  // [ledger] DIASPEXTRACTOR_LEDGER=<file>: a sampler thread appends one TSV row every 250 ms -- wall
+  // [ledger] DIASPEXTRACT_LEDGER=<file>: a sampler thread appends one TSV row every 250 ms -- wall
   // clock, VmRSS, glibc arena/free, live bytes per category, the unattributed remainder (RSS minus
   // the sum: mostly allocator retention) and the phase marker. Charges are atomic adds at allocation
   // boundaries, never per peak; with the variable unset every call is one branch.
@@ -204,7 +204,7 @@ namespace
     return n[c];
   }
   inline std::array<std::atomic<long long>, LC_N>& ledger_() { static std::array<std::atomic<long long>, LC_N> a{}; return a; }
-  inline const char* ledFile_() { static const char* f = std::getenv("DIASPEXTRACTOR_LEDGER"); return f; }
+  inline const char* ledFile_() { static const char* f = std::getenv("DIASPEXTRACT_LEDGER"); return f; }
   inline std::atomic<const char*>& ledPhaseName_() { static std::atomic<const char*> p{"start"}; return p; }   // stored pointers need static lifetime: the sampler reads them from another thread
   inline void ledAdd_(int c, long long b) { if (ledFile_()) ledger_()[(size_t)c].fetch_add(b, std::memory_order_relaxed); }
   inline void ledSet_(int c, long long b) { if (ledFile_()) ledger_()[(size_t)c].store(b, std::memory_order_relaxed); }
@@ -234,9 +234,9 @@ namespace
     for (const auto& sp : m) b += (long long)sp.size() * 20;
     return b;
   }
-  /// [ms1-hist] DIASPEXTRACTOR_MS1_HIST=1: picked MS1 peaks counted by intensity band (<100, 100-300, 300-1000,
+  /// [ms1-hist] DIASPEXTRACT_MS1_HIST=1: picked MS1 peaks counted by intensity band (<100, 100-300, 300-1000,
   /// 1000-10000, >=10000; 100 and 300 are MS1 tracing's default noise and seed thresholds). Counting only.
-  inline bool ms1HistOn_() { static const bool on = []{ const char* e = std::getenv("DIASPEXTRACTOR_MS1_HIST"); return e && *e && *e != '0'; }(); return on; }
+  inline bool ms1HistOn_() { static const bool on = []{ const char* e = std::getenv("DIASPEXTRACT_MS1_HIST"); return e && *e && *e != '0'; }(); return on; }
   inline std::array<std::atomic<long long>, 5>& ms1Hist_() { static std::array<std::atomic<long long>, 5> h{}; return h; }
   /// RAII in main_: one sampler for the run, joined before any return path leaves the function.
   struct LedRun
@@ -631,7 +631,7 @@ namespace
   /// is one.
   struct TofAxis
   {
-    diaspextractor::TdfMzCalibration cal;
+    diaspextract::TdfMzCalibration cal;
     vector<double> b_by_frame;        ///< frame factor per FRAME ID (index 0 unused, as in the tdf)
     bool ok = false;
     double acq_lo = std::numeric_limits<double>::quiet_NaN();   ///< the acquisition's m/z range (GlobalMetadata)
@@ -653,7 +653,7 @@ namespace
   inline TofAxis& tofAxis() { static TofAxis a; return a; }
 
   /// Build the flight-time axis from a calibration and the per-frame T1 (index = Frames.Id).
-  inline void setTofAxis(const diaspextractor::TdfMzCalibration& cal, const std::vector<double>& t1)
+  inline void setTofAxis(const diaspextract::TdfMzCalibration& cal, const std::vector<double>& t1)
   {
     TofAxis& ax = tofAxis();
     ax.cal = cal;
@@ -667,12 +667,12 @@ namespace
   /// Load the axis from an analysis.tdf; false (axis unusable) when anything is missing.
   inline bool loadTofAxis(const std::string& tdf_path, String& why)
   {
-    diaspextractor::TdfMzCalibration cal;
+    diaspextract::TdfMzCalibration cal;
     std::vector<double> t1;
-    if (!diaspextractor::loadTdfCalibration(tdf_path, cal, t1, why)) return false;
+    if (!diaspextract::loadTdfCalibration(tdf_path, cal, t1, why)) return false;
     setTofAxis(cal, t1);
-    { std::string w2; diaspextractor::TdfAxisBounds bd;
-      if (diaspextractor::loadTdfAxisBounds(tdf_path, bd, w2)) { tofAxis().acq_lo = bd.mz_lo; tofAxis().acq_hi = bd.mz_hi; tofAxis().n_bins = bd.n_bins; }
+    { std::string w2; diaspextract::TdfAxisBounds bd;
+      if (diaspextract::loadTdfAxisBounds(tdf_path, bd, w2)) { tofAxis().acq_lo = bd.mz_lo; tofAxis().acq_hi = bd.mz_hi; tofAxis().n_bins = bd.n_bins; }
       else tofAxis().bounds_why = w2; }
     return true;
   }
@@ -738,7 +738,7 @@ namespace
   }
 
   /// [det] Order-insensitive 64-bit digest of a stage's numeric output, for localising
-  /// run-to-run nondeterminism: sort the bit patterns, then FNV-1a. Logged under DIASPEXTRACTOR_DET=1.
+  /// run-to-run nondeterminism: sort the bit patterns, then FNV-1a. Logged under DIASPEXTRACT_DET=1.
   static uint64_t detDigest_(vector<uint64_t> bits)
   {
     std::sort(bits.begin(), bits.end());
@@ -747,7 +747,7 @@ namespace
     return h;
   }
   static void pushBits_(vector<uint64_t>& b, double v) { uint64_t u; std::memcpy(&u, &v, 8); b.push_back(u); }
-  static bool detOn_() { static const bool on = std::getenv("DIASPEXTRACTOR_DET") != nullptr; return on; }
+  static bool detOn_() { static const bool on = std::getenv("DIASPEXTRACT_DET") != nullptr; return on; }
   static uint64_t traceDigest_(const TraceStore& st, const vector<Trace>& ts)
   {
     // im (the fragment sort key and scoring's search axis) and tof (the exported m/z) are hashed too.
@@ -1369,8 +1369,8 @@ namespace
   {
     struct Counts { long long picked = 0, survivors = 0, kept = 0, at_noise = 0, nan = 0, bad_mz = 0; };
     bool on = false;              ///< perf:ms1_prune
-    bool no_witness = false;      ///< DIASPEXTRACTOR_MS1_PRUNE_NO_WITNESS=1: survivors only -- a negative control, NOT exact
-    bool no_chain = false;        ///< DIASPEXTRACTOR_MS1_PRUNE_NO_CHAIN=1: interior chain links dropped, anchors kept -- a negative control, NOT exact
+    bool no_witness = false;      ///< DIASPEXTRACT_MS1_PRUNE_NO_WITNESS=1: survivors only -- a negative control, NOT exact
+    bool no_chain = false;        ///< DIASPEXTRACT_MS1_PRUNE_NO_CHAIN=1: interior chain links dropped, anchors kept -- a negative control, NOT exact
     double noise = 0.0;           ///< trace:noise_threshold_int, the very double MassTraceDetection is given
     double hop = 0.0;             ///< trace:mass_error_ppm x 1e-6 x kBandHaloPpmMul
     std::vector<double> sample;   ///< the stride-97 m/z sample of every spectrum pruned so far, taken unpruned
@@ -1473,7 +1473,7 @@ namespace
     bool on = false;                          ///< dnoise:ms1 true on a Bruker .d, set up
     spx::dnoise::Params p;
     std::optional<spx::dnoise::Ms1WindowGate> gate;
-    diaspextractor::TdfDnoiseInputs tdf;
+    diaspextract::TdfDnoiseInputs tdf;
     std::vector<std::vector<float>> im_asc;   ///< per TimsCalibration row: the float32 1/K0 of each scan its MS1 frames have, ascending
     std::vector<char> im_falls;               ///< the row's 1/K0 falls with the scan, so its im_asc is reversed
     Counts total;
@@ -1485,7 +1485,7 @@ namespace
     std::string setup(const std::string& tdf_path)
     {
       std::string why;
-      if (!diaspextractor::loadTdfDnoise(tdf_path, tdf, why)) return why;
+      if (!diaspextract::loadTdfDnoise(tdf_path, tdf, why)) return why;
       spx::dnoise::GateBuild g = spx::dnoise::buildMs1WindowGate(tdf.meta, tdf.windows, p);
       if (!g.error.empty()) return "the dnoise MS1 port cannot build its window gate from this file: " + g.error;
       gate = std::move(g.gate);
@@ -1542,7 +1542,7 @@ namespace
           throw refuse("frame " + String(fid) + " arrived with " + String(n) + " of its " + String(tdf.frames[fid].num_peaks) + " raw points: only a whole raw frame can be denoised (no frame aggregation, no loader centroiding)");
         default: throw refuse("frame " + String(fid) + " carries no 1/K0 per point");   // Refusal::im
       }
-      const diaspextractor::TdfDnoiseInputs::Frame& fr = tdf.frames[fid];
+      const diaspextract::TdfDnoiseInputs::Frame& fr = tdf.frames[fid];
       ++c.frames; c.raw += (long long)n; c.fid = fid;
       if (n == 0) { c.cpu += threadCpu_() - cpu0; return; }
       const auto& im = s.getFloatDataArrays()[s.getIMData().first];
@@ -1863,10 +1863,10 @@ namespace
     }
 
   private:
-    /// [ledger] DIASPEXTRACTOR_LOAD_TRIM=N: malloc_trim(0) every Nth flush (0 = never). The load's retention
+    /// [ledger] DIASPEXTRACT_LOAD_TRIM=N: malloc_trim(0) every Nth flush (0 = never). The load's retention
     /// sits in per-thread arenas, which only an explicit malloc_trim reaches (MALLOC_TRIM_THRESHOLD_ does
     /// not). Priced in docs/BASELINE.md, "The composition on D".
-    static int loadTrimEvery_() { static const int v = []{ const char* e = std::getenv("DIASPEXTRACTOR_LOAD_TRIM");
+    static int loadTrimEvery_() { static const int v = []{ const char* e = std::getenv("DIASPEXTRACT_LOAD_TRIM");
                                                            return e ? std::atoi(e) : 0; }(); return v; }
     static void loadTrim_()
     {
@@ -1880,13 +1880,13 @@ namespace
       (void)due;   // every other trim site in this file is glibc-only for the same reason
 #endif
     }
-    /// Frames per pick batch, 256 by default (~1 GB raw buffer); DIASPEXTRACTOR_PICK_BATCH overrides.
+    /// Frames per pick batch, 256 by default (~1 GB raw buffer); DIASPEXTRACT_PICK_BATCH overrides.
     /// Batch composition does not change the output.
-    static size_t kBatch_() { static const size_t v = []{ const char* e = std::getenv("DIASPEXTRACTOR_PICK_BATCH");
+    static size_t kBatch_() { static const size_t v = []{ const char* e = std::getenv("DIASPEXTRACT_PICK_BATCH");
       const long x = e ? std::atol(e) : 0; return x > 0 ? (size_t)x : (size_t)256; }(); return v; }
-    /// [batch] DIASPEXTRACTOR_PICK_BATCH_MS1: the MS1-only flush batch (unset = kBatch_), so shrinking it for memory does not
+    /// [batch] DIASPEXTRACT_PICK_BATCH_MS1: the MS1-only flush batch (unset = kBatch_), so shrinking it for memory does not
     /// re-batch the MS2 tile reads (a smaller MS2 batch only costs CPU). Output-invariant; priced in docs/BASELINE.md "The composition on D".
-    static size_t kBatchMS1_() { static const size_t v = []{ const char* e = std::getenv("DIASPEXTRACTOR_PICK_BATCH_MS1");
+    static size_t kBatchMS1_() { static const size_t v = []{ const char* e = std::getenv("DIASPEXTRACT_PICK_BATCH_MS1");
       const long x = e ? std::atol(e) : 0; return x > 0 ? (size_t)x : (size_t)0; }();
       return v ? v : kBatch_(); }
     std::vector<MapType::SpectrumType> buf_;
@@ -2086,24 +2086,24 @@ namespace
   };
 }
 
-class TOPPDIAspeXtractor : public TOPPBase
+class TOPPDIAspeXtract : public TOPPBase
 {
 public:
-  TOPPDIAspeXtractor() :
+  TOPPDIAspeXtract() :
     // official=false: a standalone tool, absent from ToolHandler's official list (TOPPBase rejects an unregistered official name).
-    TOPPBase("DIAspeXtractor", "Extracts pseudo-MS/MS spectra from diaPASEF (ion-mobility DIA) data.", false)
+    TOPPBase("DIAspeXtract", "Extracts pseudo-MS/MS spectra from diaPASEF (ion-mobility DIA) data.", false)
   {
     // Otherwise TOPPBase reports OpenMS's version as ours: version_ feeds the ini and the mzML software entry,
     // verboseVersion_ the --help Version line, which carries both numbers because a bug report needs the OpenMS build too.
-    version_ = DIASPEXTRACTOR_VERSION;
-    verboseVersion_ = String(DIASPEXTRACTOR_VERSION) + " (OpenMS " + VersionInfo::getVersion() + ")";
+    version_ = DIASPEXTRACT_VERSION;
+    verboseVersion_ = String(DIASPEXTRACT_VERSION) + " (OpenMS " + VersionInfo::getVersion() + ")";
   }
 
 protected:
   void registerOptionsAndFlags_() override
   {
     registerInputFile_("in", "<file>", "", "Input diaPASEF data (ion-mobility DIA; 1/K0 / VSSC): mzML, mzPeak, or a Bruker .d directory.");
-#ifdef DIASPEXTRACTOR_WITH_MZPEAK
+#ifdef DIASPEXTRACT_WITH_MZPEAK
     setValidFormats_("in", {"mzML", "mzpeak", "d"});
 #else
     setValidFormats_("in", {"mzML", "d"});      // stock OpenMS does not know the mzpeak format
@@ -2113,7 +2113,7 @@ protected:
                         "mzML is what DDA search engines read today, so pass an .mzML name (or "
                         "-out_type mzML) if the next step is a search. mzPeak is written in one piece, "
                         "so it runs as one tile (the whole run's memory).");
-#ifdef DIASPEXTRACTOR_WITH_MZPEAK
+#ifdef DIASPEXTRACT_WITH_MZPEAK
     setValidFormats_("out", {"mzpeak", "mzML"});
 #else
     setValidFormats_("out", {"mzML"});
@@ -2403,9 +2403,9 @@ protected:
         ledAdd_(part_cat, tb); if (in_cat >= 0) ledSet_(in_cat, 0); }
       vector<vector<PeakMap>>().swap(csub);
       tt_dist = tt_s(_td0, tt_now());
-      // [ms1-trim] DIASPEXTRACTOR_MS1_TRIM=1 (MS1 call only): return the released MS1 map's free pages before
+      // [ms1-trim] DIASPEXTRACT_MS1_TRIM=1 (MS1 call only): return the released MS1 map's free pages before
       // detection. Measured: docs/BASELINE.md, "TNBC 009: the pass-1 levers take 6.3 GB off".
-      static const bool ms1_trim = []{ const char* e = std::getenv("DIASPEXTRACTOR_MS1_TRIM"); return e && *e && *e != '0'; }();
+      static const bool ms1_trim = []{ const char* e = std::getenv("DIASPEXTRACT_MS1_TRIM"); return e && *e && *e != '0'; }();
       if (ms1_trim && in_cat >= 0)
       {
 #ifdef __GLIBC__
@@ -2786,7 +2786,7 @@ protected:
     };
 
     size_t spec_batch = 8192;
-    if (const char* e = std::getenv("DIASPEXTRACTOR_SPEC_BATCH")) { long v = atol(e); if (v >= 1) spec_batch = (size_t)v; }
+    if (const char* e = std::getenv("DIASPEXTRACT_SPEC_BATCH")) { long v = atol(e); if (v >= 1) spec_batch = (size_t)v; }
     vector<SeedRes> res(spec_batch);
     size_t n_committed = 0, n_conflict = 0, n_skipped = 0;
     for (size_t b0 = 0; b0 < order.size(); b0 += spec_batch)
@@ -2816,9 +2816,9 @@ protected:
         ++n_committed;
       }
     }
-    // [z1-diag] DIASPEXTRACTOR_Z1_DIAG[=file]: for every z=1 call, is there a co-eluting MS1 trace at +ISO/2
+    // [z1-diag] DIASPEXTRACT_Z1_DIAG[=file]: for every z=1 call, is there a co-eluting MS1 trace at +ISO/2
     // (a halved 2+ ion's M+1) or +ISO/3, and was it already claimed.
-    if (const char* dz = std::getenv("DIASPEXTRACTOR_Z1_DIAG"))
+    if (const char* dz = std::getenv("DIASPEXTRACT_Z1_DIAG"))
     {
       size_t n1 = 0, has2 = 0, has3 = 0, has2_free = 0;
       FILE* fo = (*dz && std::strcmp(dz, "1") != 0) ? std::fopen(dz, "w") : nullptr;
@@ -3140,7 +3140,7 @@ protected:
   ExitCodes main_(int argc, const char** argv) override
   {
     phase_clock_();   // [perf-instr] fix the epoch (a first-call static) before loading
-    LedRun _ledger;   // [ledger] DIASPEXTRACTOR_LEDGER=<file>: the per-structure memory profile
+    LedRun _ledger;   // [ledger] DIASPEXTRACT_LEDGER=<file>: the per-structure memory profile
 
     // -threads not given: use every core. The command line is scanned, so an explicit -threads 1 stays serial.
     int n_threads_req = getIntOption_("threads");
@@ -3183,8 +3183,8 @@ protected:
     ms1_prune.on = (getStringOption_("perf:ms1_prune") == "true");
     ms1_prune.noise = getDoubleOption_("trace:noise_threshold_int");
     ms1_prune.hop = mass_ppm * 1e-6 * kBandHaloPpmMul;
-    { const char* e = std::getenv("DIASPEXTRACTOR_MS1_PRUNE_NO_WITNESS"); ms1_prune.no_witness = e && *e && *e != '0'; }
-    { const char* e = std::getenv("DIASPEXTRACTOR_MS1_PRUNE_NO_CHAIN"); ms1_prune.no_chain = e && *e && *e != '0'; }   // its own switch: check 19b
+    { const char* e = std::getenv("DIASPEXTRACT_MS1_PRUNE_NO_WITNESS"); ms1_prune.no_witness = e && *e && *e != '0'; }
+    { const char* e = std::getenv("DIASPEXTRACT_MS1_PRUNE_NO_CHAIN"); ms1_prune.no_chain = e && *e && *e != '0'; }   // its own switch: check 19b
     map<WinKey, PeakSlab> ms2_by_window;
     CompactStats cstat;
     const bool stream_load = (getStringOption_("perf:stream_load") == "true");
@@ -3195,7 +3195,7 @@ protected:
     // a user typing `-out pseudo.mzML` means; -out_type overrides it; mzPeak is the default when neither says.
     FileTypes::Type out_type = FileTypes::MZML;
     const String out_type_opt = getStringOption_("out_type");
-#ifdef DIASPEXTRACTOR_WITH_MZPEAK
+#ifdef DIASPEXTRACT_WITH_MZPEAK
     if (!out_type_opt.empty())
       out_type = (out_type_opt == "mzML") ? FileTypes::MZML : FileTypes::MZPEAK;
     else
@@ -3220,13 +3220,13 @@ protected:
     // tdf is recovered, below). Milliseconds against minutes of loading.
     const bool band_edges_acq = (getStringOption_("trace:band_edges") == "acquisition");
     const bool integer_req = (getStringOption_("trace:detector") == "integer");
-    const char* tr_env = std::getenv("DIASPEXTRACTOR_TILE_RESIDENT");
+    const char* tr_env = std::getenv("DIASPEXTRACT_TILE_RESIDENT");
     const bool force_resident = tr_env && String(tr_env) != "0" && String(tr_env) != "";
     if (!band_edges_acq && integer_req && stream_load && FileHandler::getTypeByFileName(in) == FileTypes::BRUKER_TDF && !force_resident)
       throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-            "trace:band_edges=slab needs the whole window resident; the .d streaming source reads it per tile. Use trace:band_edges=acquisition, or DIASPEXTRACTOR_TILE_RESIDENT=1 for the resident source.");
+            "trace:band_edges=slab needs the whole window resident; the .d streaming source reads it per tile. Use trace:band_edges=acquisition, or DIASPEXTRACT_TILE_RESIDENT=1 for the resident source.");
     std::vector<std::string> tdf_cand{in + "/analysis.tdf"};   // the calibration sources, in the order the load tries them
-    if (const char* sc = std::getenv("DIASPEXTRACTOR_MZPEAK_TDF")) tdf_cand.push_back(sc);
+    if (const char* sc = std::getenv("DIASPEXTRACT_MZPEAK_TDF")) tdf_cand.push_back(sc);
     if (band_edges_acq && integer_req)
     {
       // [3a] The axis is selected HERE, in the order the load below would use it (the first
@@ -3259,7 +3259,7 @@ protected:
       auto refuse = [](const String& why) {
         return Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "dnoise:ms1 " + why + " -dnoise:ms1 false runs without MS1 denoising."); };
       if (cfg.ms1_n_neighbors > 0)
-        throw refuse("denoises each raw MS1 frame, and trace:native_ms1_neighbors > 0 sums neighbouring frames before DIAspeXtractor sees them.");
+        throw refuse("denoises each raw MS1 frame, and trace:native_ms1_neighbors > 0 sums neighbouring frames before DIAspeXtract sees them.");
       // The loader's m/z model, predicted: under the default AUTO strategy an SDK path (the Config's, else
       // OPENMS_BRUKER_SDK_PATH) makes openTimsDataHandle calibrate m/z through the Bruker SDK, which the TOF recovery
       // cannot invert. An SDK that then fails to load would leave the table model, so this can refuse a run that would
@@ -3295,7 +3295,7 @@ protected:
     String frame_table_src = "slab";   // [frames] where the frozen frame tables came from: loader | mzpeak | slab
     // [3b] the .d streaming SOURCE: pass 1 reads MS1 only (the loader exports the whole frame
     // table regardless), pass 2 reads each tile's MS2 frames through the loader's RT range. The
-    // resident source (mzPeak, mzML, perf:stream_load=false, or DIASPEXTRACTOR_TILE_RESIDENT=1 for an
+    // resident source (mzPeak, mzML, perf:stream_load=false, or DIASPEXTRACT_TILE_RESIDENT=1 for an
     // A/B) holds the whole run and slices it, as before.
     bool tile_source = false;
     PickCompactConsumer::FrameTables run_tables;   // the reader's frozen tables, kept for pass 2
@@ -3314,13 +3314,13 @@ protected:
       PickCompactConsumer consumer(spicker, ms2_by_window, ms1_map, cstat);
       consumer.ms1_prune = &ms1_prune;
       consumer.dnoise = &dnoise;
-#ifdef DIASPEXTRACTOR_WITH_MZPEAK
+#ifdef DIASPEXTRACT_WITH_MZPEAK
       const bool in_mzpeak = (FileHandler::getTypeByFileName(in) == FileTypes::MZPEAK);
 #else
       const bool in_mzpeak = false;
 #endif
       // [3b] the streaming source needs the Bruker loader: a .d only, never an mzML or an mzPeak
-      // archive (the resident path reads those whole). DIASPEXTRACTOR_TILE_RESIDENT set to any non-empty
+      // archive (the resident path reads those whole). DIASPEXTRACT_TILE_RESIDENT set to any non-empty
       // value other than 0 (parsed once, above) forces the resident source for a same-build A/B.
       tile_source = !in_mzpeak && !force_resident && FileHandler::getTypeByFileName(in) == FileTypes::BRUKER_TDF;
       if (tile_source)
@@ -3338,7 +3338,7 @@ protected:
       String table_src_if_ok = "slab";   // becomes the stamp only after the streamed load and the invariant succeed
       if (in_mzpeak)
       {
-#ifdef DIASPEXTRACTOR_WITH_MZPEAK
+#ifdef DIASPEXTRACT_WITH_MZPEAK
         table_src_if_ok = "mzpeak";
         if (band_edges_acq && integer_req)
         {
@@ -3379,7 +3379,7 @@ protected:
             const double c = w.mz_center, off = w.mz_width / 2.0;                 // BrukerTimsFile's precursor
             const WinKey k = winKey(c - off, c + off, (uint32_t)w.window_group);
             if (t.count(k))   // two table rows with one (m/z, group) key -- the consumer would merge their frames into one slab
-              throw InputRefusal(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[frames] two DIA windows share one (m/z lo, m/z hi, group) key; DIAspeXtractor keys windows by isolation window and group", String(c - off) + "-" + String(c + off) + " group " + String(w.window_group));
+              throw InputRefusal(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "[frames] two DIA windows share one (m/z lo, m/z hi, group) key; DIAspeXtract keys windows by isolation window and group", String(c - off) + "-" + String(c + off) + " group " + String(w.window_group));
             auto& tab = t[k];
             for (const auto& r : g->second) if (r.num_peaks > 0) { tab.rt.push_back(r.time); tab.id.push_back(r.frame_id); }
           }
@@ -3389,7 +3389,7 @@ protected:
       {
         if (in_mzpeak)
         {
-#ifdef DIASPEXTRACTOR_WITH_MZPEAK
+#ifdef DIASPEXTRACT_WITH_MZPEAK
           spx::loadMzPeakStreaming(in, consumer, n_threads_req);   // consumer counts frames itself
 #else
           throw Exception::NotImplemented(__FILE__, __LINE__, "streaming .mzpeak input needs a build with -DMZPEAK_ROOT");
@@ -3406,8 +3406,8 @@ protected:
                         + String(h[3].load()) + " (" + pc(h[3].load()) + "%), >=10000 " + String(h[4].load()) + " (" + pc(h[4].load()) + "%)"); }
         phaseAdd_("LOAD(stream)", 0.0, 0.0, false);                // [perf-instr] start-to-here
         writeLogInfo_("[perf-load] pick(flush) wall=" + String(flush_wall_(), 1) + " s inside LOAD(stream)");
-        if (std::getenv("DIASPEXTRACTOR_LOAD_ONLY"))
-        { if (tile_source) writeLogInfo_("[perf-load] DIASPEXTRACTOR_LOAD_ONLY under the .d streaming source measures PASS 1 (MS1) only; the MS2 frames are read per tile in pass 2.");
+        if (std::getenv("DIASPEXTRACT_LOAD_ONLY"))
+        { if (tile_source) writeLogInfo_("[perf-load] DIASPEXTRACT_LOAD_ONLY under the .d streaming source measures PASS 1 (MS1) only; the MS2 frames are read per tile in pass 2.");
           report_phases_(phase_clock_()); return EXECUTION_OK; }   // [perf-load] decode/hand-off/pick split only
         writeLogInfo_("[stream] frame-by-frame load done: " + String(consumer.frames_seen)
                       + " frames, MS1 " + String(ms1_map.size()) + ", windows "
@@ -3444,7 +3444,7 @@ protected:
         run_tables = consumer.tables();
         writeLogInfo_("[frames] source=" + frame_table_src + " windows=" + String(consumer.tables().size()) + " delivered=" + String(n_del) + " padded=" + String(n_pad) + " absent=" + String(n_absent)
                       + (tile_source ? " (pass 1: MS1 only; the windows' frames are read per tile)" : ""));
-#ifdef DIASPEXTRACTOR_WITH_MZPEAK
+#ifdef DIASPEXTRACT_WITH_MZPEAK
         if (in_mzpeak && spx::lastMzPeakMeta())
           writeLogInfo_("[frames] mzPeak number_of_peaks: " + String(spx::lastMzPeakMeta()->n_peaks_missing_ms2) + " MS2 spectra lack it and count as present"
                         + (spx::lastMzPeakMeta()->n_peaks_missing_ms2 ? " (a frame with no peaks among them would be padded)" : "; a recorded zero is skipped like the .d loop's"));
@@ -3467,7 +3467,7 @@ protected:
       ledSet_(LC_MS1MAP, 0); ledSet_(LC_SLAB, 0);
       Phase _ph("LOAD(full)");
       FileHandler().loadExperiment(in, exp,
-#ifdef DIASPEXTRACTOR_WITH_MZPEAK
+#ifdef DIASPEXTRACT_WITH_MZPEAK
                                    {FileTypes::MZML, FileTypes::MZPEAK, FileTypes::BRUKER_TDF},
 #else
                                    {FileTypes::MZML, FileTypes::BRUKER_TDF},
@@ -3484,7 +3484,7 @@ protected:
       IMFormat imf = IMTypes::determineIMFormat(exp, 1);
       if (imf == IMFormat::NONE)
       {
-        writeLogError_("Error: input has no ion-mobility data at MS1. DIAspeXtractor requires diaPASEF (IM DIA) input.");
+        writeLogError_("Error: input has no ion-mobility data at MS1. DIAspeXtract requires diaPASEF (IM DIA) input.");
         return ILLEGAL_PARAMETERS;
       }
     }
@@ -3586,8 +3586,8 @@ protected:
                       + " at_noise " + String(t.at_noise) + " nan " + String(t.nan) + " bad_mz " + String(t.bad_mz) + ": kept " + String(t.kept) + " peaks = "
                       + String(t.kept * 20 / (1024LL * 1024LL)) + " MB as PeakMap of " + String(t.picked * 20 / (1024LL * 1024LL)) + " MB picked; sample "
                       + String(ms1_prune.sample.size()) + " m/z from " + String(ms1_prune.frames) + " spectra"
-                      + (ms1_prune.no_witness ? String(" -- DIASPEXTRACTOR_MS1_PRUNE_NO_WITNESS: survivors only, a negative control, output NOT identical") : String())
-                      + (ms1_prune.no_chain ? String(" -- DIASPEXTRACTOR_MS1_PRUNE_NO_CHAIN: interior chain links dropped, a negative control, output NOT identical") : String())); }
+                      + (ms1_prune.no_witness ? String(" -- DIASPEXTRACT_MS1_PRUNE_NO_WITNESS: survivors only, a negative control, output NOT identical") : String())
+                      + (ms1_prune.no_chain ? String(" -- DIASPEXTRACT_MS1_PRUNE_NO_CHAIN: interior chain links dropped, a negative control, output NOT identical") : String())); }
     }
 
     if (ms1_map.empty())
@@ -3839,15 +3839,15 @@ protected:
         writeLogInfo_("charge:min_charge=" + String(zmin) + ": dropped " + String(before - precursors.size())
                       + " precursors below that charge, " + String(precursors.size()) + " remain");
     }
-    // [step-02 emission-controlled arm, 2026-09-02] DIASPEXTRACTOR_MIN_ISOTOPES=k keeps only precursors whose
+    // [step-02 emission-controlled arm, 2026-09-02] DIASPEXTRACT_MIN_ISOTOPES=k keeps only precursors whose
     // envelope has >= k isotope peaks (n_isotopes counts the mono): a precursor QUALITY gate that cuts
     // emission without touching fragment sharing. Pre-registered falsifier in BASELINE.md.
-    if (const char* mi = std::getenv("DIASPEXTRACTOR_MIN_ISOTOPES"))
+    if (const char* mi = std::getenv("DIASPEXTRACT_MIN_ISOTOPES"))
     {
       const int k = std::atoi(mi); const size_t before = precursors.size();
       precursors.erase(std::remove_if(precursors.begin(), precursors.end(),
                        [k](const Precursor_& pc){ return pc.n_isotopes < k; }), precursors.end());
-      writeLogInfo_("DIASPEXTRACTOR_MIN_ISOTOPES=" + String(k) + ": dropped " + String(before - precursors.size())
+      writeLogInfo_("DIASPEXTRACT_MIN_ISOTOPES=" + String(k) + ": dropped " + String(before - precursors.size())
                     + " precursors with fewer isotope peaks, " + String(precursors.size()) + " remain");
     }
     // [ms1-funnel] diag:dump_ms1_tsv: MS1 traces and precursors, to attribute where a precursor is lost.
@@ -3975,13 +3975,13 @@ protected:
     if (integer_detector && !tofAxis().ok)
     {
       // The flight-time axis comes from the input's own analysis.tdf: a .d directory has one, and an
-      // mzPeak archive can be accompanied by one (DIASPEXTRACTOR_MZPEAK_TDF, as the exact-calibration
+      // mzPeak archive can be accompanied by one (DIASPEXTRACT_MZPEAK_TDF, as the exact-calibration
       // path already uses).
       why = "no candidate tdf";
       for (const std::string& c : tdf_cand)
         if (loadTofAxis(c, why)) { writeLogInfo_("flight-time axis from " + c + ": "
               + String(tofAxis().b_by_frame.size()) + " frame factors"); break; }
-#ifdef DIASPEXTRACTOR_WITH_MZPEAK
+#ifdef DIASPEXTRACT_WITH_MZPEAK
       // An mzPeak archive carries its own vendor/analysis.tdf.gz, and the exact-m/z path has already
       // read MzCalibration + Frames.T1 from it: the same calibration the .d path loads.
       if (const auto mzp = spx::lastMzPeakMeta(); !tofAxis().ok && mzp && mzp->exact)
@@ -4147,7 +4147,7 @@ protected:
     std::shared_ptr<DataProcessing> out_dp = std::make_shared<DataProcessing>(getProcessingInfo_(DataProcessing::DATA_PROCESSING));
     // [provenance] Header stamps that make an archived file attributable: calibration path (exported from
     // libOpenMS, so no header static is duplicated across the DSO boundary), detector, grid, intensity weights.
-#ifdef DIASPEXTRACTOR_WITH_MZPEAK
+#ifdef DIASPEXTRACT_WITH_MZPEAK
     if (FileHandler::getTypeByFileName(in) == FileTypes::MZPEAK)
       out_exp.setMetaValue("spx:mz_calibration", spx::lastMzPeakCalibration());   // not BrukerTimsFile's state
     else
@@ -4659,7 +4659,7 @@ protected:
         // (rt - x) <= delta_rt: x >= T - 2 delta_rt up to two roundings of ~1e-12 s. The slack
         // over-carries by a hair (a carried fragment no precursor accepts changes nothing), never
         // under-carries (review, step 2: the exact form dropped a fragment at 1.2000000000000002).
-        static const bool no_carry = std::getenv("DIASPEXTRACTOR_TILE_NO_CARRY") != nullptr;   // e2e falsifier only
+        static const bool no_carry = std::getenv("DIASPEXTRACT_TILE_NO_CARRY") != nullptr;   // e2e falsifier only
         if (!tile.last && !no_carry)
         {
           Carry& co = carry_out.at(wl[wi].first);
@@ -4815,23 +4815,30 @@ extern char** environ;
 
 int main(int argc, const char** argv)
 {
-  // SpeXtractor was renamed DIAspeXtractor, and every SPEXTRACTOR_* environment variable is DIASPEXTRACTOR_* now (so are
-  // the three the patched libOpenMS reads). An old name would be ignored without a word -- a chain's A/B would measure
-  // the default -- so any SPEXTRACTOR_* variable refuses the run before anything else happens.
+  // The tool was SpeXtractor (variables SPEXTRACTOR_*) and then DIAspeXtractor (DIASPEXTRACTOR_*); it is DIAspeXtract
+  // now, and every variable is DIASPEXTRACT_* (so are the three the patched libOpenMS reads). An old name would be
+  // ignored without a word -- a chain's A/B would measure the default -- so any variable under either old prefix refuses
+  // the run before anything else happens, naming the variable and its DIASPEXTRACT_ name. There is no dual read.
+  static const struct { const char* prefix; size_t len; } old_prefixes[] = {{"SPEXTRACTOR_", 12}, {"DIASPEXTRACTOR_", 15}};
   bool old_name = false;
   for (char** e = environ; e != nullptr && *e != nullptr; ++e)
   {
-    if (std::strncmp(*e, "SPEXTRACTOR_", 12) != 0) continue;
-    const int n = (int)std::strcspn(*e, "=");
-    std::fprintf(stderr, "Error: %.*s is set, but SpeXtractor is now DIAspeXtractor and reads only DIASPEXTRACTOR_* variables: "
-                         "rename it to DIA%.*s or unset it. Nothing was run.\n", n, *e, n, *e);
-    old_name = true;
+    for (const auto& op : old_prefixes)
+    {
+      if (std::strncmp(*e, op.prefix, op.len) != 0) continue;
+      const int n = (int)std::strcspn(*e, "=");                 // the variable name
+      const int m = n - (int)op.len;                            // the part after the old prefix
+      std::fprintf(stderr, "Error: %.*s is set, but the tool is now DIAspeXtract and reads only DIASPEXTRACT_* variables "
+                           "(SpeXtractor's SPEXTRACTOR_* and DIAspeXtractor's DIASPEXTRACTOR_* are refused, not ignored): "
+                           "rename it to DIASPEXTRACT_%.*s or unset it. Nothing was run.\n", n, *e, m, *e + op.len);
+      old_name = true;
+    }
   }
   if (old_name) return TOPPBase::ILLEGAL_PARAMETERS;
   // TOPPBase's update check sends this tool's name and version to an OpenMS REST endpoint on every run and,
   // offline, prints Qt QIODevice errors on the stderr the harness parses (build.yml asserts --help stays clean).
   // Set only if unset, so a user's export still decides.
   ::setenv("OPENMS_DISABLE_UPDATE_CHECK", "ON", 0);
-  TOPPDIAspeXtractor tool;
+  TOPPDIAspeXtract tool;
   return tool.main(argc, argv);
 }

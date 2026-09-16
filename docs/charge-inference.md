@@ -52,7 +52,7 @@ default". **This is what removed it in 1.2.0.**
 **6. Charge errors cost CLOSED-search identifications today, in the published numbers.**
 `msfragger.params` has `override_charge = 0`, so MSFragger TRUSTS our annotation. Measured
 2026-09-02 (the charge-corruption test in `docs/BENCHMARK-MATRIX-2026-09-01.md`): forcing the engine to re-derive charge
-instead (`override_charge=1, z=1..5`) moved DIAspeXtractor 10,750 -> **11,238 (+4.5%)** against the
+instead (`override_charge=1, z=1..5`) moved DIAspeXtract 10,750 -> **11,238 (+4.5%)** against the
 reference tool's 13,004 -> 13,276 (+2.1%), narrowing the gap 2,254 -> 2,038. So roughly 10% of the
 MSFragger deficit is our charge labels, and it is recoverable. The counter-claim that stood in the
 `assembly:open_search_safe` help string -- "Closed search barely notices (charge unset cost only

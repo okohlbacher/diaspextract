@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Where does the 9.51 PSMs/peptide come from -- within a cycle, or across cycles?
 
-DIAspeXtractor emits 9.51 PSMs per peptide against the reference implementation's 1.69. That ratio alone cannot
+DIAspeXtract emits 9.51 PSMs per peptide against the reference implementation's 1.69. That ratio alone cannot
 distinguish two very different situations:
 
   WITHIN-CYCLE duplication   several pseudo-spectra generated from ONE diaPASEF cycle all match

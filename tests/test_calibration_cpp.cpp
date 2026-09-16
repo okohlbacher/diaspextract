@@ -39,7 +39,7 @@ int main(int argc, char** argv)
   {
     const size_t fstart = j.find("\"model_type\":", pos);
     if (fstart == std::string::npos) break;
-    diaspextractor::TdfMzCalibration cal;
+    diaspextract::TdfMzCalibration cal;
     size_t p = fstart;
     double v = 0;
     nextNumber(j, "model_type", p, v);        cal.model_type = (int)v;
@@ -80,7 +80,7 @@ int main(int argc, char** argv)
       if (std::fabs(back - tof) > 1e-3)
       { std::fprintf(stderr, "FAIL round trip: tof %.4f -> mz -> %.4f\n", tof, back); return 1; }
       // ablation: dropping C2 must be clearly visible, else the golden set proves nothing
-      diaspextractor::TdfMzCalibration no_c2 = cal; no_c2.C2 = 0.0;
+      diaspextract::TdfMzCalibration no_c2 = cal; no_c2.C2 = 0.0;
       worst_noc2 = std::fmax(worst_noc2, std::fabs(no_c2.tofToMz(tof, b) - mz) / mz * 1e6);
       ++n_cases;
       cp = q;
@@ -93,7 +93,7 @@ int main(int argc, char** argv)
   { std::fprintf(stderr, "C2 ablation only %.3f ppm -- golden set cannot catch the known-bad port\n", worst_noc2); return 1; }
 
   // negative paths must be REJECTED, not approximated
-  diaspextractor::TdfMzCalibration bad;
+  diaspextract::TdfMzCalibration bad;
   bad.model_type = 2; bad.C1 = 1.0; bad.digitizer_timebase = 0.125;
   if (bad.isSupported()) { std::fprintf(stderr, "ModelType 2 must be rejected\n"); return 1; }
   bad.model_type = 1; bad.dC2 = 1e-9;
@@ -106,7 +106,7 @@ int main(int argc, char** argv)
   // against the vendor library on the first and the last frame of one such file; dropping the
   // term is -53..-938 ppm, so the ablation guard below is what makes this case worth having.
   {
-    diaspextractor::TdfMzCalibration c4;
+    diaspextract::TdfMzCalibration c4;
     c4.model_type = 1; c4.digitizer_timebase = 0.2; c4.digitizer_delay = 25224.4;
     c4.C0 = 325.88517924839397; c4.C1 = 152987.23707178448; c4.C2 = 0.0030691291814964453;
     c4.C4 = -0.09048112117134345; c4.T1_ref = 25.197341867575105; c4.dC1 = 16.5;
@@ -115,7 +115,7 @@ int main(int argc, char** argv)
     const double tof[5] = {2000.0, 50000.0, 150000.0, 300000.0, 403000.0};
     const double vendor[2][5] = {{98.00225185761244, 186.40848708590778, 461.14679357131746, 1102.6974507710581, 1702.6599405622635},
                                  {98.00223875072383, 186.40846214421924, 461.14673185089845, 1102.6973031683212, 1702.6597126456059}};
-    diaspextractor::TdfMzCalibration no_c4 = c4; no_c4.C4 = 0.0;
+    diaspextract::TdfMzCalibration no_c4 = c4; no_c4.C4 = 0.0;
     double worst_c4 = 0.0, worst_no_c4 = 0.0;
     for (int f = 0; f < 2; ++f)
       for (int i = 0; i < 5; ++i)
@@ -137,7 +137,7 @@ int main(int argc, char** argv)
   // and must be ACCEPTED. A NULL C2 is what must be refused; the loader converts NULL to NaN, which
   // the "NaN must be rejected" case below covers. Pin the linear law in closed form and round trip.
   {
-    diaspextractor::TdfMzCalibration lin;
+    diaspextract::TdfMzCalibration lin;
     lin.model_type = 1; lin.digitizer_timebase = 0.2; lin.digitizer_delay = 25131.0;
     lin.C0 = 315.70325869866065; lin.C1 = 154272.1271422364; lin.C2 = 0.0;
     lin.T1_ref = 25.63315397685876; lin.dC1 = -0.2;               // the PXD017703 row 1 values
@@ -161,7 +161,7 @@ int main(int argc, char** argv)
   if (bad.isSupported()) { std::fprintf(stderr, "C1 <= 0 must be rejected\n"); return 1; }
 
   // unphysical TOF must NOT return a plausible mass (silent-wrongness guard)
-  diaspextractor::TdfMzCalibration ok;
+  diaspextract::TdfMzCalibration ok;
   ok.model_type = 1; ok.digitizer_timebase = 0.125; ok.digitizer_delay = 25655.375;
   ok.C0 = 279.3262846272992; ok.C1 = 155279.13067653627; ok.C2 = 0.001260061434461731;
   ok.T1_ref = 25.693668980735552; ok.dC1 = 20.0;
@@ -175,7 +175,7 @@ int main(int argc, char** argv)
   if (!(ok.tofToMz(1e5, bb) > mz_at_zero))
   { std::fprintf(stderr, "m/z must increase with tof\n"); return 1; }
   // the t <= C0 guard: force it with a calibration whose zero sits above the arrival time
-  diaspextractor::TdfMzCalibration late = ok; late.C0 = 1e9;
+  diaspextract::TdfMzCalibration late = ok; late.C0 = 1e9;
   if (!std::isnan(late.tofToMz(1e5, late.frameFactor(late.T1_ref))))
   { std::fprintf(stderr, "t <= C0 must yield NaN, not a plausible-looking mass\n"); return 1; }
 

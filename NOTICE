@@ -1,4 +1,4 @@
-DIAspeXtractor
+DIAspeXtract
 Copyright (c) 2026 Oliver Kohlbacher and contributors
 
 This product is derived from and links against OpenMS.
@@ -8,7 +8,7 @@ This product is derived from and links against OpenMS.
   Licensed under the BSD 3-Clause License
   https://github.com/OpenMS/OpenMS
 
-src/diaspextractor.cpp originated as a TOPP tool inside the OpenMS source tree and
+src/diaspextract.cpp originated as a TOPP tool inside the OpenMS source tree and
 was extracted into this standalone repository. It uses OpenMS classes including
 MassTraceDetection, ElutionPeakDetection, PeakPickerIM, BrukerTimsFile and
 FullSwathFileConsumer, and retains OpenMS's BSD-3-Clause terms.

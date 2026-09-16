@@ -1,4 +1,4 @@
-# DIAspeXtractor: encode mzML spectra in parallel, write them in order.
+# DIAspeXtract: encode mzML spectra in parallel, write them in order.
 #
 # Serialising one spectrum is independent of every other spectrum; only the CONCATENATION is
 # ordered. The stock writer does both on one thread, and it is CPU-bound, not I/O-bound: measured,
@@ -56,7 +56,7 @@
  
          // write actual data
 -        for (Size s_idx = 0; s_idx < exp.size(); ++s_idx)
-+        // [DIAspeXtractor] Serialising one spectrum is independent of every other; only the
++        // [DIAspeXtract] Serialising one spectrum is independent of every other; only the
 +        // CONCATENATION is ordered. Encode in parallel into per-chunk buffers and append them in
 +        // index order -- byte-for-byte what the serial loop produced. Serial writing sustained
 +        // ~400 MB/s against a filesystem measured at 4.0 GB/s, i.e. this phase is CPU-bound.
@@ -94,7 +94,7 @@
 +            const Size w1 = std::min(w0 + wave, n_spec);
 +            const Size n_chunk = (w1 - w0 + CHUNK - 1) / CHUNK;
 +            enc.assign(n_chunk, std::string());
-+            // [DIAspeXtractor index] Each thread's handler records <spectrum> offsets RELATIVE TO ITS
++            // [DIAspeXtract index] Each thread's handler records <spectrum> offsets RELATIVE TO ITS
 +            // OWN CHUNK BUFFER and into ITS OWN spectra_offsets_, which nobody read: the file's
 +            // <indexList> came out empty (count="0", a dummy entry) on every parallel-written
 +            // file. Collect the chunk's offsets here and rebase them when the chunk is appended.

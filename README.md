@@ -1,43 +1,81 @@
+<p align="center"><img src="assets/logo.svg" alt="DIAspeXtract" width="160"></p>
+
 # DIAspeXtract
 
-Extract pseudo-DDA ("pseudo-MS/MS") spectra from Bruker timsTOF **diaPASEF** data.
+Extract pseudo-DDA ("pseudo-MS/MS") spectra from Bruker timsTOF **diaPASEF** data, so that any ordinary DDA search
+engine can search them.
 
-DIAspeXtract was DIAspeXtractor (executable `diaspextractor`) in 1.2.0 and 1.2.1, and the tool released as
-speXtract (executable `spextract`) up to v1.1.0; it was briefly SpeXtractor in development. speXtract and
-SpeXtractor were taken by other tools; 1.3.0 only drops the "-or". DIAspeXtract 1.3.0 continues that version
-line, and [CHANGELOG.md](CHANGELOG.md) maps the old names and defaults to the new ones.
+DIAspeXtract reads a diaPASEF acquisition (a Bruker `.d`, or mzML / mzPeak), finds precursor ions in the MS1 frames,
+finds fragment ions in the isolation windows, pairs every precursor with the fragments that co-elute with it in both
+retention time and ion mobility, and writes one MS2 spectrum per precursor hypothesis to mzML or mzPeak. Sage,
+MSFragger, Comet or anything else that reads mzML can then search the output like a DDA file. There is no spectral
+library, no prediction and no enumeration of the search space, which is the point: an **open or blind search** over the
+output can report sequence variants and unexpected modifications that a library-based DIA workflow cannot represent.
 
-DIAspeXtract turns a data-independent acquisition into a set of pseudo-tandem spectra that any
-ordinary DDA search engine can read. Each emitted spectrum pairs one precursor hypothesis with the
-fragment traces that co-elute with it in both retention time and ion mobility. The output is mzML
-(or mzPeak, following the `-out` extension), so it feeds Sage, MSFragger, Comet or anything else that
-reads mzML — no library, no spectral prediction, no enumeration of the search space in advance.
+It is a standalone application under BSD-3-Clause. **OpenMS is a prerequisite, not a host**: the tool links against a
+patched OpenMS source tree but lives outside it. Earlier releases were named speXtract (up to 1.1.0) and DIAspeXtractor
+(1.2.x); [CHANGELOG.md](CHANGELOG.md) maps the old names, options and defaults to the current ones.
 
-That last point is the reason the tool exists: because the search space is not enumerated before
-the search runs, an **open or blind search** over the output can report variants and unexpected
-modifications that a library-based DIA workflow cannot represent.
+## How it works
 
-DIAspeXtract is BSD-3-Clause and is a standalone application. **OpenMS is a prerequisite, not a
-host** — the tool links against an OpenMS installation but lives outside the OpenMS source tree.
+<p align="center"><img src="assets/pipeline.svg" alt="Pipeline: load, MS1 traces and precursor inference, window loop, output" width="1000"></p>
+
+1. **Load.** A `.d` is read frame by frame in decode batches and never held whole: the first pass reads the MS1
+   frames only, and the MS2 frames of each retention-time tile are read later, inside the window loop. Flight time
+   becomes m/z through the acquisition's own `MzCalibration` table, evaluated exactly (the vendor model with digitizer
+   temperature, the `C4` mass offset and a quadratic term `C2` of either sign; an unsupported table fails closed). MS1
+   frames pass through the dnoise MS1 filter (streak, halo and isolation-window gates on the raw points), are
+   peak-picked along ion mobility, and pruned of centroids at or below the noise threshold. An mzML input is read
+   whole.
+2. **Precursors.** MS1 mass traces are detected in 48 m/z bands in parallel, split at chromatographic valleys and
+   trimmed to 120 s around their apex. Traces that sit one isotope apart at the same mobility are walked into
+   envelopes: the walk assigns the monoisotopic peak and a charge from 1 to 5, an ion-mobility veto re-calls a z = 1
+   envelope that lies on the run's own 2+ trend line, and hypotheses without an isotope partner are dropped.
+3. **Fragments and the gate.** For every isolation window and 600-s cell, the tile's MS2 frames are read and fragment
+   mass traces are detected in 12 flight-time bands on the integer TOF axis, then split and trimmed like the precursors.
+   A fragment joins a precursor's spectrum when both lie in the same isolation window, its apex is within 3 s and
+   0.01 1/K0 of the precursor's, and the two elution profiles correlate (Pearson ≥ 0.3 over the full retention-time
+   grid, with at least 3 shared points).
+4. **Assembly and output.** The accepted fragments are ranked by correlation-weighted intensity and the top 500 kept;
+   a spectrum with at least 3 of them is written with a synthetic precursor (apex m/z, charge, retention time, 1/K0),
+   each fragment's emitted intensity multiplied by its correlation raised to `-assembly:corr_power` (2 by default, so squared). Spectra are sorted per tile and
+   serialised in parallel. The header records every setting that shaped the output.
+
+<p align="center"><img src="assets/algorithm.svg" alt="The co-elution gate and the assembly of one pseudo-spectrum" width="1000"></p>
+
+**Two detectors.** `-trace:detector integer` (default) works on the instrument's flight-time bins and never
+converts its compact store back to double m/z; it needs the vendor calibration and falls back, loudly, to `openms`
+without it. `-trace:detector openms` runs OpenMS `MassTraceDetection` on a materialised peak map. They are different
+algorithms that agree on about 85 % of the identified peptides; neither wins on every file and engine, and `integer`
+uses about 40 % less memory, which is why it is the default. Design notes: [docs/MZ-AXIS-DESIGN.md](docs/MZ-AXIS-DESIGN.md),
+[docs/INTEGER-TRACING-DESIGN.md](docs/INTEGER-TRACING-DESIGN.md), [docs/charge-inference.md](docs/charge-inference.md).
+
+**Emission is deliberately generous.** Two precursor hypotheses that share fragments each get their own spectrum, and
+a fragment may appear in several spectra. Search engines cope with that well; merging or deduplicating the output
+downstream loses peptides, so search it as written.
+
+### Streaming and memory
+
+<p align="center"><img src="assets/streaming.svg" alt="Retention-time cells, tiles and the memory admission gate" width="1000"></p>
+
+Memory, not CPU, decides whether a run fits a machine. The window loop therefore runs **tile by tile**: the run is cut
+into fixed 600-s retention-time cells at MS1 frame times, each tile (one cell by default) is read, traced, scored,
+sorted and written before the next one starts, and the fragments that straddle a cut are carried over. Tiling
+bounds the fragment working set; the MS1 traces and precursors of the whole run stay resident throughout. Within a
+tile, isolation windows are admitted while they fit in 75 % of the machine's free RAM, so the run adapts to
+neighbours on a shared machine; one window is always admitted whatever the memory says, so a single oversized window cannot deadlock the run. Between tiles the allocator's free pages are returned to the OS.
 
 ## Requirements
 
 | | |
 |---|---|
-| OpenMS | the development commit pinned in `patches/openms.lock` (bd4b895, 2026-04-24; it identifies itself as a 3.6.0 pre-release), patched by `scripts/apply_openms_patches.sh` and built `WITH_OPENTIMS` to read Bruker `.d`. No released OpenMS package works |
-| Compiler | C++20 — GCC 13+ or Clang 16+ |
+| OpenMS | the development commit pinned in `patches/openms.lock`, patched by `scripts/apply_openms_patches.sh` and built `WITH_OPENTIMS` to read Bruker `.d`. No released OpenMS package works: the tool installs a header into the OpenMS tree, calls a method the patch adds, and refuses to compile against an unpatched `MassTrace` |
+| Compiler | C++20. CI builds the tool with GCC on Ubuntu; the headers also compile with GCC 11, AppleClang and MSVC |
 | OpenMP | required |
-| CMake | 3.21+ (OpenMS's own requirement; the tool itself needs 3.16) |
-| **Memory** | **~22 GB peak** on a 30-minute gradient (dataset D) and **~21 GB** on a 2-hour acquisition (TNBC 009) at the shipped defaults, 100 threads, with one 600-s retention-time cell per tile (25 GB on the 2-hour file with `-perf:malloc_trim false`); in one tile (`-tile:cells_per_tile 0`) the same files peak at ~37 and ~100 GB (the 30–60 min cohort spanned 68–109 GB at the 2026-09-04 defaults). It follows how dense the acquisition is more than how long it runs |
-| Disk | measured on the release build at the shipped defaults: a 30-minute run (dataset D) writes **496,722** spectra as a **4.9 GB** mzML, a 2-hour run (TNBC 009) **3,010,923** as **27.8 GB** — about 9–10 kB per spectrum on both. That is about a quarter *fewer* spectra than the pre-1.2.0 default emitted (656k and ~3.9 M), but size from these figures, not from an older run's: per-spectrum size differs between acquisitions. mzPeak is about a third of the mzML (dataset D's 496,722 spectra are 1.76 GB) |
+| CMake | 3.21+ for OpenMS (the tool itself needs 3.16) |
+| Memory | 32+ GB |
+| Disk | about 10 kB per spectrum as mzML, tens of GB for a 2-hour acquisition; mzPeak is about a third of that |
 
-The memory figure is not a suggestion. A full-depth diaPASEF acquisition holds millions of mass traces
-in flight. At the shipped defaults the window loop holds one 600-s tile at a time, so a 30-minute in-house
-acquisition needs ~22 GB and a 2-hour one ~21 GB (25 GB with `-perf:malloc_trim false`); in one tile they
-needed ~37 and ~100 GB, and low-load public files (PXD017703) ran in 10–25 GB under the earlier one-tile
-defaults. Peak usage is reported at the end of every run, so you can
-size a node from your own data. Memory figures throughout are peak RSS as `/usr/bin/time` reports
-them (kB ÷ 10⁶).
 
 ## Install
 
@@ -45,233 +83,204 @@ them (kB ÷ 10⁶).
 git clone https://github.com/okohlbacher/diaspextract.git
 cd diaspextract
 
-# OpenMS first: the pinned development commit, patched, built. No released package works.
+# 1. OpenMS at the pinned commit, patched, built. No released package works.
 git clone https://github.com/OpenMS/OpenMS.git /path/to/OpenMS
 git -C /path/to/OpenMS checkout $(sed -n 's/^OPENMS_BASE=//p' patches/openms.lock)
 cmake -S /path/to/OpenMS -B /path/to/OpenMS/build -DCMAKE_BUILD_TYPE=Release \
-      -DWITH_OPENTIMS=ON -DWITH_GUI=OFF -DHAS_XSERVER=OFF   # plus OpenMS's own dependencies
+      -DWITH_OPENTIMS=ON -DWITH_GUI=OFF -DHAS_XSERVER=OFF      # plus OpenMS's own dependencies
+scripts/apply_openms_patches.sh /path/to/OpenMS                 # installs a header, applies four patches
+cmake --build /path/to/OpenMS/build -j                          # the patches change headers and libOpenMS
 
-scripts/apply_openms_patches.sh /path/to/OpenMS    # see "OpenMS patches" below
-cmake --build /path/to/OpenMS/build -j             # rebuild OpenMS: the patches change its headers and libOpenMS
+# 2. The tool.
 cmake -B build -DOpenMS_DIR=/path/to/OpenMS/build
 cmake --build build -j
-export OPENMS_DATA_PATH=/path/to/OpenMS/share/OpenMS  # a source-built OpenMS has no installed share/; the binary dies on --help without it
+export OPENMS_DATA_PATH=/path/to/OpenMS/share/OpenMS   # a source-built OpenMS has no installed share/
 ```
 
-The binary is `build/diaspextract`. `cmake --install build` puts it in `<install prefix>/bin` (set `-DCMAKE_INSTALL_PREFIX`).
+The binary is `build/diaspextract`; `cmake --install build` puts it under `<prefix>/bin`. The GitHub workflow
+`.github/workflows/build.yml` performs the same recipe on Ubuntu and is the reference.
 
-### OpenMS patches
+### The four OpenMS patches
 
-`scripts/apply_openms_patches.sh` installs `src/TdfMzCalibration.h` into the OpenMS tree and applies
-four patches. **All four matter. The build stops without the first and the third; it does not
-notice a missing second or fourth:**
+`scripts/apply_openms_patches.sh` applies them; all four matter, and the build stops without the first and third.
 
-- **Vendor m/z calibration.** Without it the Bruker reader converts flight time to m/z with a
-  two-point linear-in-sqrt chord that is **−5 to −11 ppm biased** (m/z dependent) on every file
-  measured, worth roughly **6–11% more closed-search Sage identifications** on the three files measured. Every emitted mzML
-  records which calibration was used in the `spx:mz_calibration` userParam
-  (`tdf_table_modeltype1` | `bruker_sdk` | `legacy_chord_APPROXIMATE`). The exact model covers
-  `ModelType` 1 with the digitizer-temperature term, the `C4` mass offset and a quadratic term `C2` of
-  either sign. A negative `C2`, as timsTOF Pro 2 acquisition software 2.0.53 writes it, is accepted since
-  1.3.1, but only inside a checked domain (`src/TdfMzCalibration.h`). The golden tests pin each variant
-  (`tests/calibration_golden.json`, `tests/test_calibration_cpp.cpp`). An unsupported calibration
-  table **fails closed** rather than silently producing biased masses.
-- **Lock-free elution-peak detection.** OpenMS guards a shared vector with a program-global critical
-  section. Called from inside DIAspeXtract's parallel window loop, that one lock serialises the tool.
-- **`MassTrace` move operations.** OpenMS declares a defaulted destructor and copy operations on
-  `MassTrace`, which suppresses the implicit moves, so every `std::move` deep-copied its points. A
-  `static_assert` stops the build without this one.
-- **Parallel mzML serialisation.** Writing the spectrum list is CPU-bound, not I/O-bound — measured,
-  it sustains ~400 MB/s against a filesystem that does 4.0 GB/s — and the stock writer does it on
-  one thread. Encoding one spectrum is independent of every other, so this encodes chunks in
-  parallel and appends them in index order, giving byte-identical output. Each thread needs its own
-  handler and validator: the writer memoises CV-term validation in mutable state, and sharing one
-  handler corrupts the heap. Measured on a 30-minute acquisition: **20.1 s → 5.9 s**.
+| patch | what it changes | why |
+|---|---|---|
+| `openms-brukertims-mz-calibration.patch` + `src/TdfMzCalibration.h` | the Bruker reader converts flight time with the acquisition's exact calibration model instead of a two-point chord | the chord is −5 to −11 ppm off, m/z dependent, worth 6–11 % of closed-search identifications; the mzML records which model ran (`spx:mz_calibration`) |
+| `openms-epd-lockfree.patch` | removes a program-global critical section from elution-peak detection | called from a parallel window loop, that one lock burned about a quarter of the CPU in blocked threads |
+| `openms-masstrace-move.patch` | gives `MassTrace` move operations | OpenMS's defaulted copy operations made every `std::move` a deep copy; a `static_assert` enforces the patch |
+| `openms-mzml-parallel-write.patch` | encodes mzML spectra in chunks on all threads, appended in index order | the writer was CPU-bound on one thread; byte-identical spectrum list, 20 s → 6 s on a 30-minute run |
 
-Three environment variables reach the patched libOpenMS, none of them needed for a normal run:
-`DIASPEXTRACT_ALLOW_CHORD_FALLBACK=1` (exactly `1`) opts into the legacy chord when the exact calibration
-is unavailable, which otherwise fails closed; `DIASPEXTRACT_LOAD_BATCH=<n>` sets the frames per decode
-batch of the parallel `.d` loader (default 256; the frames reach the detector in the same order at any
-value); and `DIASPEXTRACT_SDK_PARALLEL` (any value) lets that loader decode in parallel while the Bruker
-SDK converter is active, which it does serially by default because the SDK's thread-safety is not vouched
-for.
+Environment variables the patched libOpenMS reads, none needed for a normal run: `DIASPEXTRACT_ALLOW_CHORD_FALLBACK=1`
+opts into the legacy chord when the exact calibration is unavailable (otherwise the run fails closed; the MS1
+denoiser needs the exact model, so this and the SDK path below require `-dnoise:ms1 false`);
+`DIASPEXTRACT_LOAD_BATCH=<n>` sets the frames per decode batch (default 256; output-neutral);
+`DIASPEXTRACT_SDK_PARALLEL` (any value) lets the loader decode frames in parallel even when Bruker's library does
+the conversion, which otherwise runs serially because that library's thread safety is not guaranteed. Optionally,
+`OPENMS_BRUKER_SDK_PATH=/path/to/libtimsdata.so` uses Bruker's own library for the conversion as an independent
+cross-check; it is not redistributed. A leftover `SPEXTRACTOR_*` or `DIASPEXTRACTOR_*` variable from an earlier
+release makes the tool refuse to start, naming the variable and its new spelling.
 
-Optionally, `OPENMS_BRUKER_SDK_PATH=/path/to/libtimsdata.so` uses Bruker's own library for the
-conversion instead. It is an independent cross-check, not a requirement, and is not redistributed.
+### Optional: mzPeak
 
-### Optional: `.mzpeak` input
-
-Build the mzPeak C++ library once against the same Arrow/Parquet/libzip that OpenMS uses
-(`scripts/build_mzpeak_lib.sh`), then configure with `-DMZPEAK_ROOT=<checkout>`. This also needs the
-OpenMS mzPeak integration (the OpenMS/mzpeak fork), which the pinned commit does not carry; the plain recipe above builds without it,
-reads `.d` and mzML, and writes mzML. `.d` remains the primary input and is faster.
+Build the mzPeak C++ library against the same Arrow/Parquet/libzip that OpenMS uses (`scripts/build_mzpeak_lib.sh`)
+and configure the tool with `-DMZPEAK_ROOT=<checkout>`. This also needs the OpenMS mzPeak integration, which the
+pinned commit does not carry. The plain recipe above reads `.d` and mzML and writes mzML; `.d` stays the faster input.
 
 ## Run
 
 ```bash
-diaspextract -in sample.d -out pseudo.mzML -threads 64
+diaspextract -in sample.d -out pseudo.mzML
 ```
 
-That is the complete command. Every default is the configuration the project benchmarks; a run that
-needed extra flags to reproduce a published figure would be a bug. The end-to-end suite pins the
-shipped detector and the charge floor (it passes a few extraction options of its own, so it is not a
-test of the whole default set).
-
-Then search the output like any DDA file:
+That is the whole command. The defaults are the recommended configuration; `-threads` defaults to every core of the
+machine, so pass `-threads <n>` on a shared machine. Then search the output like any DDA file:
 
 ```bash
 sage sage.json -o results pseudo.mzML
 ```
 
-### Options worth knowing
+Control FDR **per precursor charge** downstream: singly charged precursors are emitted by default (they are genuine
+1+ ions on tryptic data) and their stratum carries a higher entrapment FDR than a pooled 1 % cut implies. If your FDR
+procedure cannot stratify by charge, filter the search results per precursor charge yourself, or run with
+`-charge:min_charge 2` to emit only 2+ and higher.
 
-| option | default | what it does |
+### Options
+
+`diaspextract --helphelp` prints every option with its default. Defaults below are the shipped ones. The detection,
+charge, gate, assembly and denoising options shape the spectra by definition; in the memory and concurrency table,
+only the options marked **changes output** move the spectrum list, the others cost or save time and memory.
+
+**Which option for what.** Memory: `-tile:cells_per_tile` (1 is the smallest footprint), `-perf:max_concurrent_windows`
+and `-perf:mem_fraction`; avoid `.mzpeak` output and `-trace:detector openms` on a small machine, both process the
+whole run at once. Time: `-threads`, and `-perf:malloc_trim false` when memory is not the constraint. Sensitivity:
+`-perf:stream_load false` on a machine with the memory for it, `-assembly:im_weight_sigma 0.005` for a Sage search,
+and trying `-trace:detector openms` on your own data. Charge and FDR: `-charge:min_charge`.
+
+**Input and output**
+
+| option | default | meaning |
 |---|---|---|
-| `-threads` | all cores | worker threads; an explicit `-threads 1` on the command line is honoured (only the command line is inspected: `threads = 1` in an ini file is treated as unset). Parallelism is isolation windows × flight-time bands, and the window loop reaches ~78× (30-min) to ~89× (2-hour) thread occupancy at 100 threads; window concurrency is bounded by a free-RAM admission gate, not by core count |
-| `-out_type` | follows the extension | `mzML` or `mzpeak`; in a build with mzPeak, `.mzpeak` when the extension says nothing (a plain build writes mzML only). Search engines read mzML, so write `.mzML` whenever a search comes next. mzPeak is written in one piece, so it runs as one tile (the whole run's memory, with a warning) |
-| `-trace:detector` | `integer` | `integer` works on the instrument's flight-time bin; `openms` uses OpenMS `MassTraceDetection`. Different algorithms — see below |
-| `-charge:min_charge` | 1 | lowest precursor charge to emit. Singly charged precursors are genuine on tryptic data (their mobility sits on the 1+ trend line) and are 14–20% of Sage peptides on a 2-hour acquisition, though only ~1.7% on a 30-minute one. Their stratum carries 3–9% entrapment FDR under a pooled 1% cut (file-dependent), so control FDR per charge downstream. `-charge:min_charge 2 -charge:im_charge_veto false` restores the old behaviour (the veto runs first, so `2` alone keeps its re-called 2+) |
-| `-charge:im_charge_veto` | `true` | the 2+ and 3+ ion-mobility trend lines are fitted per run from the run's own confident precursors; a z=1 call on the 2+ line (11–26% of z=1 calls depending on the file: a halved 2+ envelope) is re-called 2+, one on the 3+ line is dropped. Genuine 1+ ions are untouched |
-| `-charge:im_veto_band` | 2.5 | half-width of the veto's mobility band, in MAD-sigma of the fitted residuals |
-| `-assembly:require_isotope_support` | `true` | drop precursor hypotheses with no isotope partner. `false` roughly doubles emission, was ~7× slower (measured 2026-09-04, before the scheduling fixes) and identifies fewer peptides |
-| `-perf:malloc_trim` | `true` | return the allocator's free pages (glibc) at the two phase boundaries and between tiles. At the phase boundaries it trades **-30% peak memory for +8.5% wall** on a 2-hour acquisition in one tile (the loop re-faults the returned pages cold); between tiles it takes about 4 GB off TNBC 009 and 0.5 GB off dataset D at the defaults. Byte-identical output either way. Off when time, not memory, is the constraint |
-| `-perf:stream_load` | `true` | read the `.d` frame by frame. `false` holds the whole run in memory (90 GB floor) **and changes the output**: measured, it is slightly *more* sensitive on a large file (+2.0% Sage peptides at unchanged entrapment FDR) for 1.75× the memory and ~1.7× the wall |
-| `-perf:ms1_trace_bands` | 48 | band-parallel MS1 mass-trace detection (a halo partition; the band count moves the spectrum list slightly). Raised from 12 on 2026-09-07: MS1 tracing 2× faster; peptide counts within 0.01–2% on both engines and both benchmark acquisitions; 1 = off |
-| `-dnoise:ms1` | `true` | **MS1 denoising, a bit-identical port of dnoise v0.1.0** (Garrett, Diedrich & Yates III, bioRxiv 2026.08.27.747603; MIT): per MS1 frame, an ion-mobility streak filter, a halo filter and the diaPASEF isolation-window gate, applied to the raw points before picking. It keeps 12.7–20.5% of the MS1 points. **Changes output**: the result is digest-identical to running the tool on dnoise's own filtered `.d`, where dataset D lost 4.3% (Sage) / 4.0% (MSFragger) of its peptides and TNBC 009 gained 1.5% / lost 0.5%. Peak memory at one cell per tile falls 13–21%. Bruker `.d` input only; other inputs pass through, and the header records it. `false` restores the previous output. The `dnoise:` tuning options mirror dnoise's own |
-| `-perf:ms1_prune` | `true` | drop picked MS1 centroids at or below `trace:noise_threshold_int` at load, keeping a chain of witnesses so every MS1 band spectrum and the tracer's input stay exact; byte-identical output. Peak at one cell per tile, dnoise off: dataset D 31.99 → 25.90 GB, TNBC 009 69.11 → 31.97 GB |
-| `-trace:max_span_sec` | 120 | trim a mass trace to this many seconds around its apex |
-| `-trace:band_edges` | `acquisition` | the integer detector's per-window band edges come from the tdf's metadata (the digitizer's last bin) instead of the window's resident peaks, so a streaming reader can reproduce them. Measured neutral on both benchmark files (Sage +1/+1, MSFragger 0/−3, entrapment +0.00/+0.01 points); `slab` reproduces the pre‑2026‑09‑10 output |
-| `-tile:cells_per_tile` | 1 | group the cells into tiles of this many cells and run the window loop tile by tile (each tile's spectra sorted and written before the next starts). Output-identical for any value (the cells are the unit; boundary fragments are carried between tiles); 0 = one tile. On a `.d` (the streaming source) **memory is one tile's**: at the defaults TNBC 009 peaks at 21.07 GB in 13 tiles with a trim between tiles against 99.70 GB in one (wall 9:57 against 9:42, same node), dataset D at 21.99 GB in 3 tiles against 37.44 GB (3:47 against 3:15). mzPeak output always runs as one tile |
-| `-tile:rt_sec` | 600 | the integer detector traces each isolation window in fixed retention-time **cells** of this pitch, cut at the run's MS1 frame times and recorded in the mzML header (`spx:tile_boundaries`). The cut is part of the definition: any grouping of cells into tiles, resident or streamed, reproduces the same spectra bit for bit. Science price measured 2026-09-10 against whole-window tracing (`-1`): Sage +0.8% on both benchmark files, MSFragger +1.5% / flat, entrapment FDR +0.14 / +0.16 points (inside the release rule); peptides within 15 s of a cut line — 5% of the set on TNBC 009 — are lost at 9.3–9.4% against 6.0–7.9% elsewhere |
+| `-in` | required | a Bruker `.d` directory, an mzML, or an mzPeak archive |
+| `-out` | required | output file; the format follows the extension (`.mzML` or `.mzpeak`). mzPeak is written in one piece, so the whole run is processed as one tile at whole-run memory; write `.mzML` when memory is tight or a search comes next |
+| `-out_type` | follows the extension | force `mzML` or `mzpeak` |
+| `-threads` | all cores | worker threads. Without `-threads` on the command line the tool uses every core; an ini value above 1 is honoured, an ini `threads = 1` counts as unset |
+| `-ini`, `-write_ini` | | read or write a TOPP ini file with every option |
+| `-log`, `-no_progress`, `-debug` | | log to a file, silence progress, raise the debug level |
 
-`diaspextract --helphelp` lists every option, most with a pointer to the measurement behind the default.
+**Memory and concurrency (`perf:`, `tile:`)** — output-neutral unless marked.
+
+| option | default | meaning |
+|---|---|---|
+| `-tile:cells_per_tile` | 1 | cells per tile. The fragment working set is one tile's; 0 runs the whole run as one tile, at several times the memory |
+| `-tile:rt_sec` | 600 | pitch of the retention-time cells, cut at MS1 frame times. **Changes output**: peptides eluting within 15 s of a cut line are lost a few points more often than elsewhere, about 0.2 % of the identified set at 600 s. −1 = one cell, the whole run in memory (`-tile:cells_per_tile` then has no effect) |
+| `-perf:mem_fraction` | 0.75 | fraction of the machine's currently free RAM the window loop may commit; re-decided at every window admission |
+| `-perf:max_concurrent_windows` | 0 = all | upper bound on isolation windows in flight; lower it to trade wall time for memory |
+| `-perf:malloc_trim` | true | return free pages to the OS at the phase boundaries and between tiles: about 30 % off the peak of a one-tile run for about 8 % more wall; `false` when time is the constraint |
+| `-perf:stream_load` | true | read the `.d` frame by frame. `false` holds the run in memory (1.75× memory, 1.7× wall) and **changes output** (+2 % Sage peptides on a large file at unchanged entrapment FDR) |
+| `-perf:ms1_prune` | true | drop MS1 centroids at or below `trace:noise_threshold_int` while loading, in a way that leaves the output identical; `false` keeps every centroid and only costs memory |
+| `-perf:ms1_trace_bands` | 48 | m/z bands for parallel MS1 trace detection; 1 = off. The band count moves the output slightly |
+| `-perf:trace_bands` | 12 | flight-time bands per isolation window for parallel fragment tracing; 1 = off. The band count moves the output |
+
+**Mass-trace detection (`trace:`)**
+
+| option | default | meaning |
+|---|---|---|
+| `-trace:detector` | integer | `integer` (flight-time bins, needs the vendor calibration) or `openms` (`MassTraceDetection`); different algorithms, see above. `openms` traces whole windows: no cells, no tiles, whole-run memory |
+| `-trace:mass_error_ppm` | 15 | m/z tolerance for trace extension |
+| `-trace:noise_threshold_int` | 100 | MS1 noise intensity threshold |
+| `-trace:ms2_noise_threshold_int` | 10 | MS2 noise intensity threshold |
+| `-trace:min_length_sec` | 3 | minimum MS1 trace length |
+| `-trace:ms2_min_length_sec` | 0 | minimum MS2 trace length; 0 = no length filter |
+| `-trace:ms1_chrom_peak_snr`, `-trace:ms2_chrom_peak_snr` | 3, 1 | apex threshold as a multiple of the noise threshold, MS1 and MS2 |
+| `-trace:ms1_split_valleys`, `-trace:ms2_split_valleys` | 7, 7 | split traces at chromatographic valleys, value = expected peak FWHM in seconds; 0 = off |
+| `-trace:split_scan_time` | frame | scan time behind the valley splitter: the run's MS1 cycle time (`frame`) or each trace's own (`trace`, OpenMS's behaviour, about 6 % fewer Sage peptides). **Changes output**; leave at `frame` |
+| `-trace:max_span_sec` | 120 | trim every trace to this many seconds around its apex; 0 = no cap. **Changes output** (within 0.1 % of the peptides from 0 to 240) |
+| `-trace:mz_estimator` | apex | reported m/z of a precursor trace: the most intense peak's (`apex`), the intensity-weighted centroid (`mean`) or the `median`. Fragment traces of the integer detector always report the calibrated m/z of their apex bin; with `-trace:detector openms` the estimator applies to them too. **Changes output**; `apex` identifies the most peptides on both engines |
+| `-trace:band_edges` | acquisition | where the integer detector's band edges come from; leave at `acquisition`. `slab` (edges from the window's own peaks) needs `-perf:stream_load false`; the spectra differ slightly, the identifications hardly |
+| `-trace:native_ms1_neighbors` | 0 | sum this many neighbouring MS1 frames on each side before picking (1 = 3 frames); needs `-perf:stream_load true` and `-dnoise:ms1 false`. **Changes output**: about 2.7× the spectra for about 8 % more Sage peptides, measured on older defaults |
+
+**Precursor charge (`charge:`)**
+
+| option | default | meaning |
+|---|---|---|
+| `-charge:min_charge` | 1 | lowest precursor charge to emit; `2` emits only 2+ and higher. Add `-charge:im_charge_veto false` only to reproduce the older charge handling without the mobility re-call |
+| `-max_charge` | 5 | highest charge considered by the isotope walk |
+| `-charge:scoring` | count | monoisotope and charge from the isotope partner count (`count`, ties to the lower charge) or from averagine cosine × co-elution (`envelope`) |
+| `-charge:im_charge_veto` | true | fit the run's 2+ and 3+ mobility trend lines from its confident envelopes; a z = 1 call on the 2+ line is re-called 2+, one on the 3+ line loses its charge |
+| `-charge:im_veto_band` | 2.5 | half-width of that band in MAD-sigma of the fit residuals |
+| `-charge:iso_im_tolerance` | 0.05 | 1/K0 tolerance for isotope partners |
+| `-charge:mono_averagine_guard`, `-charge:mono_averagine_select` | 0, off | averagine-based corrections of the monoisotope; off by default, neither improves identifications |
+
+**Co-elution gate (`gate:`)**
+
+| option | default | meaning |
+|---|---|---|
+| `-gate:delta_rt` | 3 s | maximum apex retention-time difference between precursor and fragment |
+| `-gate:delta_im` | 0.01 | maximum 1/K0 difference |
+| `-gate:min_correlation` | 0.3 | minimum Pearson correlation of the two elution profiles; raise for cleaner, sparser spectra |
+| `-gate:min_correlation_points` | 3 | minimum shared XIC points for a correlation to count |
+| `-gate:coelution` | pearson | correlation over the full RT grid, or `logoverlap` (AlphaDIA-style; the scale differs, retune the threshold) |
+| `-gate:variance_support` | off | Pearson over the union support of the two profiles instead of the full grid (scale differs) |
+
+**Assembly (`assembly:`)**
+
+| option | default | meaning |
+|---|---|---|
+| `-assembly:min_fragments` | 3 | emit a spectrum only if at least this many fragments pass the gate (checked before the cap below) |
+| `-assembly:max_fragments` | 500 | keep at most this many, top-ranked; keep it at or above `min_fragments` |
+| `-assembly:corr_power` | 2 | multiply each emitted fragment's intensity by its correlation to this power; 0 = off. 2 gives +8–10 % Sage and +4–8 % MSFragger peptides over 0 |
+| `-assembly:im_weight_sigma` | 0 = off | additionally weight fragments by their 1/K0 distance to the precursor (Gaussian, this sigma); this also changes which fragments survive the cut. 0.005 gave up to 7 % more Sage peptides and no change on MSFragger |
+| `-assembly:require_isotope_support` | true | drop precursor hypotheses without an isotope partner; `false` doubles the spectra, runs about 7× slower and identifies fewer peptides |
+| `-assembly:default_charge` | 2 | charge given to a precursor left without a charge call (only matters when guessed precursors are kept) |
+
+**MS1 denoising (`dnoise:`)** — a bit-identical port of dnoise v0.1.0's MS1 path (Garrett, Diedrich & Yates III,
+bioRxiv 2026.08.27.747603; MIT, `LICENSES/dnoise-MIT.txt`), applied to the raw points of every MS1 frame of a Bruker
+`.d` before peak picking. Other inputs pass through, logged and stamped.
+
+| option | default | meaning |
+|---|---|---|
+| `-dnoise:ms1` | true | on or off. **Changes output** (a few percent of the peptides, in either direction depending on the file) and lowers peak memory |
+| `-dnoise:mz_half_width`, `-dnoise:min_feature_length`, `-dnoise:max_internal_gap`, `-dnoise:iterations`, `-dnoise:min_window_intensity`, `-dnoise:min_feature_intensity` | 3, 5, 2, 2, 0, 0 | the streak filter: a point survives when its TOF bin (± half width) is occupied in a run of scans of this length, bridging this many gaps, repeated this many times; the two intensity floors (0 = off) require a scan's window sum, and a run's total, to reach the value before it counts |
+| `-dnoise:halo`, `-dnoise:halo_peak_fraction`, `-dnoise:halo_mz_idx_half_width`, `-dnoise:halo_scan_half_width` | true, 0.15, 80, 2 | the halo filter: keep a point at ≥ this fraction of the most intense streak survivor in its box, its own TOF bin excluded |
+| `-dnoise:dia_ms1_window`, `-dnoise:dia_ms1_mz_pad`, `-dnoise:dia_ms1_im_pad` | true, 5, 0.05 | keep only MS1 points inside a padded diaPASEF isolation window |
+
+**Diagnostics (`diag:`)**: `-diag:dump_ms1_tsv <prefix>` writes the MS1 traces and inferred precursors as TSV so a
+lost precursor can be attributed to a stage.
 
 ### Reading the output
 
-Emitted spectra are MS2 with a synthetic precursor. Provenance is recorded as userParams on the run,
-and the header is authoritative. A run at the defaults stamps sixteen: the detector and
-calibration (`spx:detector`, `spx:mz_calibration`, `spx:require_isotope_support`, `spx:corr_power`,
-`spx:pearson_G`, `spx:im_weight_sigma`), MS1 denoising (`spx:dnoise_ms1`, `spx:dnoise_ms1_params`,
-`spx:dnoise_ms1_points`), the cell grid and tiling (`spx:tile_rt_sec`, `spx:tile_cells_per_tile`,
-`spx:tiles`, `spx:tile_boundaries`, `spx:tile_source`), the band edges (`spx:band_edges`) and the
-frozen frame table (`spx:frame_table`) — so a file can always be attributed to the configuration
-that produced it.
-
-## Two detectors
-
-`-trace:detector` selects between genuinely different algorithms, not two implementations of one.
-
-- **`integer`** (default) finds a peak's candidate traces by arithmetic on the instrument's own
-  flight-time index, and never converts its compact store back to double m/z. It needs the vendor
-  calibration and falls back to `openms` — loudly — without it.
-- **`openms`** runs OpenMS `MassTraceDetection` on a materialised peak map.
-
-They agree on about 85% of the union of identified peptides. Which one identifies more depends on
-the search engine and on the file, so **the reason `integer` is the default is memory** — roughly
-40% less — not a peptide gain. If you are chasing identifications on a particular dataset, it is
-worth trying both.
-
-## Performance
-
-Measured at the shipped defaults (MS1 denoising and the MS1 prune on, one 600-s cell per tile with a trim between
-tiles), 100 threads, on cluster nodes shared with other users, so the walls are indicative:
-
-| | 30-minute gradient (dataset D) | 2-hour acquisition (PXD047793 run 009) |
-|---|---|---|
-| peak RSS | 22.0 GB (3 tiles) | 21.1 GB (13 tiles) |
-| wall time | 3:47 | 9:57 |
-| in one tile (`-tile:cells_per_tile 0`), same node | 37.4 GB, 3:15 | 99.7 GB, 9:42 |
-
-Before MS1 denoising, the MS1 prune and the tiled default, a 30-minute gradient (33,553 frames) took 2:54 at 57 GB
-and the 2-hour file 11:18 at 187 GB, emitting 0.85 M and 3.9 M pseudo-spectra.
-Those walls were **11.6% and 17.7% faster than the build before them** respectively, from four
-byte-identical changes in this release (see the CHANGELOG's "Measured"): the Savitzky-Golay
-coefficients are cached, mzML spectra are serialised in parallel, the canonical sort sorts keys rather
-than 750-byte spectrum objects, and the assembled PeakMap takes its vector whole. Every one reproduces
-the pinned digests on both files, so identifications are unchanged.
-
-On the 2-hour file, on the same node, the 2026-09-08 build was **0.61× the wall time and 0.55× the
-peak memory** of the reference implementation, with 1.28× its Sage peptides at parity (0.996) with
-MSFragger under per-charge FDR control (docs/REFERENCE-COMPARISON-2026-09-08.md); the changes above
-take the wall ratio to roughly **0.54×** on the same measurement, and leave every peptide count
-untouched. That comparison predates MS1 denoising and the tiled default, which move memory far
-further down and cost peptides on one file and gain on the other -- see the CHANGELOG.
-
-The allocator's retained free pages were the largest single memory item on a 2-hour acquisition;
-`perf:malloc_trim` returns them at the phase boundaries (−30% peak for +8.5% wall, measured in one tile) and
-between tiles (about 4 GB on the 2-hour file), and is on by default. Preloading `tcmalloc_minimal` measured −7% peak RSS (wall-neutral, byte-identical) before the
-trim shipped; it has not been re-measured with it, so the two are not known to be additive.
-
-Runtime is dominated by the window loop, which is parallel across isolation windows and, within a
-window, across flight-time bands. The loader is 10–14%. Memory, not CPU, sets how many
-windows can be in flight: an admission gate re-decides concurrency from free RAM at every window admission.
-
-## Determinism
-
-The spectrum data is **byte-identical across thread counts** for a fixed binary: on real data, dataset D
-at the shipped defaults digests `e43672a0` at both 8 and 100 threads (2026-09-10), and at a 300-s cell
-pitch the same spectra come out at 1, 2, 3 and 6 tiles at both thread counts; run 009 at 600 s matches
-its one-tile run in 13 tiles. The end-to-end suite checks 1 vs 4 threads on synthetic input, which
-exercises the fallback detector. The loader batch size is **output-neutral**: batches 256 and 4096
-produce the identical digest once the picker's tail is flushed (the 2026-09-09 fix in this release),
-so it is a resource knob, not an output knob. The pre-fix verdict — that 4096 changed the digest and
-lost 7% of peptides — was the dropped tail, not the batch size; the 1024 arm has not been re-taken
-since.
-`bench/semantic_digest.py` hashes `<spectrumList>`..`</spectrumList>`, excluding the wall-clock
-stamp, the recorded parameters and the trailing byte-offset index — none of which can match across
-invocations.
-
-This does **not** survive a code change: a last-ulp difference in one arithmetic path cascades to
-~2% in peptide counts. Compare two builds by the accepted peptide **set** and the ppm median, never
-by raw counts. The two statements are about different things and both have been measured.
-
-## Tests
-
-```bash
-python3 test/test_diaspextract.py build/diaspextract
-```
-
-Twenty-five end-to-end checks against a synthetic acquisition (twenty-six in a build that writes mzPeak) cover:
-- isotope ownership and the charge floor;
-- parameter validation;
-- thread- and tile-count invariance;
-- mass-trace extension across missing cycles;
-- that the shipped detector is the one that actually runs;
-- that the MS1 prune changes no output, with negative controls that must change it;
-- that a non-finite MS1 m/z is refused before the prune;
-- that `dnoise:ms1` refuses a Bruker SDK calibration before the load;
-- that a leftover `SPEXTRACTOR_*` or `DIASPEXTRACTOR_*` variable from before the renames refuses the run.
-
-No fixtures, no framework, no network. The suite's only Bruker `.d` holds an `analysis.tdf` and no
-frame data, so it cannot run the in-tool dnoise filter. That filter is covered by
-`tests/test_dnoise_ms1.cpp` (gate boxes, filter rules and the per-point recovery), by
-`tests/test_tdf_load.cpp` (the tdf reader on corrupt, incomplete and out-of-range tables; built only
-where SQLite3 is found) and by the cluster digest gates.
-
-`tests/` additionally holds the calibration, dnoise and tdf-reader unit tests and the entrapment-FDR
-scoring used for the benchmark record.
+Every emitted spectrum is MS2 with a synthetic precursor: `selected ion m/z` (the apex m/z of the monoisotopic
+trace), `charge state`, the precursor's retention time and 1/K0, and the isolation window it was taken from. The run
+header carries sixteen `spx:` userParams that make any file attributable to the configuration that produced it: the
+detector and calibration (`spx:detector`, `spx:mz_calibration`, `spx:require_isotope_support`, `spx:corr_power`,
+`spx:pearson_G` (the correlation support, always `frames`), `spx:im_weight_sigma`), MS1 denoising (`spx:dnoise_ms1`, `spx:dnoise_ms1_params`,
+`spx:dnoise_ms1_points`), the cell grid and tiling (`spx:tile_rt_sec`, `spx:tile_cells_per_tile`, `spx:tiles`,
+`spx:tile_boundaries`, `spx:tile_source`), the band edges (`spx:band_edges`) and the frozen frame table
+(`spx:frame_table`). `spx:mz_calibration` starts with `tdf_table_modeltype1` (mzPeak input appends how the table was recovered), or is
+`bruker_sdk`, `legacy_chord_APPROXIMATE`, `mzpeak_two_point_transform` (an mzPeak archive read through its approximate
+transform, on request) or `unset` (an mzML input, which carries its m/z as is).
 
 ## Layout
 
 ```
 src/        the tool (one translation unit) plus four headers: the calibration model, the tdf reader,
             the MS1 denoiser and the mzPeak streaming loader
-patches/    the four OpenMS patches and the pinned OpenMS commit (openms.lock)
-scripts/    build helpers, OpenMS patch application, the shipped-option-token check
+patches/    the four OpenMS patches, the pinned OpenMS commit (openms.lock) and the mzPeak build helpers
+scripts/    the OpenMS patch application, the mzPeak library build, the option-token check, analysis scripts
 test/       the end-to-end suite
-tests/      calibration and entrapment tests, golden calibration values
-bench/      benchmark drivers and the semantic digest
-docs/       measurements and design notes
+tests/      the C++ unit tests, the calibration golden values, the calibration and entrapment Python checks
+bench/      benchmark drivers, search configurations and the semantic digest
+docs/       design notes and measurement records
+assets/     the logo and the diagrams above
 ```
 
 ## Documentation
 
-- [docs/BASELINE.md](docs/BASELINE.md) — the decision record: every default, what was
-  measured to justify it, and what was falsified
-- [docs/MZ-AXIS-DESIGN.md](docs/MZ-AXIS-DESIGN.md) — the flight-time index and the integer detector
-- [docs/charge-inference.md](docs/charge-inference.md) — charge assignment, its coupling to MS1
-  splitting, and the levers that did not work
-- [CHANGELOG.md](CHANGELOG.md)
+- [CHANGELOG.md](CHANGELOG.md): what changed in each release, with the earlier tool names and option names
+- [CONTRIBUTING.md](CONTRIBUTING.md): building against OpenMS, running the tests, and the rule for changing a default
+- [SECURITY.md](SECURITY.md)
+- `docs/`: design notes and measurement records for developers, starting with [docs/BASELINE.md](docs/BASELINE.md)
 
 ## Citing
 
@@ -279,4 +288,4 @@ See [CITATION.cff](CITATION.cff).
 
 ## License
 
-BSD-3-Clause. Derived from OpenMS (BSD-3-Clause) — see [NOTICE](NOTICE).
+BSD-3-Clause. Derived from OpenMS (BSD-3-Clause); the MS1 denoiser is a port of dnoise (MIT). See [NOTICE](NOTICE).

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(DIAspeXtract VERSION 1.3.1 LANGUAGES CXX)
+project(DIAspeXtract VERSION 1.3.2 LANGUAGES CXX)
 
 # DIAspeXtract is a STANDALONE application that links against an existing OpenMS
 # installation. It is deliberately not part of the OpenMS source tree: OpenMS is a

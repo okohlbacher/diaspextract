@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="330" viewBox="0 0 1100 330" font-family="system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="13">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+  <rect width="1100" height="330" fill="#ffffff"/>
+  <text x="550" y="26" text-anchor="middle" font-size="16" font-weight="600" fill="#1a202c">DIAspeXtract: from diaPASEF frames to pseudo-MS/MS spectra</text>
+  <rect x="20" y="70" width="135" height="110" rx="8" fill="#edf2f7" stroke="#a0aec0"/>
+  <text x="87" y="96" text-anchor="middle" font-weight="600" fill="#2d3748">Bruker .d</text>
+  <text x="87" y="116" text-anchor="middle" fill="#4a5568">diaPASEF frames</text>
+  <text x="87" y="134" text-anchor="middle" fill="#4a5568">MS1 + MS2 windows</text>
+  <text x="87" y="152" text-anchor="middle" fill="#4a5568">TOF bins, 1/K0</text>
+  <text x="87" y="170" text-anchor="middle" fill="#718096" font-size="12">(or mzML / mzPeak)</text>
+  <rect x="180" y="50" width="245" height="150" rx="8" fill="#ebf8ff" stroke="#63b3ed"/>
+  <text x="302" y="72" text-anchor="middle" font-weight="600" fill="#2c5282">LOAD, frame by frame</text>
+  <text x="302" y="94" text-anchor="middle" fill="#2c5282">vendor m/z calibration (exact)</text>
+  <text x="302" y="114" text-anchor="middle" fill="#2c5282">MS1 pass: dnoise, IM picking, prune</text>
+  <text x="302" y="134" text-anchor="middle" fill="#2c5282">MS2 frames read later, per tile,</text>
+  <text x="302" y="152" text-anchor="middle" fill="#2c5282">inside the window loop</text>
+  <text x="302" y="182" text-anchor="middle" fill="#718096" font-size="12">a .d streams; mzML is read whole</text>
+  <rect x="450" y="50" width="245" height="150" rx="8" fill="#ebf8ff" stroke="#63b3ed"/>
+  <text x="572" y="72" text-anchor="middle" font-weight="600" fill="#2c5282">MS1_TRACE, PRECURSOR_INFER</text>
+  <text x="572" y="94" text-anchor="middle" fill="#2c5282">mass traces in 48 m/z bands</text>
+  <text x="572" y="114" text-anchor="middle" fill="#2c5282">valley split, 120-s span cap</text>
+  <text x="572" y="134" text-anchor="middle" fill="#2c5282">isotope walk: mono, charge 1–5</text>
+  <text x="572" y="152" text-anchor="middle" fill="#2c5282">ion-mobility charge veto</text>
+  <text x="572" y="182" text-anchor="middle" fill="#718096" font-size="12">hypotheses may overlap by design</text>
+  <rect x="720" y="50" width="245" height="150" rx="8" fill="#fffaf0" stroke="#ed8936"/>
+  <text x="842" y="72" text-anchor="middle" font-weight="600" fill="#7b341e">WINDOW_LOOP</text>
+  <text x="842" y="94" text-anchor="middle" fill="#7b341e">per isolation window × 600-s cell:</text>
+  <text x="842" y="114" text-anchor="middle" fill="#7b341e">fragment traces in 12 TOF bands</text>
+  <text x="842" y="134" text-anchor="middle" fill="#7b341e">gate: RT, 1/K0, Pearson</text>
+  <text x="842" y="152" text-anchor="middle" fill="#7b341e">assembly, top 500 fragments</text>
+  <text x="842" y="182" text-anchor="middle" fill="#718096" font-size="12">parallel over windows × bands</text>
+  <rect x="990" y="70" width="95" height="110" rx="8" fill="#f0fff4" stroke="#68d391"/>
+  <text x="1037" y="100" text-anchor="middle" font-weight="600" fill="#22543d">mzML /</text>
+  <text x="1037" y="118" text-anchor="middle" font-weight="600" fill="#22543d">mzPeak</text>
+  <text x="1037" y="142" text-anchor="middle" fill="#22543d" font-size="12">pseudo-MS2 +</text>
+  <text x="1037" y="158" text-anchor="middle" fill="#22543d" font-size="12">spx: stamps</text>
+  <line x1="155" y1="125" x2="178" y2="125" stroke="#4a5568" stroke-width="1.5" marker-end="url(#a)"/>
+  <line x1="425" y1="125" x2="448" y2="125" stroke="#4a5568" stroke-width="1.5" marker-end="url(#a)"/>
+  <line x1="695" y1="125" x2="718" y2="125" stroke="#4a5568" stroke-width="1.5" marker-end="url(#a)"/>
+  <line x1="965" y1="125" x2="988" y2="125" stroke="#4a5568" stroke-width="1.5" marker-end="url(#a)"/>
+  <rect x="180" y="235" width="785" height="60" rx="8" fill="#f7fafc" stroke="#cbd5e0" stroke-dasharray="5 3"/>
+  <text x="572" y="258" text-anchor="middle" fill="#2d3748" font-weight="600">Then any DDA search engine: Sage, MSFragger, Comet, …</text>
+  <text x="572" y="280" text-anchor="middle" fill="#4a5568">closed or open search; no spectral library, no prediction, no enumerated search space</text>
+  <line x1="1037" y1="180" x2="1037" y2="265" stroke="#4a5568" stroke-width="1.5"/>
+  <line x1="1037" y1="265" x2="967" y2="265" stroke="#4a5568" stroke-width="1.5" marker-end="url(#a)"/>
+  <text x="550" y="318" text-anchor="middle" fill="#718096" font-size="12">Phase names follow the tool's [perf] breakdown at the end of a run (LOAD is printed as LOAD(stream), LOAD(tile) or LOAD(full)).</text>
+</svg>

@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="430" viewBox="0 0 1000 430" font-family="system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="13">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+  <rect width="1000" height="430" fill="#ffffff"/>
+  <text x="500" y="26" text-anchor="middle" font-size="16" font-weight="600" fill="#1a202c">One pseudo-spectrum: a precursor hypothesis and the fragments that co-elute with it</text>
+  <rect x="20" y="50" width="300" height="300" rx="8" fill="#ebf8ff" stroke="#63b3ed"/>
+  <text x="170" y="72" text-anchor="middle" font-weight="600" fill="#2c5282">1. Precursor (MS1)</text>
+  <line x1="45" y1="200" x2="300" y2="200" stroke="#a0aec0"/><text x="300" y="215" text-anchor="end" fill="#718096" font-size="11">retention time →</text>
+  <polyline points="60,198 90,196 120,180 150,120 170,98 190,120 220,180 250,196 290,198" fill="none" stroke="#2b6cb0" stroke-width="2.5"/>
+  <polyline points="60,199 100,197 130,186 150,150 170,132 190,150 220,186 260,198" fill="none" stroke="#63b3ed" stroke-width="2"/>
+  <polyline points="60,199 110,198 140,192 160,172 175,166 190,172 220,192 260,199" fill="none" stroke="#90cdf4" stroke-width="2"/>
+  <text x="180" y="92" fill="#2b6cb0" font-size="12">mono</text><text x="205" y="128" fill="#3182ce" font-size="12">+1 isotope</text><text x="215" y="166" fill="#4299e1" font-size="12">+2</text>
+  <line x1="170" y1="98" x2="170" y2="200" stroke="#2b6cb0" stroke-dasharray="3 3"/>
+  <text x="45" y="240" fill="#2c5282">isotope partners within 1/K0 ± 0.05</text>
+  <text x="45" y="258" fill="#2c5282">count walk → monoisotope, charge 1–5</text>
+  <text x="45" y="276" fill="#2c5282">z = 1 on the 2+ mobility line → 2+</text>
+  <text x="45" y="294" fill="#2c5282">no isotope partner → dropped</text>
+  <text x="45" y="322" fill="#2c5282" font-weight="600">→ m/z (apex), z, RT apex, 1/K0</text>
+  <rect x="345" y="50" width="330" height="300" rx="8" fill="#fffaf0" stroke="#ed8936"/>
+  <text x="510" y="72" text-anchor="middle" font-weight="600" fill="#7b341e">2. Co-elution gate (same isolation window)</text>
+  <line x1="370" y1="200" x2="655" y2="200" stroke="#a0aec0"/><text x="655" y="215" text-anchor="end" fill="#718096" font-size="11">retention time →</text>
+  <line x1="495" y1="80" x2="495" y2="200" stroke="#2b6cb0" stroke-dasharray="3 3"/><text x="500" y="90" fill="#2b6cb0" font-size="11">precursor apex</text>
+  <polyline points="385,198 420,190 455,140 495,100 535,140 570,190 605,198" fill="none" stroke="#2f855a" stroke-width="2.5"/>
+  <polyline points="385,199 430,196 465,170 500,150 535,170 570,196 605,199" fill="none" stroke="#2f855a" stroke-width="2.5"/>
+  <polyline points="385,199 440,197 470,180 500,168 530,180 560,197 605,199" fill="none" stroke="#2f855a" stroke-width="2"/>
+  <polyline points="385,199 400,196 420,150 440,120 460,150 480,196 520,199 605,199" fill="none" stroke="#a0aec0" stroke-width="2" stroke-dasharray="5 3"/>
+  <polyline points="385,199 520,199 545,170 575,130 600,170 620,199" fill="none" stroke="#a0aec0" stroke-width="2" stroke-dasharray="5 3"/>
+  <text x="612" y="115" fill="#a0aec0" font-size="11">rejected</text><text x="405" y="112" fill="#a0aec0" font-size="11">rejected</text>
+  <text x="370" y="240" fill="#7b341e">|ΔRT apex| ≤ 3 s  ·  |Δ1/K0| ≤ 0.01</text>
+  <text x="370" y="258" fill="#7b341e">Pearson ≥ 0.3 (full RT grid), ≥ 3 shared points</text>
+  <text x="370" y="276" fill="#7b341e">fragment traces valley-split, ≤ 120 s</text>
+  <text x="370" y="294" fill="#7b341e">a fragment may serve several precursors</text>
+  <text x="370" y="322" fill="#7b341e" font-weight="600">→ fragments, each with a correlation</text>
+  <rect x="700" y="50" width="280" height="300" rx="8" fill="#f0fff4" stroke="#68d391"/>
+  <text x="840" y="72" text-anchor="middle" font-weight="600" fill="#22543d">3. Assembly</text>
+  <line x1="725" y1="200" x2="960" y2="200" stroke="#a0aec0"/><text x="960" y="215" text-anchor="end" fill="#718096" font-size="11">m/z →</text>
+  <line x1="745" y1="200" x2="745" y2="120" stroke="#2f855a" stroke-width="3"/>
+  <line x1="775" y1="200" x2="775" y2="160" stroke="#2f855a" stroke-width="3"/>
+  <line x1="800" y1="200" x2="800" y2="95" stroke="#2f855a" stroke-width="3"/>
+  <line x1="830" y1="200" x2="830" y2="175" stroke="#2f855a" stroke-width="3"/>
+  <line x1="865" y1="200" x2="865" y2="110" stroke="#2f855a" stroke-width="3"/>
+  <line x1="895" y1="200" x2="895" y2="150" stroke="#2f855a" stroke-width="3"/>
+  <line x1="930" y1="200" x2="930" y2="185" stroke="#2f855a" stroke-width="3"/>
+  <text x="725" y="240" fill="#22543d">rank by corr × intensity, keep the top 500</text>
+  <text x="725" y="258" fill="#22543d">need ≥ 3; emit intensity × corr² (corr_power 2)</text>
+  <text x="725" y="276" fill="#22543d">precursor m/z, z, RT, 1/K0 (step 1)</text>
+  <text x="725" y="294" fill="#22543d">written as a centroided MS2</text>
+  <text x="725" y="322" fill="#22543d" font-weight="600">→ one pseudo-MS/MS spectrum</text>
+  <line x1="320" y1="200" x2="343" y2="200" stroke="#4a5568" stroke-width="1.5" marker-end="url(#a)"/>
+  <line x1="675" y1="200" x2="698" y2="200" stroke="#4a5568" stroke-width="1.5" marker-end="url(#a)"/>
+  <text x="500" y="378" text-anchor="middle" fill="#4a5568" font-size="12">Defaults shown; every threshold is an option (-gate:*, -assembly:*, -charge:*, -trace:*, -max_charge).</text>
+  <text x="500" y="396" text-anchor="middle" fill="#4a5568" font-size="12">A precursor without isotope support is dropped unless -assembly:require_isotope_support false.</text>
+  <text x="500" y="414" text-anchor="middle" fill="#718096" font-size="12">Emission over-generates on purpose: hypotheses that share fragments each get a spectrum; the search engine adjudicates.</text>
+</svg>

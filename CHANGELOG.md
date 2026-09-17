@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.3.2 — 2026-09-17
+
+**Why 1.3.2.** A documentation release. The README was rewritten for users and packagers: what the tool does,
+how it works (a pipeline diagram, the co-elution gate and assembly of one pseudo-spectrum, and the cell/tile
+streaming that bounds memory), a complete option reference grouped by section with every shipped default, what
+the output carries, and how to build it. Everything that described the development history rather than the
+software moved out of the README: the dated measurement chronology, the comparisons with earlier builds and with
+the reference implementation, the performance tables and the description of the test suites. Those live on in
+`docs/BASELINE.md`, `docs/REFERENCE-COMPARISON-2026-09-08.md`, `CONTRIBUTING.md` and this changelog. No option,
+default or algorithm changed: the binary differs from 1.3.1 only in its version string, and the spectra of every
+input are identical (the four digest pins of 1.3.1 stand).
+
+### Changed
+
+- **README.md rewritten** for users and packagers, with three SVG diagrams in `assets/` (`pipeline.svg`, `algorithm.svg`,
+  `streaming.svg`). The option reference lists every user-facing option with its default, marks the resource
+  options that change the spectrum list, and says what to change for memory, time and sensitivity. A stale claim of the
+  old README is gone: `-threads` does not default to 1, the tool uses every core unless `-threads` is on the
+  command line. `scripts/check_option_tokens.py` gates the option names in CI; the defaults were cross-checked by hand against
+  `--helphelp` of the 1.3.1 binary for this release.
+- **assets/logo.svg** is tracked in the development repository as well, so the README renders there.
+
 ## v1.3.1 — 2026-09-17
 
 **Why 1.3.1.** DIAspeXtract refused every Bruker file whose `MzCalibration` row stores a negative quadratic

@@ -311,6 +311,32 @@ static void testCalibrationAndBounds()
   CHECK(diaspextract::loadTdfAxisBounds(ok, bd, why) && bd.n_bins == 634073 && bd.mz_lo == 99.990834 && bd.mz_hi == 1700.0, "loadTdfAxisBounds: %s", why.c_str());
   CHECK(!diaspextract::loadTdfAxisBounds(makeTdf("bounds_notable.tdf", dShaped() + "DROP TABLE GlobalMetadata;"), bd, why) && has(why, "GlobalMetadata"),
         "no GlobalMetadata: %s", why.c_str());
+  // the two bounds are the negative-C2 domain's: 1e8 bins and m/z 1e5 are accepted, one more is not
+  CHECK(diaspextract::loadTdfAxisBounds(makeTdf("bounds_max.tdf", dShaped() + "UPDATE GlobalMetadata SET Value = '100000000' WHERE Key = 'DigitizerNumSamples';"
+                                                "UPDATE GlobalMetadata SET Value = '100000' WHERE Key = 'MzAcqRangeUpper';"), bd, why) &&
+          bd.n_bins == 100000000 && bd.mz_hi == 1e5, "DigitizerNumSamples 1e8, MzAcqRangeUpper 1e5: %s", why.c_str());
+  CHECK(!diaspextract::loadTdfAxisBounds(makeTdf("bounds_bins.tdf", dShaped() + "UPDATE GlobalMetadata SET Value = '100000001' WHERE Key = 'DigitizerNumSamples';"), bd, why) &&
+          has(why, "DigitizerNumSamples"), "DigitizerNumSamples 1e8 + 1: %s", why.c_str());
+  CHECK(!diaspextract::loadTdfAxisBounds(makeTdf("bounds_mz.tdf", dShaped() + "UPDATE GlobalMetadata SET Value = '100000.001' WHERE Key = 'MzAcqRangeUpper';"), bd, why) &&
+          has(why, "not usable"), "MzAcqRangeUpper above 1e5: %s", why.c_str());
+
+  // a negative C2 (PXD029836 run 1418's row, timsTOF Pro 2) loads; one whose root stops existing inside the domain is
+  // refused, naming the TOF index; a frame whose T1 lies outside the checked span is refused for a negative C2 only
+  const std::string pxd = "UPDATE MzCalibration SET DigitizerTimebase = 0.19999999999999998, DigitizerDelay = 25779.8, T1 = 25.618823611312585,"
+                          "  dC1 = 20, C0 = 314.1341896383674, C1 = 154199.217568937, C2 = -0.0010422663259118895;"
+                          "UPDATE Frames SET T1 = 25.614796222167577 - Id * 1e-6;";
+  CHECK(diaspextract::loadTdfCalibration(makeTdf("cal_c2neg.tdf", dShaped() + pxd), cal, t1, why) && cal.C2 == -0.0010422663259118895 &&
+          cal.digitizer_timebase == 0.19999999999999998 && t1.size() == 11 && t1[10] == 25.614796222167577 - 10 * 1e-6,
+        "a negative C2 inside its domain: %s", why.c_str());
+  CHECK(!diaspextract::loadTdfCalibration(makeTdf("cal_c2deep.tdf", dShaped() + pxd + "UPDATE MzCalibration SET C2 = -0.1;"), cal, t1, why) &&
+          has(why, "C2 -0.1 < 0 outside its verified domain") && has(why, "stops existing at TOF index 7.93471e+07"),
+        "C2 -0.1: %s", why.c_str());
+  CHECK(!diaspextract::loadTdfCalibration(makeTdf("cal_c2neg_hot.tdf", dShaped() + pxd + "UPDATE Frames SET T1 = 1100 WHERE Id = 7;"), cal, t1, why) &&
+          has(why, "frame 7: Frames.T1 1100 is not within 1000 K of the MzCalibration T1 25.6188"), "a negative C2, frame 7 at 1100 C: %s", why.c_str());
+  CHECK(diaspextract::loadTdfCalibration(makeTdf("cal_c2neg_null.tdf", dShaped() + pxd + "UPDATE Frames SET T1 = NULL WHERE Id = 7;"), cal, t1, why) &&
+          t1[7] == cal.T1_ref, "a negative C2, a NULL T1 is the reference temperature: %s", why.c_str());
+  CHECK(diaspextract::loadTdfCalibration(makeTdf("cal_c2pos_hot.tdf", dShaped() + "UPDATE Frames SET T1 = 1100 WHERE Id = 7;"), cal, t1, why) && t1[7] == 1100.0,
+        "a positive C2 reads frame 7 at 1100 C as before: %s", why.c_str());
 }
 
 int main()
@@ -330,7 +356,7 @@ int main()
   if (g_fail == before) std::printf("OK  AccumulationTime: whole C-locale decimal > 0; above 100 ms the setup refusal\n");
   before = g_fail;
   testCalibrationAndBounds();
-  if (g_fail == before) std::printf("OK  loadTdfCalibration and loadTdfAxisBounds: whole reads, schema-decided fallback\n");
+  if (g_fail == before) std::printf("OK  loadTdfCalibration and loadTdfAxisBounds: whole reads, schema-decided fallback; a negative C2 inside its domain, frame T1 span\n");
   std::error_code ec;
   std::filesystem::remove_all(g_dir, ec);
   if (g_fail) std::fprintf(stderr, "%d check(s) failed\n", g_fail);

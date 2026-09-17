@@ -70,7 +70,11 @@ notice a missing second or fourth:**
   two-point linear-in-sqrt chord that is **−5 to −11 ppm biased** (m/z dependent) on every file
   measured, worth roughly **6–11% more closed-search Sage identifications** on the three files measured. Every emitted mzML
   records which calibration was used in the `spx:mz_calibration` userParam
-  (`tdf_table_modeltype1` | `bruker_sdk` | `legacy_chord_APPROXIMATE`). An unsupported calibration
+  (`tdf_table_modeltype1` | `bruker_sdk` | `legacy_chord_APPROXIMATE`). The exact model covers
+  `ModelType` 1 with the digitizer-temperature term, the `C4` mass offset and a quadratic term `C2` of
+  either sign. A negative `C2`, as timsTOF Pro 2 acquisition software 2.0.53 writes it, is accepted since
+  1.3.1, but only inside a checked domain (`src/TdfMzCalibration.h`). The golden tests pin each variant
+  (`tests/calibration_golden.json`, `tests/test_calibration_cpp.cpp`). An unsupported calibration
   table **fails closed** rather than silently producing biased masses.
 - **Lock-free elution-peak detection.** OpenMS guards a shared vector with a program-global critical
   section. Called from inside DIAspeXtract's parallel window loop, that one lock serialises the tool.

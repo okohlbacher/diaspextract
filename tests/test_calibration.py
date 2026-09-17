@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Golden test for the TDF MzCalibration (ModelType 1) TOF->m/z model.
 
-Guards the calibration that produced the 2026-09-01 +6-11% closed-search gain. The 60 golden cases
-were produced by Bruker's own timsdata library on three diaPASEF files (dataset D/dataset A/dataset B, 4 frames x 5
-TOF positions each) and are stored in tests/calibration_golden.json, so this test needs NO vendor
-library, NO cluster and NO raw data.
+Guards the calibration that produced the 2026-09-01 +6-11% closed-search gain. The 270 golden cases
+were produced by Bruker's own timsdata library and are stored in tests/calibration_golden.json, so this
+test needs NO vendor library, NO cluster and NO raw data:
+  * 60 on three diaPASEF files sharing one calibration vector (dataset D/dataset A/dataset B, 4 frames x 5
+    TOF positions each);
+  * 210 on six runs of the public PXD029836 (timsTOF Pro 2, acquisition software 2.0.53), whose C2 is
+    NEGATIVE: 1418/1420/1422 share one vector, 1431, 1408 and 1347 carry one each (5 frames x 7 TOF
+    positions each: first, middle and last frame, the coldest and the warmest).
 
 Model (derived numerically against the vendor oracle). NOTE this is an INDEPENDENT re-implementation
 of the model, not a copy of the shipped C++: it uses the textbook quadratic root where
@@ -16,20 +20,25 @@ twice. tests/test_calibration_cpp.cpp is the one that exercises the code that ac
     C1_eff = C1 * (1 + dC1 * (T1_ref - T1_frame) / 1e6)          # temperature compensation
     t_ns   = C0 + (1e6 / sqrt(C1_eff)) * sqrt(m) + C2 * m        # solve the quadratic for sqrt(m)
 
-Two regressions this catches:
+Regressions this catches:
   * dropping the C2*m term -- the bug in the widely-copied open implementation (timsrust-calibration,
     adapted then disabled by mzdata): -11..-40 ppm on this data;
+  * flipping the sign of a negative C2: 38..80 ppm on PXD029836 (checked per file). Taking the other root of the
+    quadratic is not in that range: it lands beyond the parabola's vertex, near m/z 1e12;
   * dropping the dC1 temperature term: ~0.67 ppm. (m is proportional to C1_eff, NOT its square
     root, so dC1*dT/1e6 lands on m/z undiminished -- an earlier note here claimed ~0.33 ppm by
     applying a spurious halving; the measured guard value 0.669 confirms 0.67. The golden files
-    span only ~0.03 K, so the guard threshold stays loose at 0.1 ppm.)
+    span only ~0.03 K, so the guard threshold stays loose at 0.1 ppm over the whole set, and 0.05 ppm per
+    file: the smallest per-file value is 0.074 ppm, PXD029836 1408, whose frames lie within 0.004 K of T1.)
 Run: python3 tests/test_calibration.py
 """
 import json, math, os, sys
 
-TOL_PPM = 0.0001         # measured max 2.6e-5 ppm; matches the C++ test's tolerance exactly
+TOL_PPM = 0.0001         # measured max 3.1e-5 ppm (this textbook root cancels on PXD029836; the shipped root: 2.6e-5);
+                         # matches the C++ test's tolerance exactly
 NO_C2_MIN_PPM = 5.0      # dropping C2 must be caught: it is worth >>5 ppm
 NO_TEMP_MIN_PPM = 0.1    # dropping the temperature term must be visible
+NO_TEMP_FILE_MIN_PPM = 0.05   # ... and visible in every file on its own
 
 def tof_to_mz(tof, p, t1_frame, use_c2=True, use_temp=True):
     t_ns = tof * p["timebase"] + p["delay"]
@@ -39,7 +48,8 @@ def tof_to_mz(tof, p, t1_frame, use_c2=True, use_temp=True):
     if abs(c2) < 1e-12:                      # degenerate: pure sqrt law
         return ((t_ns - p["C0"]) / b) ** 2 - p.get("C4", 0.0)
     disc = b * b - 4.0 * c2 * (p["C0"] - t_ns)
-    u = (-b + math.sqrt(max(disc, 0.0))) / (2.0 * c2)
+    assert disc > 0.0, f"t = {t_ns} ns is beyond the calibration's range (negative discriminant)"
+    u = (-b + math.sqrt(disc)) / (2.0 * c2)   # the rising-branch root for either sign of c2
     return u * u - p.get("C4", 0.0)       # C4: additive mass offset on the root
 
 def ppm(a, b):
@@ -87,18 +97,32 @@ def main():
     worst = 0.0
     worst_noc2 = 0.0
     worst_notemp = 0.0
+    negative = 0
     for f in files:
         assert f["model_type"] == 1, f"{f['file']}: golden set must be ModelType 1"
+        f_worst = f_noc2 = f_flip = f_notemp = 0.0
+        flipped = dict(f, C2=-f["C2"])
         for case in f["cases"]:
             got = tof_to_mz(case["tof"], f, case["t1"])
             e = ppm(got, case["mz"])
             assert e < TOL_PPM, (
                 f"{f['file']} frame {case['frame']} tof {case['tof']:.0f}: "
                 f"model {got:.6f} vs vendor {case['mz']:.6f} = {e:.5f} ppm > {TOL_PPM}")
-            worst = max(worst, e)
-            worst_noc2 = max(worst_noc2, ppm(tof_to_mz(case["tof"], f, case["t1"], use_c2=False), case["mz"]))
-            worst_notemp = max(worst_notemp, ppm(tof_to_mz(case["tof"], f, case["t1"], use_temp=False), case["mz"]))
+            f_worst = max(f_worst, e)
+            f_noc2 = max(f_noc2, ppm(tof_to_mz(case["tof"], f, case["t1"], use_c2=False), case["mz"]))
+            f_flip = max(f_flip, ppm(tof_to_mz(case["tof"], flipped, case["t1"]), case["mz"]))
+            f_notemp = max(f_notemp, ppm(tof_to_mz(case["tof"], f, case["t1"], use_temp=False), case["mz"]))
             n += 1
+        # per file: every file must tell the model from the known-bad variants on its own
+        assert (len(f["cases"]) >= 20 and f_noc2 > NO_C2_MIN_PPM and f_flip > NO_C2_MIN_PPM
+                and f_notemp > NO_TEMP_FILE_MIN_PPM), (
+            f"{f['file']}: {len(f['cases'])} cases, without C2 {f_noc2:.3f} ppm, C2 sign-flipped {f_flip:.3f} ppm, "
+            f"without temperature {f_notemp:.4f} ppm")
+        print(f"    {f['file']:<16} C2 {f['C2']:+.6e}  {len(f['cases']):2d} cases  max {f_worst:.7f} ppm  "
+              f"(without C2 {f_noc2:.2f}, sign-flipped {f_flip:.2f}, without temperature {f_notemp:.3f} ppm)")
+        worst, worst_noc2, worst_notemp = max(worst, f_worst), max(worst_noc2, f_noc2), max(worst_notemp, f_notemp)
+        negative += f["C2"] < 0
+    assert len(files) >= 9 and n >= 270 and negative >= 6, f"only {n} cases in {len(files)} files ({negative} with C2 < 0)"
     # the ablations must actually be detectable, or this test proves nothing
     assert worst_noc2 > NO_C2_MIN_PPM, (
         f"dropping C2 changed the result by only {worst_noc2:.3f} ppm -- the golden set cannot "
@@ -106,7 +130,7 @@ def main():
     assert worst_notemp > NO_TEMP_MIN_PPM, (
         f"dropping the temperature term changed the result by only {worst_notemp:.4f} ppm -- "
         f"the golden set has no temperature spread; regenerate across more frames")
-    print(f"OK  {n} golden cases, {len(files)} files: max error {worst:.6f} ppm (tol {TOL_PPM})")
+    print(f"OK  {n} golden cases, {len(files)} files ({negative} with C2 < 0): max error {worst:.7f} ppm (tol {TOL_PPM})")
     print(f"    ablation guards: without C2 {worst_noc2:.2f} ppm, without temperature {worst_notemp:.4f} ppm")
     return 0
 

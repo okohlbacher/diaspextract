@@ -52,8 +52,9 @@ inline bool loadTdfAxisBounds(const std::string& tdf, TdfAxisBounds& out, std::s
     else if (k == "MzAcqRangeUpper") out.mz_hi = v;
     else
     {
-      // an integral count in [2, 1e8], checked BEFORE the narrowing cast (1e100 -> long is UB)
-      if (!(v >= 2.0 && v <= 100000000.0 && std::trunc(v) == v)) { why = "DigitizerNumSamples is not an integer in [2, 1e8]: " + std::to_string(v); ok = false; break; }
+      // an integral count in [2, 1e8], checked BEFORE the narrowing cast (1e100 -> long is UB); the bound is the TOF
+      // range a negative C2 is verified over
+      if (!(v >= 2.0 && v <= TdfMzCalibration::kDomainMaxTof && std::trunc(v) == v)) { why = "DigitizerNumSamples is not an integer in [2, 1e8]: " + std::to_string(v); ok = false; break; }
       out.n_bins = (long)v;
     }
   }
@@ -62,14 +63,16 @@ inline bool loadTdfAxisBounds(const std::string& tdf, TdfAxisBounds& out, std::s
   if (!ok) return false;
   if (!(have_lo && have_hi && have_n)) { why = "GlobalMetadata lacks MzAcqRangeLower/MzAcqRangeUpper/DigitizerNumSamples (" + std::to_string(have_lo + have_hi + have_n) + " of 3)"; return false; }
   // plausibility: a TIMS acquisition ends far below 1e5 m/z; a corrupt but finite value beyond
-  // that would drive the flight-time conversion past the axis (review 3a, round 2)
-  if (!(out.mz_lo > 0.0) || !(out.mz_hi > out.mz_lo) || !(out.mz_hi <= 1.0e5))
+  // that would drive the flight-time conversion past the axis (review 3a, round 2), and 1e5 is the m/z
+  // range a negative C2 is verified over
+  if (!(out.mz_lo > 0.0) || !(out.mz_hi > out.mz_lo) || !(out.mz_hi <= TdfMzCalibration::kDomainMaxMz))
   { why = "GlobalMetadata bounds are not usable: MzAcqRange " + std::to_string(out.mz_lo) + "-" + std::to_string(out.mz_hi) + ", DigitizerNumSamples " + std::to_string(out.n_bins); return false; }
   return true;
 }
 
 /// The MzCalibration row the FRAMES reference (Frames.MzCalibration; PXD017703 files carry two rows), refused
 /// when frames reference more than one. t1_by_frame[id] = Frames.T1 (T1_ref when NULL); index 0 is never a frame.
+/// A frame whose T1 lies outside the span a negative C2 was checked over is refused (TdfMzCalibration::frameReason).
 inline bool loadTdfCalibration(const std::string& tdf, TdfMzCalibration& cal,
                                std::vector<double>& t1_by_frame, std::string& why)
 {
@@ -129,6 +132,7 @@ inline bool loadTdfCalibration(const std::string& tdf, TdfMzCalibration& cal,
     if (id < 0 || id > 10000000) return fail("implausible Frames.Id");
     if ((size_t)id >= t1_by_frame.size()) t1_by_frame.resize((size_t)id + 1, cal.T1_ref);
     t1_by_frame[(size_t)id] = (sqlite3_column_type(st, 1) == SQLITE_NULL) ? cal.T1_ref : sqlite3_column_double(st, 1);
+    if (std::string w = cal.frameReason(t1_by_frame[(size_t)id]); !w.empty()) return fail("frame " + std::to_string(id) + ": " + w);
   }
   if (rc != SQLITE_DONE) return sqlfail("reading Frames.T1");
   sqlite3_finalize(st); sqlite3_close(db);

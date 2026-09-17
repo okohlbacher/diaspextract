@@ -1,5 +1,103 @@
 # Changelog
 
+## v1.3.1 — 2026-09-17
+
+**Why 1.3.1.** DIAspeXtract refused every Bruker file whose `MzCalibration` row stores a negative quadratic
+term `C2`, and such files are not rare. All 23 runs checked from the public PXD029836 have one
+(timsTOF Pro 2, acquisition software 2.0.53), in four calibration vectors (`C2` from −0.00059 to
+−0.00123). With the
+default `-dnoise:ms1 true`, the tool stopped 0.03 s after starting (exit 6) with
+`MzCalibration C2 < 0 (negative quadratic term is not a supported model)`. With `-dnoise:ms1 false`, the
+patched loader refused the same file. 1.3.1 accepts a negative `C2` inside a checked domain, which is the
+only change. It affects timsTOF Pro 2 calibrations with a negative `C2`. Options and defaults are
+unchanged, and so are the spectra of every file the tool accepted before: the four pins reproduce
+(dataset D `e43672a0`, run 009 `3aafd0b5` at the defaults; `8c1b047f` and `bff54a1f` with
+`-dnoise:ms1 false`).
+
+### Fixed
+
+- **A negative `C2` follows the same law, and the shipped root already solves it.** A negative `C2` has been
+  refused since 2026-09-01. The reason given since 2026-09-05 was that it "flips the root branch", but it
+  does not.
+  `TdfMzCalibration::tofToMz` computes `u = 2 (t − C0) / (b + sqrt(disc))`. That is the root on the rising
+  branch for either sign of `C2`, and it is continuous through `C2 = 0`. Bruker's own library
+  (`tims_index_to_mz`, used as a local oracle and never redistributed) confirms this on six PXD029836 runs:
+  1418, 1420 and 1422, which share one vector, plus 1431, 1408 and 1347, one per vector. The check used
+  5 frames per run (first, middle, last, coldest, warmest), each probed at 2,017 TOF indices across the
+  whole digitizer range. The worst error was 7.0e-6 ppm. Dropping `C2` is 19–40 ppm off; flipping its
+  sign is 38–80 ppm off.
+- **The refusal is now a domain check.** With `C2 < 0`, flight time as a function of `u = sqrt(m + C4)` is a
+  parabola with its peak at `u = b / (2|C2|)`.
+  - **Past the peak's flight time** no mass exists. The discriminant is negative there, and the
+    conversion returns NaN, as before. On PXD029836 no TOF index a 32-bit field can hold gets that far:
+    at the deciding corner below, the discriminant is still at least 0.33 `b²` at index 2³² − 1.
+  - **Near the peak** the root is ill-conditioned.
+  - **The acceptance rule.** `unsupportedReason()` accepts a negative `C2` only if the discriminant stays
+    at least `b²/4` over a fixed domain. `b²/4` means the flight-time slope stays at least half its linear
+    value. The domain is:
+    - every TOF index up to 1e8 and every m/z up to 1e5. These are the bounds the tool's tdf reader already
+      applied to `DigitizerNumSamples` and `MzAcqRangeUpper`, and both now use the same constants. The
+      OpenMS loader converts the TOF indices stored in the frames without that bound; a real acquisition
+      stores none at or above `DigitizerNumSamples`;
+    - at every frame temperature within 1000 K of the calibration's `T1`.
+  - **The deciding corner** is the largest TOF at the smallest frame factor. On PXD029836 the discriminant
+    is at least 0.984 `b²` there. Over the runs' own range (397,657 bins, frames within 0.011 K of `T1`)
+    it is at least 0.99992 `b²`. The root would stop existing only beyond TOF index 6.4e9.
+  - **A refusal names** the TOF index where the root stops existing and the one where the slope halves.
+  - **The largest accepted `|C2|`** with PXD029836's other constants is 0.0595. That is 49 to 102 times the
+    `|C2|` of its four vectors (57 times run 1418's), so a calibration of the same kind is far from being
+    refused.
+- **Frame temperatures, for a negative `C2` only.** `TdfMzCalibration::frameReason` is new, and the tool's
+  tdf reader (`loadTdfCalibration`) calls it for every frame. The reader refuses a file with a frame whose
+  `T1` lies more than 1000 K from the calibration's, and names the frame. This reader feeds the MS1
+  denoiser, the integer detector's flight-time axis and the mzPeak exact-m/z path.
+  - **The OpenMS loader patch is unchanged.** It calls `isSupported()`, so the domain check reaches it
+    through the updated header, but it has no per-frame check.
+  - **If the reader refuses such a file:** with the default `-dnoise:ms1 true` the run is refused at
+    setup, and an mzPeak archive is refused outright. With `-dnoise:ms1 false` and a `.d` input, the
+    integer detector falls back to `openms` with a warning, as for any calibration its reader refuses.
+    The loader then converts that frame at its recorded temperature, as it does for a zero or positive
+    `C2`. Refusing such a frame in the loader as well is still open (review of 2026-09-17).
+  - **Zero and positive `C2`** take none of these branches. The conversion code is unchanged.
+- **Every refusal test now has a valid row behind it.** In the C++ golden test, the "must be rejected" cases
+  for `ModelType`, `dC2`, `C3` and `C2 < 0` started from a row whose `C1` of 1.0 was already outside the
+  plausible range. They would therefore have passed even if their own check were gone. Each case now
+  changes one field of dataset D's valid row and asserts the refusal names that field.
+
+### Tests
+
+- `tests/calibration_golden.json` holds 210 new vendor cases: six PXD029836 runs × 5 frames × 7 TOF
+  positions, 270 cases in all. Both golden tests now check every file on its own: at least 20 cases,
+  dropping `C2` or flipping its sign must each move the result by at least 5 ppm, and dropping the
+  temperature term by at least 0.05 ppm (the smallest is 0.074 ppm, run 1408). The C++ test also checks
+  the round trip to 1e-6 bins, and it refuses a golden file that carries a `C4` key, which its scanner
+  does not read. The Python twin's textbook root agrees with the vendor values to 3.1e-5 ppm; the
+  tolerance stays 1e-4.
+- `tests/test_calibration_cpp.cpp`:
+  - The PXD029836 row is accepted. Over the whole domain, at both temperature extremes, its conversion is
+    finite and rising. The round trip holds to 3e-8 bins; each point must stay within 1e-6 bins, so a NaN
+    inverse cannot hide in the maximum.
+  - `C2 = −0.1` is refused. The reason names TOF index 7.93471e+07, where the root stops existing, and
+    the ablation confirms the conversion is NaN at 1e8.
+  - `C2 = −0.07` is refused by the slope margin, although its root still exists at 1e8.
+  - `C2 = −0.05` is accepted.
+  - The domain edge for this row, `|C2|` = 0.0595301, is computed with the test's own formula, not the
+    header's. A `|C2|` a relative 1e-6 inside the edge is accepted, and one a relative 1e-6 outside it is
+    refused.
+  - With a 1 ps timebase, `C2 = −2.5` is refused on the m/z side of the domain.
+  - `−inf` is refused.
+  - `dC1 = 1000` ppm/K is refused for a negative `C2` and accepted for a positive one.
+  - A stored `−0.0` converts bit for bit like `0.0`.
+  - Frame temperatures outside ±1000 K, and NaN, are refused for a negative `C2` only.
+- `tests/test_dnoise_ms1.cpp`: the MS1 denoiser's TOF recovery inverts the model exactly with a negative
+  `C2`. All 397,657 bins of run 1418 come back at three frame temperatures, with a worst round trip of
+  2e-10 bins. Half a bin and +1 ppm are refused.
+- `tests/test_tdf_load.cpp`:
+  - A negative-`C2` tdf loads, and one with `C2 = −0.1` is refused with the TOF index.
+  - A frame at 1100 °C is refused for a negative `C2`; for a positive `C2` it is read as before.
+  - A NULL `T1` is the reference temperature.
+  - The axis bounds 1e8 and 1e5 are accepted, and values just above them are refused.
+
 ## v1.3.0 — 2026-09-15
 
 **Why 1.3.** A rename only. The tool, its executable, its environment prefix and its repositories are

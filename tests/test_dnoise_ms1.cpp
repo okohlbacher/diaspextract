@@ -816,6 +816,42 @@ static void testRecover()
           "%s: corrected value %u has no raw count (%d found)", f.name, f.no_preimage, hits);
   }
 
+  // a negative C2 (PXD029836 run 1418, timsTOF Pro 2): the inverse the recovery uses is exact there too -- every one of the
+  // digitizer's 397,657 bins comes back at frame 1's temperature and at the run's coldest and warmest frame, and half a bin
+  // and +1 ppm are refused. The scan and intensity geometry is D's: the TOF is checked first and does not depend on it.
+  {
+    diaspextract::TdfMzCalibration neg;
+    neg.model_type = 1; neg.digitizer_timebase = 0.19999999999999998; neg.digitizer_delay = 25779.8; neg.C0 = 314.1341896383674;
+    neg.C1 = 154199.217568937; neg.C2 = -0.0010422663259118895; neg.T1_ref = 25.618823611312585; neg.dC1 = 20.0;
+    CHECK(neg.isSupported(), "PXD029836's row: %s", neg.unsupportedReason().c_str());
+    const RecoverFile g = recoverD();
+    double c = 0.0;
+    rc::opentimsCorrection(g.accumulation_time, c);
+    std::vector<float> asc;
+    bool falls = false;
+    rc::buildScanTable(g.tims, g.n_scans, asc, falls);
+    const float im0 = loaderIm(g.tims, 0.0);
+    const long n_bins = 397657;
+    long tof_bad = 0, half_bad = 0, ppm_bad = 0;
+    double worst = 0.0;
+    for (const double t1 : {25.614796222167577, 25.61007554899474, 25.615998301764314})
+    {
+      const double b = neg.frameFactor(t1);
+      for (long bin = 0; bin < n_bins; ++bin)
+      {
+        const double mz = neg.tofToMz(static_cast<double>(bin), b);
+        tof_bad += rc::recoverPoint(neg, b, mz, im0, 0.0f, c, asc, falls, g.n_scans, tof, scan, raw, t, hits) != R::none || tof != static_cast<u32>(bin);
+        worst = std::max(worst, std::fabs(t - static_cast<double>(bin)));
+        half_bad += rc::recoverPoint(neg, b, neg.tofToMz(static_cast<double>(bin) + 0.5, b), im0, 0.0f, c, asc, falls, g.n_scans, tof, scan, raw, t, hits) != R::tof;
+        ppm_bad += rc::recoverPoint(neg, b, mz * (1.0 + 1e-6), im0, 0.0f, c, asc, falls, g.n_scans, tof, scan, raw, t, hits) != R::tof;
+      }
+    }
+    CHECK(tof_bad == 0 && half_bad == 0 && ppm_bad == 0 && worst < 1e-9,
+          "negative C2 TOF: %ld of %ld bins lost, %ld half-bin and %ld +1 ppm m/z not refused, worst round trip %.3g bins",
+          tof_bad, 3 * n_bins, half_bad, ppm_bad, worst);
+    std::printf("    negative C2 (PXD029836 1418): %ld bins x 3 temperatures recovered, worst round trip %.2g bins\n", n_bins, worst);
+  }
+
   // intensity edge cases, on D's frame geometry
   const RecoverFile d = recoverD();
   const double b = d.cal.frameFactor(d.t1), mz = d.cal.tofToMz(1000.0, b);

@@ -463,6 +463,34 @@ def main():
         assert n(g_off) - n(g_on) == folded(rg), f"off {n(g_off)} - on {n(g_on)} != the logged fold count {folded(rg)}"
     check("twin fold: inert without twins, fires on a precursor assembled twice, count reconciles", c12b)
 
+    # 12d: --help and the CTD name this repository, not the OpenMS doxygen page TOPPBase builds for every tool
+    #      (which does not exist for one outside the release), and -write_ctd works at all. Needs patches/openms-topp-external.patch.
+    def c12d():
+        url = "https://github.com/okohlbacher/diaspextract"
+        h = subprocess.run([binary, "--help"], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        text = re.sub(r"\x1b\[[0-9;]*m", "", h.stdout + h.stderr)
+        assert re.search(r"Full documentation:\s*" + re.escape(url), text) and "openms.de/doxygen" not in text, \
+            "--help does not point at the repository:\n" + text[:600]
+        ctd_dir = os.path.join(work, "ctd"); os.makedirs(ctd_dir, exist_ok=True)
+        subprocess.run([binary, "-write_ctd", ctd_dir], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        ctds = [os.path.join(ctd_dir, f) for f in os.listdir(ctd_dir) if f.endswith(".ctd")]
+        assert ctds, "-write_ctd wrote no .ctd"
+        ctd = open(ctds[0]).read()
+        assert 'docurl="' + url + '"' in ctd and "openms.de/doxygen" not in ctd, "the CTD docurl is not the repository"
+    check("--help and the CTD point at the repository, not a 404", c12d)
+
+    # 12e: an exception thrown inside an OpenMP task used to terminate the process with no message. The tasks now hand
+    #      it to the thread that joins them, so the run ends like any other failure: a message and a non-zero exit, not
+    #      a signal. DIASPEXTRACT_TASK_THROW injects one in the MS1 band tracing and in the per-window assembly.
+    def c12e():
+        for site in ("ms1_band", "assemble"):
+            env = dict(os.environ, DIASPEXTRACT_TASK_THROW=site)
+            r = run(binary, inp, os.path.join(work, f"task_{site}.mzML"), threads=4, expect_fail=True, env=env)
+            log = r.stdout + r.stderr
+            assert r.returncode > 0, f"{site}: the run was killed by a signal ({r.returncode}) instead of failing cleanly"
+            assert f"injected failure in task {site}" in log, f"{site}: the task's exception did not reach the log:\n" + log[-800:]
+    check("an exception inside an OpenMP task ends the run with its message, not an abort", c12e)
+
 
     # 13: the concurrency cap is enforced. It used to be computed, logged and never checked: the
     #     only bound was a byte budget that over-booked every window, so nothing ever throttled.

@@ -5,7 +5,7 @@ name: full build
 #
 # DIAspeXtract cannot be built against a RELEASED OpenMS package, and that is a property of the tool
 # rather than of CI: it uses BrukerTimsFile::loadDIAStreaming and PeakPickerIM, which postdate
-# OpenMS 3.5.0, the newest tag; and it needs the four patches in patches/, one of which adds
+# OpenMS 3.5.0, the newest tag; and it needs the five patches in patches/, one of which adds
 # BrukerTimsFile::lastMzCalibration(). Hence a source build at a pinned commit.
 #
 # Roughly an hour with a warm ccache, so it runs weekly and on demand rather than per push. It is
@@ -155,7 +155,7 @@ jobs:
 
       # A tool that only builds against a PATCHED development OpenMS has one more way to ship
       # broken: the patches silently not applying. apply_openms_patches.sh is what CI runs above,
-      # so assert the markers the four patches leave behind are actually in the built tree.
+      # so assert the markers the five patches leave behind are actually in the built tree.
       - name: The OpenMS patches are in the tree the binary was built from
         run: |
           set -o pipefail

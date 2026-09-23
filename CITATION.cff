@@ -11,5 +11,5 @@ abstract: >-
   OpenMS, including an exact license-free TOF-to-m/z calibration derived from the acquisition's own
   MzCalibration table.
 license: BSD-3-Clause
-version: 1.4.0
+version: 1.4.1
 date-released: "2026-09-23"

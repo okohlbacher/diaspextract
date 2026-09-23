@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.4.1 — 2026-09-23
+
+**Why 1.4.1.** Fixes to the interface and to error handling. The spectra are unchanged: the dataset D gate reproduces
+1.4.0's digests with the twin fold on and off, at every tile grouping and thread count it tries.
+
+- **`--help` and CTD export point at this repository.** The "Full documentation" line of `--help` named an OpenMS
+  doxygen page that does not exist for a tool outside the OpenMS release, and `-write_ctd` failed outright
+  ("Requested tool 'DIAspeXtract' does not exist!") because OpenMS looked the tool up in its own registry. A fifth
+  OpenMS patch, `patches/openms-topp-external.patch`, lets the tool name its own documentation and skips that lookup
+  for a tool OpenMS does not list, so `-write_ctd` writes a CTD and the tool can be wrapped for KNIME or Galaxy.
+  `-write_cwl` still needs an OpenMS built with `-DENABLE_TDL=ON`. The patch makes a `TOPPBase` method virtual: a
+  binary built against unpatched OpenMS headers must not run against this libOpenMS (already unsupported).
+- **No `[perf-load]` line at the exit of a process that loaded nothing**, such as `--help` or any other program linked
+  against the patched library.
+- **An error inside a parallel task ends the run with its message.** An exception thrown inside an OpenMP task
+  terminated the process without one. The six task loops that allocate now hand the exception back once the loop has
+  joined, and the run exits non-zero with the error, like any other failure. e2e check 12e injects one
+  (`DIASPEXTRACT_TASK_THROW`, a switch meant for the tests) in the MS1 band tracing and in the per-window assembly; 12d pins the
+  `--help` line and the CTD's `docurl`.
+- **README**: the build section lists five OpenMS patches.
+
 ## v1.4.0 — 2026-09-23
 
 **Why 1.4.0.** The default output changes: spectra that claim one precursor twice are folded into one.

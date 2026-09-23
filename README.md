@@ -91,7 +91,7 @@ git clone https://github.com/OpenMS/OpenMS.git /path/to/OpenMS
 git -C /path/to/OpenMS checkout $(sed -n 's/^OPENMS_BASE=//p' patches/openms.lock)
 cmake -S /path/to/OpenMS -B /path/to/OpenMS/build -DCMAKE_BUILD_TYPE=Release \
       -DWITH_OPENTIMS=ON -DWITH_GUI=OFF -DHAS_XSERVER=OFF      # plus OpenMS's own dependencies
-scripts/apply_openms_patches.sh /path/to/OpenMS                 # installs a header, applies four patches
+scripts/apply_openms_patches.sh /path/to/OpenMS                 # installs a header, applies five patches
 cmake --build /path/to/OpenMS/build -j                          # the patches change headers and libOpenMS
 
 # 2. The tool.
@@ -103,9 +103,9 @@ export OPENMS_DATA_PATH=/path/to/OpenMS/share/OpenMS   # a source-built OpenMS h
 The binary is `build/diaspextract`; `cmake --install build` puts it under `<prefix>/bin`. The GitHub workflow
 `.github/workflows/build.yml` performs the same recipe on Ubuntu and is the reference.
 
-### The four OpenMS patches
+### The five OpenMS patches
 
-`scripts/apply_openms_patches.sh` applies them; all four matter, and the build stops without the first and third.
+`scripts/apply_openms_patches.sh` applies them; all five matter, and the build stops without the first, third and fifth.
 
 | patch | what it changes | why |
 |---|---|---|
@@ -113,6 +113,7 @@ The binary is `build/diaspextract`; `cmake --install build` puts it under `<pref
 | `openms-epd-lockfree.patch` | removes a program-global critical section from elution-peak detection | called from a parallel window loop, that one lock burned about a quarter of the CPU in blocked threads |
 | `openms-masstrace-move.patch` | gives `MassTrace` move operations | OpenMS's defaulted copy operations made every `std::move` a deep copy; a `static_assert` enforces the patch |
 | `openms-mzml-parallel-write.patch` | encodes mzML spectra in chunks on all threads, appended in index order | the writer was CPU-bound on one thread; byte-identical spectrum list, 20 s → 6 s on a 30-minute run |
+| `openms-topp-external.patch` | makes `TOPPBase::getDocumentationURL()` virtual, and lets `-write_ctd` / `-write_cwl` skip the tool-registry lookup for a tool OpenMS does not list | OpenMS pointed `--help` at a doxygen page that does not exist for a tool outside the release (DIAspeXtract now points it at this repository), and the unguarded lookup made CTD and CWL export fail outright, so the tool could not be wrapped for KNIME or Galaxy |
 
 Environment variables the patched libOpenMS reads, none needed for a normal run: `DIASPEXTRACT_ALLOW_CHORD_FALLBACK=1`
 opts into the legacy chord when the exact calibration is unavailable (otherwise the run fails closed; the MS1
@@ -271,7 +272,7 @@ transform, on request) or `unset` (an mzML input, which carries its m/z as is).
 ```
 src/        the tool (one translation unit) plus four headers: the calibration model, the tdf reader,
             the MS1 denoiser and the mzPeak streaming loader
-patches/    the four OpenMS patches, the pinned OpenMS commit (openms.lock) and the mzPeak build helpers
+patches/    the five OpenMS patches, the pinned OpenMS commit (openms.lock) and the mzPeak build helpers
 scripts/    the OpenMS patch application, the mzPeak library build, the option-token check, analysis scripts
 test/       the end-to-end suite
 tests/      the C++ unit tests, the calibration golden values, the calibration and entrapment Python checks

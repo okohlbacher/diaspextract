@@ -64,7 +64,7 @@
      void load(const String& path, MSExperiment& exp, const Config& config);
 --- a/src/openms/source/FORMAT/BrukerTimsFile.cpp
 +++ b/src/openms/source/FORMAT/BrukerTimsFile.cpp
-@@ -17,6 +17,14 @@
+@@ -17,6 +17,15 @@
  
  #include <opentims++/opentims.h>
  #include <opentims++/tof2mz_converter.h>
@@ -75,7 +75,8 @@
 +#include <omp.h>
 +#endif
 +namespace { struct PerfLoad { double decode = 0, handoff = 0, ms1_decode = 0, ms1_handoff = 0; size_t batches = 0;
-+  ~PerfLoad() { std::fprintf(stderr, "[perf-load] ms2 decode_wall=%.1f s handoff_wall=%.1f s batches=%zu | ms1 decode_wall=%.1f s handoff_wall=%.1f s\n", decode, handoff, batches, ms1_decode, ms1_handoff); } } g_perf_load; }
++  ~PerfLoad() { if (batches == 0 && decode == 0 && handoff == 0 && ms1_decode == 0 && ms1_handoff == 0) return;   // nothing loaded (--help, any other OpenMS program): stay silent
++    std::fprintf(stderr, "[perf-load] ms2 decode_wall=%.1f s handoff_wall=%.1f s batches=%zu | ms1 decode_wall=%.1f s handoff_wall=%.1f s\n", decode, handoff, batches, ms1_decode, ms1_handoff); } } g_perf_load; }
  #include <opentims++/scan2inv_ion_mobility_converter.h>
  #include <OpenMS/FORMAT/RationalScan2ImConverter.h>
  #include <SQLiteCpp/SQLiteCpp.h>

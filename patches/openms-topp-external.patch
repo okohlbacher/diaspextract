@@ -1,0 +1,38 @@
+# DIAspeXtract: two TOPPBase fixes for a TOPP tool outside the OpenMS release.
+#
+# 1. getDocumentationURL() returns http://www.openms.de/doxygen/<nightly|release>/html/TOPP_<tool>.html
+#    unconditionally -- it does not consult the `official` flag the tool passes as false -- and is not virtual. For
+#    DIAspeXtract that page does not exist, so the first line of --help pointed at a 404. One word makes it
+#    overridable; the tool returns its repository.
+# 2. writeToolDescription_() (-write_ctd, -write_cwl, -write_nested_cwl) looked the tool's types up in ToolHandler
+#    without the `official` guard its category lookup has, and ToolHandler throws "Requested tool ... does not
+#    exist!" for any tool it does not list: no CTD or CWL could be written for DIAspeXtract at all, so it could not
+#    be wrapped for KNIME or Galaxy. An unregistered tool now gets no types, like most registered ones.
+# Worth upstreaming as "respect official_" in both places.
+# ABI: the new virtual sits before other virtuals in TOPPBase, so it shifts their vtable slots. Never run a binary built
+# against UNPATCHED OpenMS headers with this libOpenMS (already unsupported with the other four patches).
+--- a/src/openms/include/OpenMS/APPLICATIONS/TOPPBase.h
++++ b/src/openms/include/OpenMS/APPLICATIONS/TOPPBase.h
+@@ -191,7 +191,9 @@
+     String getToolPrefix() const;
+ 
+     /// Returns a link to the documentation of the tool (accessible on our servers and only after inclusion in the nightly branch or a release).
+-    String getDocumentationURL() const;
++    /// Virtual so that a tool outside the OpenMS release can point --help and its CTD at its own documentation:
++    /// the default URL does not consult `official_`, so for such a tool it always 404s.
++    virtual String getDocumentationURL() const;
+ 
+     /// The latest and greatest OpenMS citation
+     static const Citation cite_openms;
+--- a/src/openms/source/APPLICATIONS/TOPPBase.cpp
++++ b/src/openms/source/APPLICATIONS/TOPPBase.cpp
+@@ -2396,7 +2396,8 @@
+     {
+       out_dir_str = std::filesystem::current_path().generic_string();
+     }
+-    StringList type_list = ToolHandler::getTypes(tool_name_);
++    // only a registered (official) tool has types in ToolHandler; for any other the lookup throws "does not exist"
++    StringList type_list = official_ ? ToolHandler::getTypes(tool_name_) : StringList();
+     if (type_list.empty())
+       type_list.push_back(""); // no type for most tools
+ 

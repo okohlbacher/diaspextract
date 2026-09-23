@@ -62,7 +62,7 @@ static_assert(std::is_nothrow_move_constructible_v<OpenMS::MassTrace> && std::is
 // The release version. The standalone CMake build passes it from project(VERSION); the in-tree
 // OpenMS build does not, so the fallback here is the same number.
 #ifndef DIASPEXTRACT_VERSION
-#define DIASPEXTRACT_VERSION "1.4.0"
+#define DIASPEXTRACT_VERSION "1.4.1"
 #endif
 
 using namespace OpenMS;
@@ -114,6 +114,21 @@ namespace
   /// is marked enclosed and left out of the TOTAL. Phases are opened only on the master thread.
   inline int& phase_depth_() { static int d = 0; return d; }
   inline double& flush_wall_() { static double v = 0; return v; }   // [perf-load] pick inside LOAD
+  /// [task-err] An exception escaping an OpenMP task terminates the process with no message. Task bodies catch
+  /// everything and hand the first exception here; the code after the loop rethrows it once the tasks have joined.
+  inline void taskErr_(std::exception_ptr& first)
+  {
+    #pragma omp critical(task_err)
+    if (!first) first = std::current_exception();
+  }
+  /// [task-err] e2e falsifier only: DIASPEXTRACT_TASK_THROW=<site> throws inside that task, so the suite can show the run
+  /// ends with an error message and a non-zero exit instead of an abort.
+  inline void taskFault_(const char* site)
+  {
+    static const char* want = std::getenv("DIASPEXTRACT_TASK_THROW");
+    if (want && String(want) == site)
+      throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, String("[task-err] injected failure in task ") + site, site);
+  }
   inline std::map<std::string, PhaseStat>& phase_stats_()
   { static std::map<std::string, PhaseStat> m; return m; }
   inline std::vector<std::string>& phase_order_()
@@ -1218,9 +1233,10 @@ namespace
     vector<vector<Trace>> parts(nchunk);
     vector<TraceStore> stores(nchunk);                         // chunk-private arenas, merged after
     const size_t n_in = in.size();
+    std::exception_ptr task_err;   // [task-err]
     #pragma omp taskloop grainsize(1) default(shared)
     for (int ci = 0; ci < nchunk; ++ci)
-    {
+    { try {
       const size_t lo = (size_t)ci * n_in / nchunk, hi = (size_t)(ci + 1) * n_in / nchunk;
       TraceStore& cst = stores[ci];
       cst.setFrames(wst.rt_index, &wst.b);
@@ -1264,7 +1280,8 @@ namespace
           out.push_back(std::move(c));
         }
       }
-    }
+    } catch (...) { taskErr_(task_err); } }
+    if (task_err) std::rethrow_exception(task_err);
     // the parents' spans are dead: rebuild the window arena from the chunk arenas
     vector<Trace>().swap(in);
     vector<float>().swap(wst.inten); vector<int16_t>().swap(wst.bins);
@@ -2196,6 +2213,10 @@ public:
     verboseVersion_ = String(DIASPEXTRACT_VERSION) + " (OpenMS " + VersionInfo::getVersion() + ")";
   }
 
+  // [docurl] patches/openms-topp-external.patch makes this virtual. TOPPBase's default is an OpenMS doxygen page that
+  // does not exist for a tool outside the release: the first line of --help and the docurl of every CTD 404'd.
+  String getDocumentationURL() const override { return "https://github.com/okohlbacher/diaspextract"; }
+
 protected:
   void registerOptionsAndFlags_() override
   {
@@ -2444,9 +2465,10 @@ protected:
       const int n_thr = omp_get_max_threads();
       const int nchunk = std::max(1, std::min((int)map.size(), 4 * n_thr));
       vector<vector<PeakMap>> csub((size_t)nchunk, vector<PeakMap>(bands));
+      std::exception_ptr dist_err;   // [task-err]
       #pragma omp taskloop grainsize(1) default(shared)
       for (int ci = 0; ci < nchunk; ++ci)
-      {
+      { try {
       const size_t sp0 = (size_t)ci * map.size() / nchunk, sp1 = (size_t)(ci + 1) * map.size() / nchunk;
       for (size_t spi = sp0; spi < sp1; ++spi)
       {
@@ -2481,7 +2503,8 @@ protected:
         }
         s.clear(true);   // distributed: release it now, so the source and the copies do not both
       }                  // stand at full size (the transient was ~2x the map)
-      }
+      } catch (...) { taskErr_(dist_err); } }
+      if (dist_err) std::rethrow_exception(dist_err);
       map.clear(true);
       vector<PeakMap> sub(bands);
       for (int b = 0; b < bands; ++b)
@@ -2517,9 +2540,11 @@ protected:
       }
       auto _tm0 = tt_now();
       vector<vector<MassTrace>> per(bands);
+      std::exception_ptr band_err;   // [task-err]
       #pragma omp taskloop grainsize(1) default(shared)
       for (int b = 0; b < bands; ++b)
-      {
+      { try {
+        taskFault_("ms1_band");
         MassTraceDetection m2; m2.setLogType(ProgressLogger::NONE); m2.setParameters(p);
         vector<MassTrace> t;
         sub[b].sortSpectra();
@@ -2534,7 +2559,8 @@ protected:
           const double c = mt.getCentroidMZ();
           if (c >= edge[b] && c < edge[b + 1]) per[b].push_back(std::move(mt));
         }
-      }
+      } catch (...) { taskErr_(band_err); } }
+      if (band_err) std::rethrow_exception(band_err);
       tt_mtd = tt_s(_tm0, tt_now());
       auto _tg0 = tt_now();
       size_t tot = 0; for (const auto& v : per) tot += v.size();
@@ -2559,9 +2585,10 @@ protected:
       const int nchunk = std::max(1, bands * 4);      // 4 chunks per band -> dynamic load balance
       const size_t n_in = mts.size();
       vector<vector<MassTrace>> parts(nchunk);
+      std::exception_ptr split_err;   // [task-err]
       #pragma omp taskloop grainsize(1) default(shared)
       for (int ci = 0; ci < nchunk; ++ci)
-      {
+      { try {
         const size_t lo = (size_t)ci * n_in / nchunk, hi = (size_t)(ci + 1) * n_in / nchunk;
         if (lo >= hi) continue;
         vector<MassTrace> chunk(std::make_move_iterator(mts.begin() + lo),
@@ -2569,7 +2596,8 @@ protected:
         ElutionPeakDetection epd; setSplitter(epd, split_valleys, split_scan_time);
         parts[ci].reserve(chunk.size());
         epd.detectPeaks(chunk, parts[ci]);
-      }
+      } catch (...) { taskErr_(split_err); } }
+      if (split_err) std::rethrow_exception(split_err);
       size_t tot = 0; for (auto& pth : parts) tot += pth.size();
       vector<MassTrace> out; out.reserve(tot);
       for (auto& pth : parts) { for (auto& t : pth) out.push_back(std::move(t)); vector<MassTrace>().swap(pth); }
@@ -3877,7 +3905,7 @@ protected:
             + " spectra (" + String(ms1_prune.sample.size()) + " of " + String(ms1_prune.sample_n) + " m/z) but the MS1 map holds " + String(ms1_map.size())
             + "; -perf:ms1_prune false keeps every peak");
     // An exception must not leave the parallel region (terminate): captured inside the single, rethrown after it. This
-    // covers detectTraces_'s own code, the [det] diagnostics included; throws inside its taskloop tasks are not caught here.
+    // covers detectTraces_'s own code, the [det] diagnostics included, and its taskloop tasks, which rethrow here ([task-err]).
     std::exception_ptr ms1_err;
     #pragma omp parallel
     #pragma omp single
@@ -4630,10 +4658,14 @@ protected:
             else
             {
               vector<vector<Trace>>& pc = per[ci]; vector<TraceStore>& bc = bst[ci];
+              std::exception_ptr band_err;   // [task-err] rethrown into the window body's catch
               #pragma omp taskloop grainsize(1) default(shared)
               for (int b = 0; b < nb; ++b)
+              { try {
                 pc[b] = detectTracesInteger_(cs, tprep, bc[b], mass_ppm, delta_im, ms2_noise, ms2_minlen,
                                              bnd[b], bnd[b + 1], b);
+              } catch (...) { taskErr_(band_err); } }
+              if (band_err) std::rethrow_exception(band_err);
             }
             w_detect += secs(std::chrono::steady_clock::now() - _td0);
             { long long ab = 0, pb = 0;
@@ -4809,9 +4841,11 @@ protected:
           const long n_prec_w = (long)pidx.size();
           const long n_task_w = std::max(1L, std::min((n_prec_w + 31) / 32, (long)n_threads));
           std::atomic<long> pcur{0};
+          std::exception_ptr asm_err;   // [task-err] rethrown into the window body's catch
           #pragma omp taskloop num_tasks(n_task_w) firstprivate(pdense) default(shared)
           for (long w = 0; w < n_task_w; ++w)
-          {
+          { try {
+            taskFault_("assemble");
             for (;;)
             {
               const long cs = pcur.fetch_add(32);
@@ -4827,7 +4861,8 @@ protected:
                 { ledAdd_(LC_SPECTRA, (long long)(sizeof(MSSpectrum) + ms2.size() * 12)); pslot[(size_t)j] = std::move(ms2); }
               }
             }
-          }
+          } catch (...) { taskErr_(asm_err); } }
+          if (asm_err) std::rethrow_exception(asm_err);
           auto _t6 = std::chrono::steady_clock::now();
           w_score = secs(_t6 - _t5);
           for (auto& s : pslot) if (!s.empty()) bucket.push_back(std::move(s));

@@ -62,7 +62,7 @@ static_assert(std::is_nothrow_move_constructible_v<OpenMS::MassTrace> && std::is
 // The release version. The standalone CMake build passes it from project(VERSION); the in-tree
 // OpenMS build does not, so the fallback here is the same number.
 #ifndef DIASPEXTRACT_VERSION
-#define DIASPEXTRACT_VERSION "1.3.2"
+#define DIASPEXTRACT_VERSION "1.4.0"
 #endif
 
 using namespace OpenMS;
@@ -1989,6 +1989,103 @@ namespace
     v.swap(ord);
   }
 
+  /// [twins] One precursor claimed twice is emitted as two spectra with complementary fragments: two seeds that
+  /// resolved to the same monoisotope (the claim loop's `used[]` owns traces, not mono positions), or one
+  /// precursor in the 1-m/z overlap of two isolation windows. Folds each such cluster into one spectrum.
+  /// Relation: same MS1 frame (RT bit-equal; every precursor RT is a frame time), same charge > 0, precursor
+  /// m/z within 20 ppm of the member earlier in `v`, |d1/K0| <= im_tol; clusters are its connected
+  /// components. Survivor: most isotopes, then most peaks, then the earliest. Its peaks become the union of
+  /// the cluster's, fused within 10 ppm (m/z intensity-weighted, intensity = max); every other field is its
+  /// own. Same frame => same RT cell => same tile under every grouping, so the output stays grouping- and
+  /// thread-invariant. This is bench/twin_merge.py, which priced it: docs/SAME-POSITION-DUPLICATION-2026-09-20.md.
+  /// `v` in canonical order; survivors keep their places. Returns the number of spectra removed.
+  static size_t mergeTwins_(vector<MSSpectrum>& v, double im_tol)
+  {
+    const double TWIN_PPM = 20.0, FUSE_PPM = 10.0;   // ponytail: the measured values, no option until another is measured
+    struct K { double rt, mz, im; int z; uint32_t i; };
+    vector<K> ks; ks.reserve(v.size());
+    for (size_t i = 0; i < v.size(); ++i)
+    {
+      const auto& p = v[i].getPrecursors();
+      if (!p.empty() && p[0].getCharge() > 0) ks.push_back({v[i].getRT(), p[0].getMZ(), p[0].getDriftTime(), p[0].getCharge(), (uint32_t)i});
+    }
+    sort(ks.begin(), ks.end(), [](const K& a, const K& b) {
+      if (a.rt != b.rt) return a.rt < b.rt;
+      if (a.z != b.z) return a.z < b.z;
+      if (a.mz != b.mz) return a.mz < b.mz;
+      return a.i < b.i;
+    });
+    vector<uint32_t> up(v.size());
+    for (size_t i = 0; i < up.size(); ++i) up[i] = (uint32_t)i;
+    auto root = [&up](uint32_t a) { while (up[a] != a) { up[a] = up[up[a]]; a = up[a]; } return a; };
+    for (size_t g0 = 0, g1; g0 < ks.size(); g0 = g1)
+    {
+      for (g1 = g0 + 1; g1 < ks.size() && ks[g1].rt == ks[g0].rt && ks[g1].z == ks[g0].z; ++g1) {}   // one frame, one charge
+      for (size_t a = g0; a < g1; ++a)
+      {
+        // the probe is the EARLIER member of a pair, with its own tolerance, as in bench/twin_merge.py
+        const double tol = ks[a].mz * TWIN_PPM * 1e-6, lo = ks[a].mz - tol, hi = ks[a].mz + tol;
+        auto link = [&](size_t b) {
+          if (ks[b].i > ks[a].i && fabs(ks[b].im - ks[a].im) <= im_tol) { const uint32_t ra = root(ks[a].i), rb = root(ks[b].i); if (ra != rb) up[ra] = rb; }
+        };
+        for (size_t b = a + 1; b < g1 && ks[b].mz <= hi; ++b) link(b);
+        for (size_t b = a; b-- > g0 && ks[b].mz >= lo; ) link(b);
+      }
+    }
+    // survivor per cluster: (isotopes, peaks) strictly greater replaces, so a tie keeps the earliest
+    const uint32_t NONE = UINT32_MAX;
+    vector<uint32_t> n_in(v.size(), 0), best(v.size(), NONE);
+    for (uint32_t i = 0; i < (uint32_t)v.size(); ++i) ++n_in[root(i)];
+    auto isotopes = [&v](uint32_t i) { return v[i].metaValueExists("spx_n_isotopes") ? (int)v[i].getMetaValue("spx_n_isotopes") : 0; };
+    for (uint32_t i = 0; i < (uint32_t)v.size(); ++i)
+    {
+      const uint32_t r = root(i);
+      if (n_in[r] < 2) continue;
+      const uint32_t b = best[r];
+      if (b == NONE || std::make_pair(isotopes(i), v[i].size()) > std::make_pair(isotopes(b), v[b].size())) best[r] = i;
+    }
+    vector<uint32_t> surv;
+    vector<int> slot(v.size(), -1);
+    for (uint32_t i = 0; i < (uint32_t)v.size(); ++i)
+    {
+      const uint32_t r = root(i);
+      if (n_in[r] >= 2 && best[r] == i) { slot[i] = (int)surv.size(); surv.push_back(i); }
+    }
+    vector<vector<uint32_t>> members(surv.size());
+    for (uint32_t i = 0; i < (uint32_t)v.size(); ++i) { const uint32_t r = root(i); if (n_in[r] >= 2) members[(size_t)slot[best[r]]].push_back(i); }
+    // fuse: each thread reads and writes one cluster's spectra only
+#pragma omp parallel for schedule(dynamic, 64)
+    for (long c = 0; c < (long)surv.size(); ++c)
+    {
+      vector<pair<double, double>> ps;
+      for (uint32_t i : members[(size_t)c]) for (const auto& pk : v[i]) ps.emplace_back(pk.getMZ(), (double)pk.getIntensity());
+      sort(ps.begin(), ps.end());
+      vector<pair<double, double>> fused;
+      double gm = 0.0, gw = 0.0, gi = 0.0;
+      for (const auto& pk : ps)
+      {
+        if (gw != 0.0 && pk.first - gm / gw > (gm / gw) * (FUSE_PPM * 1e-6)) { fused.emplace_back(gm / gw, gi); gm = gw = gi = 0.0; }
+        gm += pk.first * pk.second; gw += pk.second; gi = std::max(gi, pk.second);
+      }
+      if (gw != 0.0) fused.emplace_back(gm / gw, gi);
+      MSSpectrum& s = v[surv[(size_t)c]];
+      s.clear(false);   // peaks only: RT, precursor and userParams are the survivor's
+      s.reserve(fused.size());
+      for (const auto& f : fused) s.emplace_back(f.first, (float)f.second);
+    }
+    size_t w = 0;
+    for (uint32_t i = 0; i < (uint32_t)v.size(); ++i)
+    {
+      const uint32_t r = root(i);
+      if (n_in[r] >= 2 && best[r] != i) continue;
+      if (w != i) v[w] = std::move(v[i]);
+      ++w;
+    }
+    const size_t removed = v.size() - w;
+    v.erase(v.begin() + (long)w, v.end());
+    return removed;
+  }
+
   /// [tile-2e] Streams spectra to an mzML in BLOCKS: the header once, then every block encoded in
   /// parallel chunks (the tool-side twin of patches/openms-mzml-parallel-write.patch) and appended in
   /// order, the index offsets rebased as each chunk lands. Blocks arrive in the canonical order (a
@@ -2109,7 +2206,7 @@ protected:
     setValidFormats_("in", {"mzML", "d"});      // stock OpenMS does not know the mzpeak format
 #endif
     registerOutputFile_("out", "<file>", "", "Output pseudo-MS2 spectra. The FORMAT FOLLOWS THE "
-                        "EXTENSION: .mzpeak (default) or .mzML. mzPeak is columnar and much smaller; "
+                        "EXTENSION: .mzpeak (the default in a build with mzPeak support) or .mzML (the only format otherwise). mzPeak is columnar and much smaller; "
                         "mzML is what DDA search engines read today, so pass an .mzML name (or "
                         "-out_type mzML) if the next step is a search. mzPeak is written in one piece, "
                         "so it runs as one tile (the whole run's memory).");
@@ -2120,7 +2217,7 @@ protected:
 #endif
     registerStringOption_("out_type", "<type>", "", "Force the output format instead of taking it "
                           "from the extension of -out. Empty = follow the extension; mzPeak if the "
-                          "extension says nothing. mzPeak output runs as one tile (see -out).", false);
+                          "extension says nothing (mzML in a build without mzPeak support). mzPeak output runs as one tile (see -out).", false);
     setValidStrings_("out_type", {"", "mzpeak", "mzML"});
 
     registerTOPPSubsection_("gate", "Precursor-to-fragment co-localization gate");
@@ -2131,9 +2228,10 @@ protected:
 
     registerTOPPSubsection_("assembly", "Pseudo-spectrum assembly");
     registerIntOption_("assembly:min_fragments", "<n>", 3, "Emit a pseudo-spectrum only if it has at least this many fragments.", false);
-    registerIntOption_("assembly:max_fragments", "<n>", 500, "Keep at most this many (top-ranked) fragments per pseudo-spectrum.", false);
+    registerIntOption_("assembly:max_fragments", "<n>", 500, "Keep at most this many (top-ranked) fragments per pseudo-spectrum (applied before the twin fold, see assembly:twin_im_tolerance).", false);
     registerDoubleOption_("assembly:im_weight_sigma", "<1/K0>", 0.0, "Multiply each fragment's intensity by exp(-dIM^2 / 2 sigma^2), dIM its 1/K0 distance from the precursor; this also changes which fragments survive assembly:max_fragments. 0 = off. 0.005 is the measured optional setting (Sage +1-7% over corr_power 2 on three files, flat on MSFragger): docs/BASELINE.md 'Confirmed WINS post-freeze'.", false);
-    registerDoubleOption_("assembly:corr_power", "<k>", 2.0, "Multiply each emitted fragment's intensity by corr^k (k >= 0), corr its co-elution score with the precursor. Emitted intensity only: which fragments survive assembly:max_fragments is unchanged. 0 = off (the behaviour before 2026-07-28). Default 2: +8-10% Sage, +5-8% MSFragger on three files, docs/BASELINE.md 'Confirmed WINS post-freeze'.", false);
+    registerDoubleOption_("assembly:corr_power", "<k>", 2.0, "Multiply each emitted fragment's intensity by corr^k (k >= 0), corr its co-elution score with the precursor. Emitted intensity only: which fragments survive assembly:max_fragments is unchanged. 0 = off (the behaviour before 2026-07-28). Default 2: +8-10% Sage on three files (docs/BASELINE.md 'Confirmed WINS post-freeze') and +4% MSFragger on the one file measured with it ('CONTENT CANDIDATE 1 FALSIFIED').", false);
+    registerDoubleOption_("assembly:twin_im_tolerance", "<1/K0>", 0.005, "Fold spectra that claim one precursor twice into one: same MS1 frame, same charge, precursor m/z within 20 ppm, 1/K0 within this tolerance. The member with the most isotopes, then the most peaks, keeps its precursor and takes the union of the cluster's fragments (peaks within 10 ppm fused), so a folded spectrum can exceed assembly:max_fragments. Twins come from two seeds that resolve to one monoisotope, or from one precursor in the overlap of two isolation windows. -1 = off (the spectra before 1.4.0); 0 still folds twins of identical 1/K0. CHANGES OUTPUT. Default 0.005: -23.8% spectra for -0.21% Sage / -0.18% MSFragger peptides on PXD029836, entrapment FDR 0.98% with the fold against 0.98% without (docs/SAME-POSITION-DUPLICATION-2026-09-20.md).", false);
     registerIntOption_("assembly:default_charge", "<z>", 2, "Charge given to a precursor left without a charge call (no isotope partner, or a z=1 call on the 3+ mobility band): > 0 assigns that charge, 0 leaves it unset for the search engine. These are the guessed precursors, so it has no effect unless -assembly:require_isotope_support false keeps them.", false);
 
     registerTOPPSubsection_("trace", "Mass-trace detection (see MassTraceDetection)");
@@ -2160,9 +2258,10 @@ protected:
                           "and needs the vendor calibration (without it: 'openms', logged). 'openms' runs OpenMS MassTraceDetection. Different "
                           "algorithms: they share ~85% of identified peptides, neither wins on every file and engine, integer uses ~40% less memory. docs/MZ-AXIS-DESIGN.md.", false);
     setValidStrings_("trace:detector", {"openms", "integer"});
-    registerStringOption_("trace:mz_estimator", "<mode>", "apex", "Reported m/z of a mass trace: 'apex' the most intense peak's, 'mean' the intensity-weighted centroid (OpenMS), 'median' the median. CHANGES OUTPUT. With trace:detector integer and trace:ms2_split_valleys 0 the fragment traces keep the centroid whatever this says. apex measured best on both engines: docs/BASELINE.md 'APEX estimator: 3-FILE RESULT'.", false);
+    registerStringOption_("trace:mz_estimator", "<mode>", "apex", "Reported m/z of a mass trace: 'apex' the most intense peak's, 'mean' the intensity-weighted centroid (OpenMS), 'median' the median. CHANGES OUTPUT. Fragment traces of the integer detector always report the calibrated m/z of their apex bin, whatever this says; with trace:detector openms the estimator applies to them too. apex measured best on both engines: docs/BASELINE.md 'APEX estimator: 3-FILE RESULT'.", false);
     setValidStrings_("trace:mz_estimator", {"apex", "mean", "median"});
     registerDoubleOption_("trace:ms2_split_valleys", "<chrom_fwhm>", 7.0, "Split MS2 mass traces at chromatographic valleys (ElutionPeakDetection, width filtering off). Value = chrom_fwhm (seconds); 0 = off.", false);
+    registerFlag_("diag:selftest_twins", "Run assertions on the twin fold (mergeTwins_) and exit: the relation, the cluster closure, the survivor order and the 10-ppm fusion", true);
     registerFlag_("diag:selftest_arena", "Run assertions on the MS1 arena compaction (compactUnreferenced) and exit: kept spans must survive a container order that differs from their offset order", true);
     registerDoubleOption_("trace:ms1_split_valleys", "<chrom_fwhm>", 7.0, "Split MS1 mass traces at chromatographic valleys (ElutionPeakDetection), so two peptides eluting apart within the m/z tolerance do not merge into one precursor with the wrong monoisotope and charge. Value = chrom_fwhm (seconds); 0 = off.", false);
     registerDoubleOption_("trace:max_span_sec", "<sec>", 120.0, "Trim each mass trace (precursor and fragment) to at most this many seconds "
@@ -2261,6 +2360,7 @@ protected:
     setMinInt_("assembly:min_fragments", 1);
     setMinInt_("assembly:max_fragments", 1);
     setMinInt_("assembly:default_charge", 0);
+    setMinFloat_("assembly:twin_im_tolerance", -1.0);   // any negative value = off
     setMinInt_("max_charge", 1);
     setMinInt_("perf:trace_bands", 0);      // 0 = auto (documented)
     setMinFloat_("gate:delta_im", 0.0);
@@ -3118,6 +3218,85 @@ protected:
     return fail ? UNEXPECTED_RESULT : EXECUTION_OK;
   }
 
+  /// [twins] Assertions on mergeTwins_ with hand-built spectra: each side of every clause of the relation,
+  /// the cluster closure, the survivor order and the fusion.
+  ExitCodes selftestTwins_()
+  {
+    int fail = 0;
+    auto chk = [&](bool ok, const char* what) {
+      if (!ok) { writeLogError_(String("FAIL: ") + what); ++fail; }
+      else writeLogInfo_(String("  ok  ") + what);
+    };
+    auto sp = [](double rt, double mz, int z, double im, int niso, const vector<pair<double, float>>& pk) {
+      MSSpectrum s; s.setMSLevel(2); s.setRT(rt);
+      OpenMS::Precursor p; p.setMZ(mz); if (z > 0) p.setCharge(z); p.setDriftTime(im); s.setPrecursors({p});
+      s.setMetaValue("spx_n_isotopes", niso);
+      for (const auto& q : pk) s.emplace_back(q.first, q.second);
+      return s;
+    };
+    const vector<pair<double, float>> P{{100.0, 10.0f}, {200.0, 20.0f}};
+    auto pair_folds = [&](MSSpectrum b) { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), std::move(b)}; return mergeTwins_(v, 0.005) == 1 && v.size() == 1; };
+
+    { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, {{100.0, 10.0f}, {200.0, 20.0f}}), sp(10.0, 500.001, 2, 1.0, 3, {{200.0005, 5.0f}, {300.0, 30.0f}})};
+      const size_t gone = mergeTwins_(v, 0.005);
+      chk(gone == 1 && v.size() == 1, "a twin pair folds into one spectrum");
+      chk(v.size() == 1 && (int)v[0].getMetaValue("spx_n_isotopes") == 3 && v[0].getPrecursors()[0].getMZ() == 500.001, "the member with more isotopes survives, with its own precursor");
+      chk(v.size() == 1 && v[0].size() == 3 && v[0][0].getMZ() == 100.0 && v[0][2].getMZ() == 300.0, "the survivor takes the union of the fragments");
+      chk(v.size() == 1 && v[0].size() == 3 && fabs(v[0][1].getMZ() - (200.0 * 20.0 + 200.0005 * 5.0) / 25.0) < 1e-9 && v[0][1].getIntensity() == 20.0f,
+          "peaks within 10 ppm fuse to the intensity-weighted m/z at the maximum intensity"); }
+    chk(!pair_folds(sp(10.0, 500.001, 2, 1.006, 2, P)), "1/K0 beyond the tolerance: untouched");
+    chk(pair_folds(sp(10.0, 500.001, 2, 1.004, 2, P)), "1/K0 inside the tolerance: folded");
+    chk(!pair_folds(sp(11.1, 500.0, 2, 1.0, 2, P)), "the next MS1 frame: untouched");
+    chk(!pair_folds(sp(10.0, 500.0, 3, 1.0, 2, P)), "another charge: untouched");
+    chk(!pair_folds(sp(10.0, 500.0125, 2, 1.0, 2, P)), "25 ppm apart: untouched");
+    { vector<MSSpectrum> v{sp(10.0, 500.0, 0, 1.0, 2, P), sp(10.0, 500.0, 0, 1.0, 2, P)};
+      chk(mergeTwins_(v, 0.005) == 0 && v.size() == 2, "charge 0 (no charge call): untouched"); }
+    { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(10.0, 500.0075, 2, 1.0, 2, P), sp(10.0, 500.015, 2, 1.0, 2, P)};
+      chk(mergeTwins_(v, 0.005) == 2 && v.size() == 1, "a chain 15 + 15 ppm is one cluster although its ends are 30 ppm apart"); }
+    { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(10.0, 500.001, 2, 1.0, 2, P)};
+      mergeTwins_(v, 0.005);
+      chk(v.size() == 1 && v[0].getPrecursors()[0].getMZ() == 500.0, "equal isotopes and peaks: the earliest survives"); }
+    { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(10.0, 500.001, 2, 1.0, 2, {{100.0, 1.0f}, {150.0, 1.0f}, {250.0, 1.0f}})};
+      mergeTwins_(v, 0.005);
+      chk(v.size() == 1 && v[0].getPrecursors()[0].getMZ() == 500.001, "equal isotopes: more peaks survives"); }
+    { vector<MSSpectrum> v{sp(5.0, 300.0, 2, 0.8, 2, P), sp(10.0, 500.0, 2, 1.0, 2, P), sp(10.0, 700.0, 3, 1.1, 2, P), sp(10.0, 500.001, 2, 1.0, 3, P), sp(12.0, 400.0, 2, 0.9, 2, P)};
+      mergeTwins_(v, 0.005);
+      chk(v.size() == 4 && v[0].getRT() == 5.0 && v[1].getPrecursors()[0].getMZ() == 700.0 && v[2].getPrecursors()[0].getMZ() == 500.001 && v[3].getRT() == 12.0,
+          "every survivor keeps its own place (the later twin here), the folded member leaves no gap"); }
+    { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(10.0, 500.0, 2, 1.0, 2, P), sp(10.0, 500.0, 2, 1.001, 2, P)};
+      chk(mergeTwins_(v, 0.0) == 1 && v.size() == 2, "tolerance 0 folds identical-1/K0 twins only"); }
+    chk(pair_folds(sp(10.0, 500.00975, 2, 1.0, 2, P)), "19.5 ppm apart: folded (the 20-ppm relation, pinned from below)");
+    chk(!pair_folds(sp(10.0, 500.01025, 2, 1.0, 2, P)), "20.5 ppm apart: untouched (pinned from above)");
+    { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(10.0, 500.001, 2, 1.25, 2, P)};
+      chk(mergeTwins_(v, 0.25) == 1, "|d1/K0| exactly the tolerance: folded (the bound is inclusive)"); }
+    { vector<MSSpectrum> v{sp(10.0, 500.001, 2, 1.0, 2, P), sp(10.0, 500.0, 2, 1.0, 2, P)};
+      chk(mergeTwins_(v, 0.005) == 1 && v.size() == 1, "the higher m/z first in the input: still folded (the backward scan)"); }
+    { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 3, {{100.0, 1.0f}, {200.0, 1.0f}}), sp(10.0, 500.001, 2, 1.0, 2, {{110.0, 1.0f}, {210.0, 1.0f}, {310.0, 1.0f}})};
+      mergeTwins_(v, 0.005);
+      chk(v.size() == 1 && v[0].getPrecursors()[0].getMZ() == 500.0, "isotopes outrank peaks: 3 isotopes / 2 peaks beats 2 isotopes / 3 peaks"); }
+    { vector<MSSpectrum> v{sp(20.0, 400.0, 2, 0.9, 2, {{400.0, 1.0f}, {400.003, 2.0f}})};
+      chk(mergeTwins_(v, 0.005) == 0 && v.size() == 1 && v[0].size() == 2 && v[0][0].getMZ() == 400.0 && v[0][1].getMZ() == 400.003
+          && v[0][0].getIntensity() == 1.0f && v[0][1].getIntensity() == 2.0f, "a spectrum without a twin keeps its peaks bit for bit, 7.5 ppm apart or not"); }
+    // the fusion anchor is the RUNNING intensity-weighted mean, at 10 ppm of it
+    auto fused = [&](const vector<pair<double, float>>& a, const vector<pair<double, float>>& b) {
+      vector<MSSpectrum> v{sp(30.0, 600.0, 2, 1.0, 3, a), sp(30.0, 600.0, 2, 1.0, 2, b)};
+      mergeTwins_(v, 0.005); return v.size() == 1 ? v[0].size() : (size_t)0; };
+    chk(fused({{200.0, 1.0f}}, {{200.0021, 1.0f}}) == 2, "fusion: 10.5 ppm apart stays two peaks");
+    chk(fused({{200.0, 1.0f}, {200.0038, 1.0f}}, {{200.0019, 1.0f}}) == 2, "fusion: equal weights, the third peak is 14.25 ppm from the running mean: two peaks");
+    chk(fused({{200.0, 1.0f}, {200.0038, 1.0f}}, {{200.0019, 100.0f}}) == 1, "fusion: a heavy middle peak pulls the mean to 9.6 ppm of the third: one peak (not anchored on the first)");
+    { MSSpectrum a = sp(40.0, 700.0, 3, 1.1, 3, P), b = sp(40.0, 700.002, 3, 1.101, 2, P);
+      OpenMS::Precursor pa = a.getPrecursors()[0]; pa.setIsolationWindowLowerOffset(7.0); pa.setIsolationWindowUpperOffset(18.0); a.setPrecursors({pa});
+      a.setMetaValue("spx_guessed", 0); b.setMetaValue("spx_guessed", 1);
+      vector<MSSpectrum> v{a, b};
+      mergeTwins_(v, 0.005);
+      const auto& q = v[0].getPrecursors()[0];
+      chk(v.size() == 1 && v[0].getRT() == 40.0 && q.getMZ() == 700.0 && q.getCharge() == 3 && q.getDriftTime() == 1.1
+          && q.getIsolationWindowLowerOffset() == 7.0 && q.getIsolationWindowUpperOffset() == 18.0 && (int)v[0].getMetaValue("spx_guessed") == 0,
+          "the survivor keeps its own RT, precursor, 1/K0, isolation offsets and userParams"); }
+    writeLogInfo_(fail ? "[twins] SELFTEST FAILED" : "[twins] selftest passed");
+    return fail ? UNEXPECTED_RESULT : EXECUTION_OK;
+  }
+
   /// Export-time calibration: the reported m/z is computed once, here, from the bin and its apex frame's
   /// factor. tof 0 (the OpenMS detector has no bin) keeps the cached m/z.
   static double exportMz_(uint32_t tof, double b, double cached)
@@ -3160,6 +3339,7 @@ protected:
     const double delta_im = getDoubleOption_("gate:delta_im");
     const double delta_rt = getDoubleOption_("gate:delta_rt");
     if (getFlag_("diag:selftest_arena")) return selftestArena_();
+    if (getFlag_("diag:selftest_twins")) return selftestTwins_();
     log_overlap_ = (getStringOption_("gate:coelution") == "logoverlap");
     im_weight_sigma_ = getDoubleOption_("assembly:im_weight_sigma");
     mono_guard_ = getDoubleOption_("charge:mono_averagine_guard");
@@ -3170,6 +3350,7 @@ protected:
     const int min_corr_pts = getIntOption_("gate:min_correlation_points");
     const Size min_frags = (Size)getIntOption_("assembly:min_fragments");
     const Size max_frags = (Size)getIntOption_("assembly:max_fragments");
+    const double twin_im = getDoubleOption_("assembly:twin_im_tolerance");
     const int max_charge = getIntOption_("max_charge");
     mzEstimator() = getStringOption_("trace:mz_estimator");   // before any toTrace() call
     const double mass_ppm = getDoubleOption_("trace:mass_error_ppm");
@@ -4169,6 +4350,7 @@ protected:
     out_exp.setMetaValue("spx:dnoise_ms1_params", dnoise.on ? dnoise.params() : String("none"));
     out_exp.setMetaValue("spx:dnoise_ms1_points", dnoise.on ? String("raw " + String(dnoise.total.raw) + " kept " + String(dnoise.total.kept)) : String("none"));
     out_exp.setMetaValue("spx:require_isotope_support", (int)require_iso);
+    out_exp.setMetaValue("spx:twin_merge", twin_im >= 0.0 ? String("same frame, same charge, 20 ppm, 1/K0 <= " + String(twin_im) + ", fused 10 ppm") : String("off"));
     std::unique_ptr<TileWriter> writer;
     // written as `<out>.part` and renamed on completion: a tile that throws must not leave a
     // structurally valid file holding the earlier tiles only (review, step 2)
@@ -4176,6 +4358,7 @@ protected:
     if (out_type == FileTypes::MZML) { writer.reset(new TileWriter(out_part)); writer->setExperimentalSettings(out_exp); }
     vector<MSSpectrum> all_out;   // the bulk (mzPeak) path only
     Size n_out = 0;
+    Size n_twins = 0;   // [twins] spectra folded into a twin, over every tile
     writeLogInfo_("Processing " + String(n_win) + " isolation windows in " + String(tiles.size()) + " tile(s) from the " + (tile_source ? "streaming" : "resident") + " source (OpenMP over windows, <="
                   + String(n_conc) + " concurrent, admission bounded by " + String((int)(mem_frac * 100))
                   + "% of free RAM)..." + rss_() + mem_());
@@ -4740,6 +4923,13 @@ protected:
       long long tile_spec_bytes = 0;
       for (const auto& sp : tile_out) tile_spec_bytes += (long long)(sizeof(MSSpectrum) + sp.size() * 12);
       { Phase _ph("SORT(canonical)"); canonicalSort_(tile_out); }
+      if (twin_im >= 0.0)
+      {
+        Phase _ph("MERGE(twins)");
+        const size_t before = tile_out.size(), gone = mergeTwins_(tile_out, twin_im);
+        n_twins += gone;
+        writeLogInfo_("[twins] tile " + String(tk + 1) + "/" + String(tiles.size()) + ": " + String(gone) + " of " + String(before) + " spectra folded into a twin");
+      }
       if (writer)
       {
         for (auto& sp : tile_out) sp.getDataProcessing().push_back(out_dp);   // ONE entry, by pointer, for every spectrum
@@ -4804,6 +4994,7 @@ protected:
     }
     writeLogInfo_("Wrote " + String(n_out) + " pseudo-MS2 spectra to " + out
                   + " (" + String(FileTypes::typeToName(out_type)) + ")");
+    if (twin_im >= 0.0) writeLogInfo_("[twins] " + String(n_twins) + " spectra folded into a twin (assembly:twin_im_tolerance " + String(twin_im) + ")");
     report_phases_(phase_clock_());
     return EXECUTION_OK;
   }

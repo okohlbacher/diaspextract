@@ -1,5 +1,44 @@
 # Changelog
 
+## v1.4.0 — 2026-09-23
+
+**Why 1.4.0.** The default output changes: spectra that claim one precursor twice are folded into one.
+
+- **`-assembly:twin_im_tolerance` (default 0.005; −1 = off, the spectra of 1.3; 0 still folds twins of identical
+  1/K0).** On PXD029836 run 1418, 45.9 % of inferred precursors had a competitor claiming the same monoisotope
+  (same charge, 20 ppm, co-eluting, 1/K0 within 0.01): the claim loop's `used[]` owns traces, not monoisotope
+  positions, so two seeds that resolve to one mono both emit; a precursor in the overlap of two isolation windows
+  (1.00 m/z on that run) is also assembled twice. After the canonical sort of each tile, spectra in the same MS1
+  frame, of the same called charge, with precursor m/z within 20 ppm and 1/K0 within the tolerance are folded, and
+  chains of such pairs fold together; spectra without a charge are never folded. The member with the most isotopes
+  (then the most peaks) keeps its precursor and takes the union of the cluster's fragments, peaks within 10 ppm fused
+  (intensity-weighted m/z, maximum intensity), so a folded spectrum can hold more than `assembly:max_fragments`.
+  Same frame means same RT cell, so the spectra stay invariant to tile grouping and thread count. The fold is the
+  transformation `bench/twin_merge.py` priced on that run — every linked pair there shared its MS1 frame exactly —
+  at −23.8 % spectra for −0.21 % Sage / −0.18 % MSFragger peptides: in Sage peptides, 0.4 lost per 1,000 spectra
+  removed, against 2.7 when the duplicates are dropped instead and 9.5 for a random cut of the same size and charge
+  mix (docs/SAME-POSITION-DUPLICATION-2026-09-20.md). In the tool it equals the offline fold on that run spectrum
+  for spectrum, at an entrapment FDR of 0.98 % with the fold against 0.98 % without. `assembly:dedup_precursors`,
+  removed unmeasured in 1.2.0, was a precursor-level de-duplication of the same kind (15 ppm, 3 s, 0.01, the higher
+  apex intensity kept) that dropped instead of folding and was never measured. The header records the setting as
+  `spx:twin_merge`, `off` included; the log reports the folded count per tile and in total, and the phase report
+  gains `MERGE(twins)`.
+- **`-diag:selftest_twins`** asserts both sides of every clause of the fold's relation, the cluster closure, the
+  survivor order, the fusion anchor and tolerance, and that the survivor keeps its own fields. e2e check 12b runs
+  it and shows the fold inert on a fixture without twins and firing on a precursor assembled in two window groups;
+  15b holds the folded spectra to thread-count and tile-grouping invariance.
+- **Help text.** `trace:mz_estimator` said that integer-detector fragment traces keep their centroid; they report
+  the calibrated m/z of their apex bin, as the README says. `-out` and `-out_type` now say that mzPeak is the
+  default only in a build with mzPeak support. `assembly:corr_power` (help and README) quoted +4–8 % and +5–8 %
+  MSFragger peptides; the record has +4 %, on the one file measured with MSFragger.
+- **README.** The header lists seventeen `spx:` stamps (`spx:twin_merge` added), and `-perf:ms1_trace_bands` and
+  `-perf:trace_bands` carry the **changes output** marker their rows already described.
+- **`bench/`: the tools of the duplication study** (docs/SAME-POSITION-DUPLICATION-2026-09-20.md):
+  `iso_frontier.py` prices a spectrum-removal rule in peptides against a size- and charge-matched random cut,
+  `iso_rule.py` and `neigh_rule.py` write the drop lists, `mzml_drop.py` deletes listed spectra exactly,
+  `twin_merge.py` is the offline fold, `twin_origin.py`, `twin_sim.py`, `twin_rt_exact.py`, `rho.py` and
+  `funnel_dup.py` classify, compare and count the twins (the last from `-diag:dump_ms1_tsv`).
+
 ## v1.3.2 — 2026-09-17
 
 **Why 1.3.2.** A documentation release. The README was rewritten for users and packagers: what the tool does,

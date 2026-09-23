@@ -437,6 +437,33 @@ def main():
             "arena selftest did not report success:\n" + (r.stdout + r.stderr)[-1500:]
     check("MS1 arena compaction survives container order != offset order", c12)
 
+    # 12b: the twin fold (assembly:twin_im_tolerance). The default fixture has one z=2 and one z=1 precursor, so no
+    #      twin: the fold must not touch it. With groups=(1, 9) the same m/z window is acquired in two window groups,
+    #      so each precursor is assembled twice -- twins on RT, m/z, charge and 1/K0 -- and the fold must fire; the
+    #      logged count must be exactly the spectra removed, and the header must name the setting either way.
+    def c12b():
+        r = run(binary, inp, os.path.join(work, "selftest_twins.mzML"), extra=("-diag:selftest_twins",))
+        assert "[twins] selftest passed" in (r.stdout + r.stderr), \
+            "twin selftest did not report success:\n" + (r.stdout + r.stderr)[-1500:]
+        n = lambda f: int(re.search(rb'<spectrumList count="0*(\d+)"', open(f, "rb").read()).group(1))
+        folded = lambda r: int(re.search(r"\[twins\] (\d+) spectra folded into a twin", r.stdout).group(1))
+        stamp = lambda f: re.search(rb'name="spx:twin_merge"[^>]*value="([^"]*)"', open(f, "rb").read(40000))
+        on, off = os.path.join(work, "twins_on.mzML"), os.path.join(work, "twins_off.mzML")
+        r_on = run(binary, inp, on)
+        run(binary, inp, off, extra=("-assembly:twin_im_tolerance", "-1"))
+        assert folded(r_on) == 0 and digest(on) == digest(off), "the fold changed a fixture that has no twin"
+        assert stamp(on) and stamp(on).group(1).startswith(b"same frame") and stamp(off) and stamp(off).group(1) == b"off", \
+            "the header does not record the twin setting"
+        inp_g = os.path.join(work, "twins_groups.mzML")
+        synth(inp_g, groups=(1, 9))
+        g_on, g_off = os.path.join(work, "twins_g_on.mzML"), os.path.join(work, "twins_g_off.mzML")
+        rg = run(binary, inp_g, g_on)
+        run(binary, inp_g, g_off, extra=("-assembly:twin_im_tolerance", "-1"))
+        assert folded(rg) > 0, "the fold did not fire on a precursor assembled in two window groups"
+        assert n(g_off) - n(g_on) == folded(rg), f"off {n(g_off)} - on {n(g_on)} != the logged fold count {folded(rg)}"
+    check("twin fold: inert without twins, fires on a precursor assembled twice, count reconciles", c12b)
+
+
     # 13: the concurrency cap is enforced. It used to be computed, logged and never checked: the
     #     only bound was a byte budget that over-booked every window, so nothing ever throttled.
     def c13():
@@ -505,6 +532,21 @@ def main():
         path = os.path.join(work, name)
         synth(path, n_cycles=26, z1_shift=-6, **kw)
         return path
+
+    # 15b: the fold keeps thread-count and tile-grouping invariance with real clusters in play (the checks further
+    #      down run on fixtures without twins).
+    def c15b():
+        env = tdf_env()
+        inp_g = tiled_fixture("tiles_twins.mzML", groups=(1, 9))
+        outs = []
+        for name, extra, thr in (("tw_one_t1", ("-tile:cells_per_tile", "0"), 1), ("tw_one_t4", ("-tile:cells_per_tile", "0"), 4),
+                                 ("tw_cells_t4", ("-tile:cells_per_tile", "1"), 4)):
+            o = os.path.join(work, name + ".mzML")
+            r = run(binary, inp_g, o, extra=("-tile:rt_sec", "10") + extra, threads=thr, env=env)
+            assert int(re.search(r"\[twins\] (\d+) spectra folded into a twin", r.stdout).group(1)) > 0, f"{name}: the fold did not fire"
+            outs.append(o)
+        assert digest(outs[0]) == digest(outs[1]) == digest(outs[2]), "the folded output depends on the thread count or the tile grouping"
+    check("twin fold: 1 vs 4 threads and one tile vs one cell per tile give the same spectra", c15b)
 
     # 16: tile-count x thread invariance, two non-empty blocks, the count/index invariants on the
     #     tiled file, the exact (unpadded) count on the one-tile file

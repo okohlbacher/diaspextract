@@ -471,8 +471,8 @@ FDR. On all three files the shipping arm's true FDR at nominal 1% is 0.95-1.37%,
 Every earlier apportion/rp_max A/B compared corr_power=2 (share-all) against corr_power=0 (the variant) because those
 branches bypassed the emit weights (fixed 15:05). Re-run with the weights applied: apportion=1.0 -> Sage 11,742
 vs 12,217 share-all (**-3.9%**, only-share-all 1,234 / only-apportion 759). Same verdict as July, now clean:
-cross-precursor intensity apportionment loses peptides. Consequence: BACKLOG item 1 (NNLS unmixing onto the MS1
-basis) is cut -- its prerequisite ("apportion shows a signal") failed under the correct measurement. Side note: the
+cross-precursor intensity apportionment loses peptides. Consequence: the planned NNLS unmixing onto the MS1
+basis is cut -- its prerequisite ("apportion shows a signal") failed under the correct measurement. Side note: the
 apportion path ran the window loop at 6.1x (3,658 s) -- an hour-long run -- irrelevant now that it is dead.
 
 ### Trace m/z estimator A/B (2026-09-02, 17:22): APEX m/z is +2.6% peptides (same binary, env switch)
@@ -3033,10 +3033,10 @@ only 5,495 MiB of glibc free, so **~10.7 GiB there is live and uncharged**. It i
 `PeakPickerIM::pickIMCluster`'s own per-spectrum temporaries -- 88.125 B per RAW peak across six
 simultaneously live arrays, times up to 100 concurrent picks -- plus the loader's 64-frame MS1 decode
 stage (`patch:340`). (A first version of this paragraph blamed a 256-frame loader decode batch; that
-batch is the MS2 block and never runs in pass 1, and the correction is in data2.md.) A trim can
+batch is the MS2 block and never runs in pass 1.) A trim can
 only help the resident shape. On the streaming shape the picker flush batch is the lever:
 `SPEXTRACTOR_PICK_BATCH=64` takes 3.0 GB off for +2.3% wall, and `SPEXTRACTOR_LOAD_BATCH` is inert on
-this peak (data3-batch.md).
+this peak.
 
 ### TNBC 009 with the repaired ledger: on the long file the floor is MS1 tracing (2026-09-10, chain `tnbcled`)
 
@@ -3074,7 +3074,7 @@ flush breaks the soft window-loop cap the verifiers identified: **26.99 GB, −1
 (+8.1%)**, all of it attributable to the two knobs. The peak moves back to the end of the load
 (13.3 GiB MS1 map + 10.1 GiB free list, ~2.5 GiB live uncharged), which is D's next floor. Trimming
 every 4th flush is dominated. **Untested on TNBC 009**, whose tiled floor is the MS1 partition phase,
-where neither knob acts. Details: data3-batch.md section 8.
+where neither knob acts.
 
 ### TNBC 009: the pass-1 levers take 6.3 GB off, smaller tiles take nothing (2026-09-10, chain `tnbc2`, d7cc14d)
 

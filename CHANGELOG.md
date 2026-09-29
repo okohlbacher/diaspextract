@@ -1,5 +1,59 @@
 # Changelog
 
+## v1.5.0 — 2026-09-29
+
+- **Low-intensity runs: an adaptive co-elution gate.** At 10 ng the 1.4 gate stripped most true fragments: a faint ion
+  is the one-to-three-point tip of its elution peak with its apex a cycle off, so the 3-point minimum, the 3 s window
+  and the padded Pearson rejected it. Precursors with signal in at most 4 window frames are now gated as faint
+  (`-gate:adaptive faint`, `-gate:faint_max_frames`): a 6 s window (`-gate:faint_delta_rt`), the correlation shrunk in
+  Fisher z toward a prior of 0.6 from as little as one shared point (`-gate:shrinkage fisher`, `-gate:shrink_prior_r`,
+  `-gate:shrink_prior_sd`, `-gate:shrink_min_points`), the apex inside the precursor's retention-time span
+  (`-gate:colocation ranges`, `-gate:colocation_overlap`), traces too short to correlate judged by their centre
+  (`-gate:short_traces concentric`, `-gate:short_center_tol`, `-gate:short_min_points`) and the emitted intensity
+  weighted by the correlation to the first power (`-gate:faint_corr_power`). Every other precursor keeps the 1.4 gate.
+  `-gate:adaptive off` applies shrinkage, colocation and the short-trace test to every precursor (the 1.4 gate also
+  needs `-gate:shrinkage off -gate:colocation off -gate:short_traces off`). `-gate:adaptive auto` applies the faint gate
+  per run when at least `-gate:auto_faint_fraction` of the precursors have at most `-gate:faint_max_frames` MS1 points,
+  and the plain gate otherwise; an `[adaptive]` log line gives the run's fraction. The header stamps the gate as
+  `spx:gate_adaptive`, `spx:gate_faint`, `spx:gate_shrinkage`, `spx:gate_colocation` and `spx:gate_short_traces` and
+  the cap as `spx:cap_rank`; a `[pspan]` log line gives the precursor span histogram.
+- **The `max_fragments` cap ranks by evidence.** `-assembly:cap_rank evidence` (the default) orders fragments by
+  max(r, 0) × ln(1 + I) × (1 + shared points), so long correlated support outranks an intense one-frame coincidence;
+  `corr_inten` is the 1.4 key, `umpire` DIA-Umpire's max(r, 0)² × ln(1 + I).
+- Peptides at 1 % FDR, both engines, over 1.4.1: HeLa py3 (PXD017703) 10 ng +87 % Sage / +131 % MSFragger, 50 ng
+  +39 % / +66 %, 100 ng +28 % / +45 %, six tissue runs +2 % / +1 % (triplicates, harness runs, the candidate before the
+  same-bin merge below); Sage entrapment FDR 0.9–1.25 % on these sets, up to 1.65 % on the short-gradient Evosep runs.
+  `-gate:adaptive off -gate:shrinkage off -gate:colocation off -gate:short_traces off -assembly:cap_rank corr_inten
+  -trace:im_slice_merge -1 -assembly:merge_same_bin false` reproduces 1.4.1's output exactly (same semantic digest).
+- **No spectrum carries two peaks at one m/z.** The ion-mobility picker cut an ion with a broad mobility peak into
+  several centroids in one flight-time bin, and the tracer followed each as its own trace, so a spectrum could hold the
+  same fragment m/z twice (15 % of the spectra of a HeLa run; without the 1.4.0 twin fold, which hid most of them, half). OpenMS-based
+  search engines stop matching at the first duplicate (OpenMS MatchedIterator; fixed in OpenMS develop, #10291, not yet
+  in a release), and every engine scores the split intensity. Slices of one frame are now merged before tracing
+  (integer detector; `-trace:im_slice_merge`, 0.015 1/K0, span at most twice that) and fragments that still share a bin
+  are merged in assembly (`-assembly:merge_same_bin`: summed where they overlap the strongest in retention time,
+  retention-time-disjoint pieces dropped; before `-assembly:min_fragments`); the header stamps `spx:same_bin_merge`
+  and the log prints a `[merge]` line. On the 18 HeLa py3/25pc runs of PXD017703: +2.5 % Sage and +1.9 % MSFragger
+  peptides over the same build without it, Sage entrapment FDR mean 1.21 → 1.18 % (per run −0.34 to +0.17 points).
+  `-trace:im_slice_merge -1 -assembly:merge_same_bin false` restores the previous spectra exactly (same semantic
+  digest; the header gains the `spx:same_bin_merge` stamp).
+- `-gate:fragment_delta_im` sets the gate's 1/K0 window apart from the tracing tolerance (−1 = `-gate:delta_im`).
+- `-gate:coelution logoverlap` now needs `-gate:shrinkage off`: with the new default `fisher` the run is refused.
+- Tile ownership, the carry across tile boundaries and the RT index use the widest gate window, so the output stays
+  independent of the tile layout and the thread count under the faint gate's 6 s window.
+- Diagnostics: `DIASPEXTRACT_GATE_DUMP=<out.tsv>` with `DIASPEXTRACT_GATE_TARGETS=<file>` (whitespace-separated
+  `id m/z rt_sec 1/K0 z` records) writes, for the precursors near each target, one row per fragment trace within
+  0.05 1/K0 and 15 s with the first Pearson gate rule it fails (RT window as applied; shrinkage, colocation and the
+  short-trace test are not reflected). `DIASPEXTRACT_DET=1` with `-trace:detector openms` no longer computes the
+  integer detector's slab digest, whose slabs are in m/z quanta there.
+
+- **`dnoise:ms1` no longer refuses Bruker files whose `AccumulationTime` exceeds 100 ms** (up to 10 s). The MS1 denoiser filters raw
+  ion counts, and the reader returns them scaled by opentims' intensity correction, 100 / `AccumulationTime`. At 100 ms
+  and below the scaling is inverted exactly; above it several raw counts share one intensity, so the run was refused.
+  Now each point takes the raw count nearest intensity × `AccumulationTime` / 100 among those that give its intensity:
+  an approximation, applied without a warning. Output at 100 ms and below is unchanged. Affected: for example the
+  PXD029836 high-sensitivity runs (166 ms), which 1.4.x refused at the defaults.
+
 ## v1.4.1 — 2026-09-23
 
 **Why 1.4.1.** Fixes to the interface and to error handling. The spectra are unchanged: the dataset D gate reproduces

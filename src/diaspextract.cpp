@@ -62,7 +62,7 @@ static_assert(std::is_nothrow_move_constructible_v<OpenMS::MassTrace> && std::is
 // The release version. The standalone CMake build passes it from project(VERSION); the in-tree
 // OpenMS build does not, so the fallback here is the same number.
 #ifndef DIASPEXTRACT_VERSION
-#define DIASPEXTRACT_VERSION "1.4.1"
+#define DIASPEXTRACT_VERSION "1.5.0"
 #endif
 
 using namespace OpenMS;
@@ -129,6 +129,33 @@ namespace
     if (want && String(want) == site)
       throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, String("[task-err] injected failure in task ") + site, site);
   }
+  /// [gate-dump] Diagnostics, read-only: with DIASPEXTRACT_GATE_DUMP=<out.tsv> and DIASPEXTRACT_GATE_TARGETS=<tsv: id mz
+  /// rt_sec im z>, every precursor within 20 ppm (mono or +-1 isotope at the target's charge), 20 s and 0.05 1/K0 of a
+  /// target writes one PRECURSOR row (fragments passing the gate) and one row per fragment trace within 0.05 1/K0 and
+  /// 15 s, with the first gate it fails (plain Pearson gate rules only, RT window as applied: gate:short_traces,
+  /// gate:colocation and gate:shrinkage are not reflected in the fate). The spectra are unchanged; off unless both variables are set.
+  struct GateDump_
+  {
+    struct T { std::string id; double mz, rt, im; int z; };
+    std::vector<T> t;   ///< sorted by mz
+    std::ofstream out;
+    std::mutex mu;
+    bool on = false;
+    GateDump_()
+    {
+      const char* f = std::getenv("DIASPEXTRACT_GATE_DUMP");
+      const char* g = std::getenv("DIASPEXTRACT_GATE_TARGETS");
+      if (!f || !g) return;
+      std::ifstream in(g);
+      T x;
+      while (in >> x.id >> x.mz >> x.rt >> x.im >> x.z) t.push_back(x);
+      std::sort(t.begin(), t.end(), [](const T& a, const T& b) { return a.mz < b.mz; });
+      out.open(f);
+      out << "target\tiso_k\tpc_mz\tpc_z\tpc_rt\tpc_im\tpc_iso\tpc_guessed\tfrag_mz\tdim\tdrt\tnp\toverlap\tcorr\tinten\tfate\n";
+      on = !t.empty() && out.good();
+    }
+    static GateDump_& get() { static GateDump_ d; return d; }
+  };
   inline std::map<std::string, PhaseStat>& phase_stats_()
   { static std::map<std::string, PhaseStat> m; return m; }
   inline std::vector<std::string>& phase_order_()
@@ -188,7 +215,23 @@ namespace
   double mono_guard_ = 0.0;          ///< [mono-guard] averagine slack on leftward isotope steps (0=off)
   bool mono_select_ = false;         ///< [mono-select] pick the mono by averagine fit over the isotope run
   bool var_support_ = false;         ///< [Q1] Pearson variance over union support, not full grid G (0-pad fix)
+  bool short_conc_ = false;          ///< [short] gate:short_traces == "concentric": span test for traces too short for Pearson
+  double short_center_tol_ = 0.5;    ///< [short] gate:short_center_tol, fraction of the precursor half-span
+  int short_min_pts_ = 1;            ///< [short] gate:short_min_points
+  bool coloc_ = false;               ///< [coloc] gate:colocation == "ranges": each apex inside the other span, span overlap
+  double coloc_overlap_ = 0.3;       ///< [coloc] gate:colocation_overlap, fraction of the shorter span
+  bool shrink_ = false;              ///< [shrink] gate:shrinkage == "fisher": Fisher-z posterior mean instead of a hard point cut
+  double shrink_r0_ = 0.0, shrink_sd_ = 0.5;   ///< [shrink] prior N(atanh r0, sd^2) on the Fisher z of the true correlation
+  int shrink_min_pts_ = 2;           ///< [shrink] gate:shrink_min_points, overlapping frames needed to compute r at all
+  bool adaptive_ = false;            ///< [adaptive] gate:adaptive == "faint": the relaxed modes only for faint precursors
+  bool adaptive_auto_ = false;       ///< [adaptive] gate:adaptive == "auto": faint mode only when the run's faint fraction >= auto_faint_frac_
+  double auto_faint_frac_ = 0.45;    ///< [adaptive] gate:auto_faint_fraction
+  int faint_frames_ = 4;             ///< [adaptive] gate:faint_max_frames
+  double faint_drt_ = 6.0, faint_cp_ = 1.0;   ///< [adaptive] gate:faint_delta_rt, gate:faint_corr_power
   double corr_power_ = 0.0;          ///< [Q2] emitted fragment intensity *= corr^corr_power (0=off; engine-agnostic)
+  int cap_rank_ = 0;                 ///< [cap] assembly:cap_rank: 0 corr_inten (score x intensity), 1 umpire (r^2 ln I), 2 evidence (r ln I (1+overlap))
+  double im_slice_merge_ = 0.015;   ///< [merge] trace:im_slice_merge, 1/K0 link (group span <= 2x); negative = off
+  bool merge_same_bin_ = true;       ///< [merge] assembly:merge_same_bin
 
   /// glibc arena accounting at a milestone: what the allocator holds in arenas vs mmapped blocks
   /// and how much of it is free-but-retained. RSS alone cannot tell live data from retained pages.
@@ -253,6 +296,11 @@ namespace
   /// 1000-10000, >=10000; 100 and 300 are MS1 tracing's default noise and seed thresholds). Counting only.
   inline bool ms1HistOn_() { static const bool on = []{ const char* e = std::getenv("DIASPEXTRACT_MS1_HIST"); return e && *e && *e != '0'; }(); return on; }
   inline std::array<std::atomic<long long>, 5>& ms1Hist_() { static std::array<std::atomic<long long>, 5> h{}; return h; }
+  /// [pspan] precursors reaching assembly by MS1 span in window frames: 1, 2, 3, 4, 5-6, 7-10, 11-20, >20; [8] = faint (adaptive)
+  inline std::array<std::atomic<long long>, 9>& pspanHist_() { static std::array<std::atomic<long long>, 9> h{}; return h; }
+  /// [merge] [0] picked MS2 peaks merged away in toTof (one frame, one bin, 1/K0 within trace:im_slice_merge);
+  /// [1] frames that had such a merge; [2] fragments merged away at assembly (one bin in one spectrum)
+  inline std::array<std::atomic<long long>, 3>& mergeCount_() { static std::array<std::atomic<long long>, 3> c{}; return c; }
   /// RAII in main_: one sampler for the run, joined before any return path leaves the function.
   struct LedRun
   {
@@ -907,19 +955,79 @@ namespace
   /// m/z quanta -> flight-time bins, in place. The store keeps m/z at a 1e-5 Da quantum, ~400x finer
   /// than one TOF bin at m/z 600, so inverting the calibration recovers the ORIGINAL bin exactly --
   /// no approximation is introduced here, and the loader does not have to know the axis.
+  ///
+  /// [merge] The IM picker's 1/K0 box (gate:delta_im) cuts an ion whose mobility peak is wider into several centroids per
+  /// frame that land in ONE bin; the tracer takes one peak per frame, so each slice became its own trace and a spectrum
+  /// could carry the same m/z twice. Here, where the bin first exists, a
+  /// frame's peaks that share a bin and chain within trace:im_slice_merge in 1/K0 become one peak: intensity summed,
+  /// 1/K0 intensity-weighted. Frame-local, so thread and tile invariant; peaks stay ascending by bin within a frame.
   void toTof(PeakSlab& sl)
   {
     if (!sl.mzq) return;
+    const long long led_b0 = (long long)sl.bytes();         // [ledger] the load charged the pre-merge bytes
     const TofAxis& ax = tofAxis();
     const size_t F = sl.frames();
     sl.b.resize(F);
+    // single linkage along 1/K0 with a link of im_slice_merge_, the whole group within 2x that (one ion's 2-3 slices;
+    // measured slice spacing median 0.008, q90 0.014, max 0.019 at the 0.01 picker box)
+    const long tol_q = im_slice_merge_ >= 0.0 ? (long)llround(im_slice_merge_ * IM_Q) : -1, span_q = 2 * tol_q;
+    vector<pair<uint16_t, uint32_t>> run;                    // (imq, slab index) of one same-bin run
+    vector<std::tuple<uint32_t, float, uint16_t>> cl;        // (first slab index, intensity, imq) of the run's groups
+    uint32_t w = 0;
+    long long merged = 0, frames_merged = 0;
     for (size_t i = 0; i < F; ++i)
     {
       const double b = ax.factor(sl.frame_id[i]);
       sl.b[i] = b;
-      for (uint32_t k = sl.frame_off[i]; k < sl.frame_off[i + 1]; ++k)
+      const uint32_t lo = sl.frame_off[i], hi = sl.frame_off[i + 1];
+      for (uint32_t k = lo; k < hi; ++k)
         sl.tof[k] = ax.tofOf((double)sl.tof[k] / MZ_Q, b);
+      sl.frame_off[i] = w;
+      bool any = false;
+      for (uint32_t k = lo; k < hi;)
+      {
+        uint32_t e = k + 1;
+        while (e < hi && sl.tof[e] == sl.tof[k]) ++e;
+        if (e - k == 1 || tol_q < 0)
+        {
+          for (uint32_t j = k; j < e; ++j) { sl.tof[w] = sl.tof[j]; sl.inten[w] = sl.inten[j]; sl.imq[w] = sl.imq[j]; ++w; }
+          k = e; continue;
+        }
+        run.clear();
+        for (uint32_t j = k; j < e; ++j) run.emplace_back(sl.imq[j], j);
+        std::sort(run.begin(), run.end());                   // by 1/K0, then slab order: deterministic
+        cl.clear();                                          // every read of the run happens before any write
+        for (size_t r = 0; r < run.size();)
+        {
+          size_t q = r + 1;
+          while (q < run.size() && (long)run[q].first - (long)run[q - 1].first <= tol_q
+                 && (long)run[q].first - (long)run[r].first <= span_q) ++q;
+          if (q - r == 1) { cl.emplace_back(run[r].second, sl.inten[run[r].second], run[r].first); r = q; continue; }   // untouched
+          double isum = 0.0, wim = 0.0;
+          uint32_t first = run[r].second;
+          for (size_t u = r; u < q; ++u)
+          {
+            first = std::min(first, run[u].second);
+            const float v = sl.inten[run[u].second];
+            if (v > 0.0f && std::isfinite(v)) { isum += v; wim += (double)v * run[u].first; }
+          }
+          cl.emplace_back(first, (float)isum, isum > 0.0 ? (uint16_t)std::min(65535.0, std::max(0.0, std::round(wim / isum))) : run[r].first);
+          merged += (long long)(q - r - 1); any = true;
+          r = q;
+        }
+        // groups written at their first member's slab position: with nothing merged the slab is byte-identical,
+        // so the tracer's same-bin tie-break (slab order) is unchanged wherever no merge happened
+        std::sort(cl.begin(), cl.end(), [](const auto& x, const auto& y) { return std::get<0>(x) < std::get<0>(y); });
+        const TofIdx t = sl.tof[k];
+        for (const auto& c : cl) { sl.tof[w] = t; sl.inten[w] = std::get<1>(c); sl.imq[w] = std::get<2>(c); ++w; }
+        k = e;
+      }
+      frames_merged += any;
     }
+    if (F) sl.frame_off[F] = w;
+    sl.tof.resize(w); sl.inten.resize(w); sl.imq.resize(w);
+    ledAdd_(LC_SLAB, (long long)sl.bytes() - led_b0);         // [ledger] give back what the merge freed
+    mergeCount_()[0] += merged; mergeCount_()[1] += frames_merged;
     vector<uint32_t>().swap(sl.frame_id);
     sl.mzq = false;
   }
@@ -1506,7 +1614,7 @@ namespace
       spx::dnoise::GateBuild g = spx::dnoise::buildMs1WindowGate(tdf.meta, tdf.windows, p);
       if (!g.error.empty()) return "the dnoise MS1 port cannot build its window gate from this file: " + g.error;
       gate = std::move(g.gate);
-      for (size_t id = 1; id < tdf.frames.size(); ++id)   // below 1 (AccumulationTime > 100 ms) raw counts share a corrected value
+      for (size_t id = 1; id < tdf.frames.size(); ++id)   // above 100 ms raw counts are approximate (recoverPoint), not refused
         if (tdf.frames[id].msms_type == 0)
           if (std::string r = spx::dnoise::recover::correctionRefusal(id, tdf.frames[id].corr); !r.empty()) return r;
       // one table per TimsCalibration row, over the most scans an MS1 frame using it has (tdf.ms1_max_scans): a row no MS1
@@ -1582,7 +1690,7 @@ namespace
           case Refusal::intensity_range:
             throw refuse("intensity " + String(v) + " in frame " + String(fid) + " is >= 2^24 = 16777216: the loader's float32 intensity no longer identifies one raw count");
           default:   // Refusal::intensity
-            throw refuse("intensity " + String(v) + " in frame " + String(fid) + " is not opentims' correction of exactly one raw count (" + String(hits) + " found)");
+            throw refuse("intensity " + String(v) + " in frame " + String(fid) + " is not opentims' correction of any raw count");
         }
       }
       const spx::dnoise::FrameCounts fc = spx::dnoise::denoiseMs1Frame(k.scan.data(), k.tof.data(), k.raw.data(), n, fr.num_scans, p, gate ? &*gate : nullptr, k.w, k.keep);
@@ -2313,8 +2421,43 @@ protected:
     registerIntOption_("trace:native_ms1_neighbors", "<n>", 0, "Sum n neighbouring MS1 frames on each side in the .d reader, before peak picking: 0 = off, 1 = 3-frame sum, 2 = 5-frame sum. Needs perf:stream_load true and -dnoise:ms1 false. CHANGES OUTPUT: at 1 (2026-07-27, older defaults) Sage +7.8% for 2.7x the spectra.", false);
 
     registerTOPPSubsection_("perf", "Concurrency / memory tradeoff");
-    registerStringOption_("gate:coelution", "<mode>", "pearson", "Fragment-precursor co-elution statistic: 'pearson' over the full RT grid, or 'logoverlap' (AlphaDIA-style profile overlap in log space where the precursor has signal; falsified: docs/BASELINE.md 'What is already falsified'). The scales differ: retune gate:min_correlation when switching.", false);
+    registerStringOption_("gate:coelution", "<mode>", "pearson", "Fragment-precursor co-elution statistic: 'pearson' over the full RT grid, or 'logoverlap' (AlphaDIA-style profile overlap in log space where the precursor has signal; falsified: docs/BASELINE.md 'What is already falsified'). The scales differ: retune gate:min_correlation when switching. 'logoverlap' needs gate:shrinkage off (the default fisher refuses it).", false);
     setValidStrings_("gate:coelution", {"pearson", "logoverlap"});
+    registerStringOption_("gate:short_traces", "<mode>", "concentric", "Fragment traces with fewer than gate:min_correlation_points points, or fewer overlapping frames: 'off' drops them; 'concentric' keeps one whose detected RT span lies inside the precursor's (one cycle of slack) and whose span centre is within max(1 cycle, gate:short_center_tol x the precursor half-span) of the precursor's. Faint ions are the tips of their elution peaks: their spans shrink with intensity but stay centred on the apex. Experimental.", false, true);
+    setValidStrings_("gate:short_traces", {"off", "concentric"});
+    registerDoubleOption_("gate:short_center_tol", "<frac>", 0.5, "gate:short_traces concentric: centre tolerance as a fraction of the precursor half-span (at least one cycle).", false, true);
+    setMinFloat_("gate:short_center_tol", 0.0);
+    registerIntOption_("gate:short_min_points", "<n>", 1, "gate:short_traces concentric: fewest points a short fragment trace needs.", false, true);
+    setMinInt_("gate:short_min_points", 1);
+    registerDoubleOption_("gate:fragment_delta_im", "<1/K0>", -1.0, "Max |precursor - fragment| 1/K0 difference in the co-elution gate alone; negative = gate:delta_im, which also sets the tracing tolerance (widening that merges ions of different mobility). Experimental.", false, true);
+    registerDoubleOption_("trace:im_slice_merge", "<1/K0>", 0.015, "Integer detector: before tracing, merge a frame's picked MS2 peaks that fall in one flight-time bin into one peak (intensity summed, 1/K0 intensity-weighted). Peaks join when their 1/K0 is within this distance of the previous one and the group spans at most twice this distance: the IM picker (box gate:delta_im) cuts an ion with a wider mobility peak into several same-bin centroids, which would otherwise become separate traces and duplicate m/z in a spectrum. Negative = off.", false, true);
+    setMaxFloat_("trace:im_slice_merge", 1.0);   // 1/K0 units: anything wider than the mobility axis is a typo
+    registerStringOption_("assembly:merge_same_bin", "<true/false>", "true", "Merge fragments of one flight-time bin (one m/z; exact m/z on the OpenMS detector) in a spectrum into one peak before assembly:max_fragments: members overlapping the strongest one in retention time are summed, RT-disjoint pieces dropped; the peak keeps the strongest member's m/z and the best cap key of the summed members. Catches what trace:im_slice_merge cannot (valley splits, band edges, tile carries, slices beyond its span). Two peaks at one m/z break the fragment matching of OpenMS-based search engines.", false, true);
+    setValidStrings_("assembly:merge_same_bin", {"true", "false"});
+    registerStringOption_("assembly:cap_rank", "<mode>", "evidence", "Which fragments survive assembly:max_fragments: 'corr_inten' ranks by gate score x intensity (the score is the shrunk or concentric one when those modes are on); 'umpire' by max(r,0)^2 x ln(1+I) with r the raw co-elution score before shrinkage (Pearson, or the logoverlap score under gate:coelution logoverlap; DIA-Umpire's key); 'evidence' by max(r,0) x ln(1+I) x (1 + overlapping frames), so long, correlated support outranks an intense one-frame coincidence. Experimental.", false, true);
+    setValidStrings_("assembly:cap_rank", {"corr_inten", "umpire", "evidence"});
+    registerStringOption_("gate:adaptive", "<mode>", "faint", "'faint': apply gate:shrinkage, gate:colocation, gate:short_traces, gate:faint_delta_rt and gate:faint_corr_power only to faint precursors, those with signal in at most gate:faint_max_frames window frames (a faint ion is the short tip of its elution peak); every other precursor keeps the plain gate (gate:delta_rt, gate:min_correlation_points, assembly:corr_power). 'auto': 'faint' when at least gate:auto_faint_fraction of the run's precursors have at most gate:faint_max_frames MS1 trace points, else the plain gate for every precursor (gate:shrinkage, gate:colocation and gate:short_traces off; the choice is stamped as spx:gate_adaptive auto:on|auto:off). 'off': gate:shrinkage, gate:colocation and gate:short_traces apply to every precursor at gate:delta_rt and assembly:corr_power (gate:faint_delta_rt and gate:faint_corr_power unused). Experimental.", false, true);
+    setValidStrings_("gate:adaptive", {"off", "faint", "auto"});
+    registerDoubleOption_("gate:auto_faint_fraction", "<frac>", 0.45, "gate:adaptive auto: the run gets the faint gate when at least this fraction of its precursors span at most gate:faint_max_frames MS1 points (a sparse run: HeLa 10-100 ng 0.57-0.69, dense tissue 0.21); otherwise the plain gate. Logged and stamped spx:gate_adaptive.", false, true);
+    setMinFloat_("gate:auto_faint_fraction", 0.0);
+    setMaxFloat_("gate:auto_faint_fraction", 1.0);
+    registerIntOption_("gate:faint_max_frames", "<n>", 4, "gate:adaptive faint: most window frames with precursor signal for a faint precursor.", false, true);
+    setMinInt_("gate:faint_max_frames", 1);
+    registerDoubleOption_("gate:faint_delta_rt", "<sec>", 6.0, "gate:adaptive faint: the apex RT window for faint precursors.", false, true);
+    setMinFloat_("gate:faint_delta_rt", 0.0);
+    registerDoubleOption_("gate:faint_corr_power", "<k>", 1.0, "gate:adaptive faint: assembly:corr_power for faint precursors.", false, true);
+    setMinFloat_("gate:faint_corr_power", 0.0);
+    registerStringOption_("gate:colocation", "<mode>", "ranges", "'ranges': keep a fragment only if its apex lies inside the precursor's detected RT span and the precursor apex inside the fragment's (one cycle of slack), and the spans overlap by at least gate:colocation_overlap of the shorter one (DIA-Umpire's apex-in-range and RT-overlap tests). Experimental.", false, true);
+    setValidStrings_("gate:colocation", {"off", "ranges"});
+    registerDoubleOption_("gate:colocation_overlap", "<frac>", 0.3, "gate:colocation ranges: least span overlap as a fraction of the shorter span.", false, true);
+    setMinFloat_("gate:colocation_overlap", 0.0);
+    registerStringOption_("gate:shrinkage", "<mode>", "fisher", "'fisher': gate on the posterior mean of the co-elution score instead of a hard gate:min_correlation_points cut: z = atanh(r), r the gate:coelution pearson statistic (full grid by default), with the overlapping frames n as a heuristic effective sample size (variance 1/max(n-3,1)) and prior N(atanh(gate:shrink_prior_r), gate:shrink_prior_sd^2). Scores on few frames are pulled toward the prior, so a prior below gate:min_correlation demands more from short traces; a prior equal to it reduces the mode to a plain cut at gate:shrink_min_points. Not with gate:coelution logoverlap. Experimental. Replaces gate:min_correlation_points with gate:shrink_min_points.", false, true);
+    setValidStrings_("gate:shrinkage", {"off", "fisher"});
+    registerDoubleOption_("gate:shrink_prior_r", "<r>", 0.6, "gate:shrinkage fisher: prior mean correlation; 0.6 shrinks toward moderate co-elution, 0 toward none (and loses most faint fragments).", false, true);
+    registerDoubleOption_("gate:shrink_prior_sd", "<sd>", 0.3, "gate:shrinkage fisher: prior standard deviation in Fisher-z units (smaller = stronger shrinkage).", false, true);
+    setMinFloat_("gate:shrink_prior_sd", 0.01);
+    registerIntOption_("gate:shrink_min_points", "<n>", 1, "gate:shrinkage fisher: fewest overlapping frames to compute a correlation; at 1 a one-frame overlap is scored almost at the prior (the data get weight 1/(1 + 1/gate:shrink_prior_sd^2)), so pair it with gate:adaptive faint.", false, true);
+    setMinInt_("gate:shrink_min_points", 1);
     registerFlag_("gate:variance_support", "Compute the Pearson co-elution score over the union support of the two profiles instead of the full RT grid (gate:coelution pearson only; the scale changes, retune gate:min_correlation). Falsified 2026-07-27, kept for reproducibility: docs/BASELINE.md 'What is already falsified'.");
     registerIntOption_("perf:ms1_trace_bands", "<n>", 48, "Split MS1 mass-trace detection into N m/z bands traced concurrently (the halo partition of perf:trace_bands). Not exact: the band count changes the spectrum list slightly. Default 48 since 2026-09-07, gated on datasets D and A: docs/BASELINE.md 'ms1_trace_bands=48 adopted'. 1 = off; 0 is read as 1.", false);
     registerStringOption_("perf:ms1_prune", "<true/false>", "true",
@@ -2353,9 +2496,9 @@ protected:
 
     registerTOPPSubsection_("dnoise", "MS1 denoising of the raw frames before peak picking (dnoise v0.1.0's MS1 path; Bruker .d only)");
     registerStringOption_("dnoise:ms1", "<true/false>", "true",
-                          "Denoise every MS1 frame on its raw points before picking: a bit-identical port of dnoise v0.1.0's default MS1 path "
+                          "Denoise every MS1 frame on its raw points before picking: a port of dnoise v0.1.0's default MS1 path, bit-identical up to AccumulationTime 100 ms "
                           "(Garrett, Diedrich & Yates III, bioRxiv 2026.08.27.747603; MIT, LICENSES/dnoise-MIT.txt). Bruker .d only: other inputs "
-                          "pass through, logged and stamped spx:dnoise_ms1. A run whose raw points do not recover exactly is refused, as is "
+                          "pass through, logged and stamped spx:dnoise_ms1. Above 100 ms several raw counts share one intensity and the nearest is taken. A run whose raw points do not recover is refused, as is "
                           "trace:native_ms1_neighbors > 0. CHANGES OUTPUT (dataset D -4.3% Sage peptides, TNBC 009 +1.5%) and lowers peak memory "
                           "13-21% at one cell per tile: CHANGELOG, 2026-09-10 'MS1 denoising is on by default'. false = the output before 2026-09-10.", false);
     setValidStrings_("dnoise:ms1", {"true", "false"});
@@ -3046,6 +3189,9 @@ protected:
   {
     vector<pair<double, double>> frags;
     vector<double> frag_scores;
+    vector<uint32_t> frag_bin;   // [merge] the TOF bin of each fragment (0: OpenMS detector, no bin; a real bin 0, m/z just
+                                 // below the usual 100 m/z floor, is compared by exact m/z like the OpenMS path)
+    vector<pair<int, int>> frag_span;   // [merge] its detected window-frame span
     const double G = (double)fg.G;
     const Trace& p_tr = ms1_traces[pc.trace_idx];
     vector<int> touched;
@@ -3066,6 +3212,19 @@ protected:
       psum += v; psumsq += v * v;
       if (log_overlap_) plogsum += std::log1p(v);
     }
+    int p_lo = std::numeric_limits<int>::max(), p_hi = -1;              // [short] the precursor's span in window frames
+    int p_apex = -1;                                                    // [coloc] the precursor apex frame
+    for (int gi : touched)
+    {
+      p_lo = std::min(p_lo, gi); p_hi = std::max(p_hi, gi);
+      if (p_apex < 0 || pdense[gi] > pdense[p_apex]) p_apex = gi;
+    }
+    // [adaptive] with gate:adaptive faint, the relaxed modes apply only to faint precursors (short precursor traces)
+    const bool faint = adaptive_ && (int)touched.size() <= faint_frames_, all_p = !adaptive_ || faint;
+    { const size_t n = touched.size(); pspanHist_()[n <= 4 ? (n ? n - 1 : 0) : n <= 6 ? 4 : n <= 10 ? 5 : n <= 20 ? 6 : 7]++; if (faint) pspanHist_()[8]++; }
+    const bool g_shrink = shrink_ && all_p, g_coloc = coloc_ && all_p, g_conc = short_conc_ && all_p;
+    const double g_drt = faint ? faint_drt_ : delta_rt, g_cp = faint ? faint_cp_ : corr_power_;
+    const double p_ctr = 0.5 * (p_lo + p_hi), p_half = 0.5 * (p_hi - p_lo);
     double pmean = psum / G, pvar = psumsq - G * pmean * pmean;
     double pinv = pvar > 0 ? 1.0 / sqrt(pvar) : 0.0;
     if (pinv > 0.0)
@@ -3078,7 +3237,7 @@ protected:
         const int dq = (int)frag_rt.q[fi] - pq;
         if (dq < -2 || dq > 2) continue;                                // 2 B reject, see FragRt
         // [soa] the gate reads a parallel array; the trace record is touched only after it passes.
-        if (fabs(frag_rt[fi] - pc.rt) > delta_rt) continue;            // RT gate
+        if (fabs(frag_rt[fi] - pc.rt) > g_drt) continue;               // RT gate ([adaptive] faint window)
         if (fg.invnorm[fi] == 0.0) continue;                           // degenerate fragment
         const Trace& f = frag_traces[fi];
         if (fabs(f.mz - pc.mono_mz) < 0.01) continue;                  // exclude precursor peak [M-7]
@@ -3086,58 +3245,179 @@ protected:
         // [R2-late, 2026-09-02] overlap <= support, so a fragment with fewer support points than
         // min_corr_pts can never pass the overlap guard below: skip it before the dot product.
         // Output-identical by construction (the guard's continue is the only thing it would reach).
-        if (f.np() < (size_t)std::max(min_corr_pts, 0)) continue;
+        const bool short_np = f.np() < (size_t)std::max(min_corr_pts, 0);
+        if (short_np && !g_conc && !(g_shrink && (int)f.np() >= shrink_min_pts_)) continue;
+        int f_lo = -1, f_hi = -1, f_apex = -1;                         // [short]/[coloc] the fragment's detected span and apex
+        float f_max = 0.0f;
         // two sequential streams: the fragment's span in the arena and pdense over window frames
         for (size_t k = 0; k < f.span(); ++k)
         { const float fv = xv(wst, f, k); if (fv == 0.0f) continue;
+          if (f_lo < 0) f_lo = (int)(f.frame0 + k);
+          f_hi = (int)(f.frame0 + k);
+          if (fv > f_max) { f_max = fv; f_apex = (int)(f.frame0 + k); }
           const float pv = pdense[f.frame0 + k]; if (pv != 0.0f) { dot += (double)pv * fv; ++overlap; } }
-        if (overlap < min_corr_pts) continue;                          // overlap guard [H-4]
-        // [B0] Plain Pearson takes variance over the full grid G, so a sparse fragment is scored against ~G
-        // implicit zeros. gate:variance_support uses the union support instead; gate:coelution=logoverlap is
-        // the AlphaDIA-style log-space profile overlap, summed where the precursor has signal, in [0,1].
-        double c;
-        if (var_support_ && !log_overlap_)                             // [Q1] pearson-only, per the flag doc
+        if (g_coloc)                                                    // [coloc] DIA-Umpire-style co-location
         {
-          // [Q1] n = |precursor support U fragment support|; fsum/fsumsq over the fragment's real points.
-          double fsum = 0.0, fsumsq = 0.0;
-          for (size_t k = 0; k < f.span(); ++k)
-          { const double fv = xv(wst, f, k); if (fv > 0.0) { fsum += fv; fsumsq += fv * fv; } }
-          double n = (double)(touched.size() + f.np() - (size_t)overlap);
-          double pm = psum / n, fm = fsum / n;
-          double pv2 = psumsq - n * pm * pm, fv2 = fsumsq - n * fm * fm;
-          if (pv2 <= 0.0 || fv2 <= 0.0) continue;                      // degenerate on union support
-          c = (dot - n * pm * fm) / std::sqrt(pv2 * fv2);
+          if (f_lo < 0 || p_hi < 0) continue;
+          if (f_apex < p_lo - 1 || f_apex > p_hi + 1 || p_apex < f_lo - 1 || p_apex > f_hi + 1) continue;
+          const int inter = std::min(f_hi, p_hi) - std::max(f_lo, p_lo) + 1, shorter = std::min(f_hi - f_lo, p_hi - p_lo) + 1;
+          if (inter < coloc_overlap_ * shorter) continue;
         }
-        else if (log_overlap_)
+        double c, c_raw = 0.0;                                          // c_raw: the unshrunk score, for assembly:cap_rank
+        const bool no_corr = g_shrink ? overlap < shrink_min_pts_ : (short_np || overlap < min_corr_pts);   // [short]/[shrink] precedence
+        if (g_conc && no_corr)
         {
-          // Both log-profiles normalised to unit sum, then intersected: a shape statistic. Normalising by the
-          // precursor's log-sum alone bounded the score by the intensity ratio (-18.9% peptides at gate 0.5).
-          double fsum = 0.0;
-          for (size_t k = 0; k < f.span(); ++k)
-          { const double fv = xv(wst, f, k); if (fv > 0.0) fsum += std::log1p(fv); }
-          if (fsum <= 0.0 || plogsum <= 0.0) continue;
-          double inter = 0.0;
-          for (size_t k = 0; k < f.span(); ++k)
+          // [short] too few points for a correlation: faint ions are the tips of their elution peaks, so their
+          // detected spans shrink with intensity but stay centred on the apex. Keep a fragment whose span lies inside
+          // the precursor's (one cycle of slack) with its centre near the precursor's; the score ranks by centring.
+          if ((int)f.np() < short_min_pts_ || f_lo < 0 || p_hi < 0) continue;
+          if (f_lo < p_lo - 1 || f_hi > p_hi + 1) continue;
+          const double d = std::fabs(0.5 * (f_lo + f_hi) - p_ctr), tol = std::max(1.0, short_center_tol_ * p_half);
+          if (d > tol) continue;
+          c = min_corr * (1.0 - 0.5 * d / (tol + 1.0));                // at the gate: ranks and weighs as a borderline fragment
+          c_raw = c;
+        }
+        else
+        {
+          if (overlap < (g_shrink ? shrink_min_pts_ : min_corr_pts)) continue;   // overlap guard [H-4]; [shrink] its own floor
+          // [B0] Plain Pearson takes variance over the full grid G, so a sparse fragment is scored against ~G
+          // implicit zeros. gate:variance_support uses the union support instead; gate:coelution=logoverlap is
+          // the AlphaDIA-style log-space profile overlap, summed where the precursor has signal, in [0,1].
+          if (var_support_ && !log_overlap_)                             // [Q1] pearson-only, per the flag doc
           {
-            const double fv = xv(wst, f, k); if (fv <= 0.0) continue;
-            inter += std::min(std::log1p(fv) / fsum,
-                              std::log1p((double)pdense[f.frame0 + k]) / plogsum);
+            // [Q1] n = |precursor support U fragment support|; fsum/fsumsq over the fragment's real points.
+            double fsum = 0.0, fsumsq = 0.0;
+            for (size_t k = 0; k < f.span(); ++k)
+            { const double fv = xv(wst, f, k); if (fv > 0.0) { fsum += fv; fsumsq += fv * fv; } }
+            double n = (double)(touched.size() + f.np() - (size_t)overlap);
+            double pm = psum / n, fm = fsum / n;
+            double pv2 = psumsq - n * pm * pm, fv2 = fsumsq - n * fm * fm;
+            if (pv2 <= 0.0 || fv2 <= 0.0) continue;                      // degenerate on union support
+            c = (dot - n * pm * fm) / std::sqrt(pv2 * fv2);
           }
-          c = inter;
+          else if (log_overlap_)
+          {
+            // Both log-profiles normalised to unit sum, then intersected: a shape statistic. Normalising by the
+            // precursor's log-sum alone bounded the score by the intensity ratio (-18.9% peptides at gate 0.5).
+            double fsum = 0.0;
+            for (size_t k = 0; k < f.span(); ++k)
+            { const double fv = xv(wst, f, k); if (fv > 0.0) fsum += std::log1p(fv); }
+            if (fsum <= 0.0 || plogsum <= 0.0) continue;
+            double inter = 0.0;
+            for (size_t k = 0; k < f.span(); ++k)
+            {
+              const double fv = xv(wst, f, k); if (fv <= 0.0) continue;
+              inter += std::min(std::log1p(fv) / fsum,
+                                std::log1p((double)pdense[f.frame0 + k]) / plogsum);
+            }
+            c = inter;
+          }
+          else c = (dot - G * pmean * fg.mean[fi]) * pinv * fg.invnorm[fi]; // Pearson
+          c_raw = c;
+          if (g_shrink)                                                  // [shrink] Fisher-z posterior mean
+          {
+            const double z = std::atanh(std::max(-0.999, std::min(0.999, c))), s2 = 1.0 / std::max(overlap - 3, 1);
+            const double t2 = shrink_sd_ * shrink_sd_, mu = std::atanh(std::max(-0.999, std::min(0.999, shrink_r0_)));
+            c = std::tanh((z / s2 + mu / t2) / (1.0 / s2 + 1.0 / t2));
+          }
+          if (!(c >= min_corr)) continue;                                // correlation gate (a NaN score is rejected too)
         }
-        else c = (dot - G * pmean * fg.mean[fi]) * pinv * fg.invnorm[fi]; // Pearson
-        if (c < min_corr) continue;                                    // correlation gate
         // [E5] The IM weight feeds both the cap key and the emitted intensity; corr^corr_power feeds only the emitted one.
         double inten = intensityOf(wst, f);
         const double dim = frag_im[fi] - pc.im;
         if (im_weight_sigma_ > 0.0) inten *= std::exp(-(dim * dim) / (2.0 * im_weight_sigma_ * im_weight_sigma_));
         double emit_inten = inten;
-        if (corr_power_ > 0.0 && c > 0.0) emit_inten *= std::pow(c, corr_power_);
+        if (g_cp > 0.0 && c > 0.0) emit_inten *= std::pow(c, g_cp);
         frags.emplace_back(exportMz_(f.tof, bOf(wst, f), f.mz), emit_inten);
-        frag_scores.push_back(c * inten);
+        frag_bin.push_back(f.tof);
+        frag_span.emplace_back(f_lo, f_hi);
+        frag_scores.push_back(cap_rank_ == 1 ? std::max(c_raw, 0.0) * std::max(c_raw, 0.0) * std::log1p(inten)
+                            : cap_rank_ == 2 ? std::max(c_raw, 0.0) * std::log1p(inten) * (1.0 + overlap)
+                            : c * inten);                              // [cap] the max_fragments ranking key
       }
     }
+    if (GateDump_& gd = GateDump_::get(); gd.on)                       // [gate-dump] read-only; before the reset
+    {
+      std::ostringstream rows;
+      rows.imbue(std::locale::classic());
+      auto it = std::lower_bound(gd.t.begin(), gd.t.end(), pc.mono_mz - 1.2, [](const GateDump_::T& a, double v) { return a.mz < v; });
+      for (; it != gd.t.end() && it->mz <= pc.mono_mz + 1.2; ++it)
+      {
+        if (std::fabs(it->rt - pc.rt) > 20.0 || std::fabs(it->im - pc.im) > 0.05 || it->z <= 0) continue;
+        int kk = 9;
+        for (int k = -1; k <= 1; ++k)
+          if (std::fabs(pc.mono_mz - (it->mz + k * 1.003355 / it->z)) <= it->mz * 20e-6) { kk = k; break; }
+        if (kk == 9) continue;
+        auto head = [&]() { rows << it->id << '\t' << kk << '\t' << pc.mono_mz << '\t' << pc.charge << '\t' << pc.rt << '\t' << pc.im
+                                 << '\t' << pc.n_isotopes << '\t' << (int)pc.guessed << '\t'; };
+        head(); rows << "-\t-\t-\t-\t-\t-\t" << frags.size() << (pinv > 0.0 ? "\tPRECURSOR\n" : "\tPRECURSOR_FLAT\n");
+        if (!(pinv > 0.0)) continue;
+        const size_t lo = lower_bound(frag_im.begin(), frag_im.end(), pc.im - 0.05) - frag_im.begin();
+        const size_t hi = upper_bound(frag_im.begin(), frag_im.end(), pc.im + 0.05) - frag_im.begin();
+        for (size_t fi = lo; fi < hi; ++fi)
+        {
+          const double drt = frag_rt[fi] - pc.rt, dim = frag_im[fi] - pc.im;
+          if (std::fabs(drt) > 15.0) continue;
+          const Trace& f = frag_traces[fi];
+          double dot = 0; int overlap = 0;
+          for (size_t k = 0; k < f.span(); ++k)
+          { const float fv = xv(wst, f, k); if (fv == 0.0f) continue;
+            const float pv = pdense[f.frame0 + k]; if (pv != 0.0f) { dot += (double)pv * fv; ++overlap; } }
+          const double c = fg.invnorm[fi] == 0.0 ? 0.0 : (dot - G * pmean * fg.mean[fi]) * pinv * fg.invnorm[fi];
+          const char* fate = std::fabs(dim) > delta_im ? "im" : std::fabs(drt) > g_drt ? "rt" : fg.invnorm[fi] == 0.0 ? "degenerate"
+                           : std::fabs(f.mz - pc.mono_mz) < 0.01 ? "precursor_peak" : f.np() < (size_t)std::max(min_corr_pts, 0) ? "np"
+                           : overlap < min_corr_pts ? "overlap" : c < min_corr ? "corr" : "kept";
+          head(); rows << exportMz_(f.tof, bOf(wst, f), f.mz) << '\t' << dim << '\t' << drt << '\t' << f.np() << '\t' << overlap << '\t'
+                       << c << '\t' << intensityOf(wst, f) << '\t' << fate << '\n';
+        }
+      }
+      if (rows.tellp() > 0) { std::lock_guard<std::mutex> lk(gd.mu); gd.out << rows.str(); gd.out.flush(); }
+    }
     for (int gi : touched) pdense[gi] = 0.0f;                          // reset scratch
+    // [merge] guard: one TOF bin is one m/z. What toTof's same-frame merge cannot reach (slices beyond its span, valley-
+    // split children, band edges, tile carries) is merged here, before the cap, into the strongest member: members whose
+    // RT span overlaps its span are summed (parallel slices of one ion), RT-disjoint pieces are dropped (the stronger
+    // piece stands, as the twin fold's max); the merged peak takes the strongest member's m/z and the best cap key of
+    // the summed members (not recomputed). Two peaks at one m/z stall OpenMS' MatchedIterator.
+    if (merge_same_bin_ && frags.size() > 1)
+    {
+      vector<size_t> ord(frags.size());
+      for (size_t i = 0; i < ord.size(); ++i) ord[i] = i;
+      auto key = [&](size_t i) { return std::make_tuple(frag_bin[i] == 0, frag_bin[i], frag_bin[i] ? 0.0 : frags[i].first, i); };
+      std::sort(ord.begin(), ord.end(), [&](size_t a, size_t b) { return key(a) < key(b); });
+      auto same = [&](size_t a, size_t b) { return frag_bin[a] ? frag_bin[a] == frag_bin[b] : (!frag_bin[b] && frags[a].first == frags[b].first); };
+      vector<char> gone(frags.size(), 0);
+      long long nm = 0;
+      for (size_t g = 0; g < ord.size();)
+      {
+        size_t e = g + 1;
+        while (e < ord.size() && same(ord[g], ord[e])) ++e;
+        if (e - g > 1)
+        {
+          const size_t head = ord[g];                                    // lowest index: the output order is unchanged
+          size_t top = head;
+          for (size_t k = g; k < e; ++k) if (frags[ord[k]].second > frags[top].second) top = ord[k];
+          double sum = 0.0, cap = -std::numeric_limits<double>::infinity();
+          for (size_t k = g; k < e; ++k)
+          {
+            const size_t i = ord[k];
+            if (!(frag_span[i].second < frag_span[top].first || frag_span[top].second < frag_span[i].first))
+            { sum += frags[i].second; cap = std::max(cap, frag_scores[i]); }
+            if (k > g) gone[i] = 1;
+          }
+          frags[head] = {frags[top].first, sum}; frag_scores[head] = cap;
+          nm += (long long)(e - g - 1);
+        }
+        g = e;
+      }
+      if (nm)
+      {
+        size_t w = 0;
+        for (size_t i = 0; i < frags.size(); ++i) if (!gone[i]) { frags[w] = frags[i]; frag_scores[w] = frag_scores[i]; ++w; }
+        frags.resize(w); frag_scores.resize(w);
+        mergeCount_()[2] += nm;
+      }
+    }
     if (frags.size() < min_frags) return;
     if (frags.size() > max_frags)
     {
@@ -3365,6 +3645,8 @@ protected:
     const String in = getStringOption_("in");
     const String out = getStringOption_("out");
     const double delta_im = getDoubleOption_("gate:delta_im");
+    // [frag-im] the gate's fragment-precursor 1/K0 window, apart from the tracing tolerance delta_im (negative = delta_im)
+    const double gate_dim = getDoubleOption_("gate:fragment_delta_im") >= 0.0 ? getDoubleOption_("gate:fragment_delta_im") : delta_im;
     const double delta_rt = getDoubleOption_("gate:delta_rt");
     if (getFlag_("diag:selftest_arena")) return selftestArena_();
     if (getFlag_("diag:selftest_twins")) return selftestTwins_();
@@ -3373,6 +3655,26 @@ protected:
     mono_guard_ = getDoubleOption_("charge:mono_averagine_guard");
     mono_select_ = getFlag_("charge:mono_averagine_select");
     var_support_ = getFlag_("gate:variance_support");
+    short_conc_ = (getStringOption_("gate:short_traces") == "concentric");
+    short_center_tol_ = getDoubleOption_("gate:short_center_tol");
+    short_min_pts_ = getIntOption_("gate:short_min_points");
+    coloc_ = (getStringOption_("gate:colocation") == "ranges");
+    coloc_overlap_ = getDoubleOption_("gate:colocation_overlap");
+    shrink_ = (getStringOption_("gate:shrinkage") == "fisher");
+    shrink_r0_ = getDoubleOption_("gate:shrink_prior_r");
+    shrink_sd_ = getDoubleOption_("gate:shrink_prior_sd");
+    shrink_min_pts_ = getIntOption_("gate:shrink_min_points");
+    adaptive_ = (getStringOption_("gate:adaptive") == "faint");
+    adaptive_auto_ = (getStringOption_("gate:adaptive") == "auto");
+    auto_faint_frac_ = getDoubleOption_("gate:auto_faint_fraction");
+    cap_rank_ = getStringOption_("assembly:cap_rank") == "umpire" ? 1 : getStringOption_("assembly:cap_rank") == "evidence" ? 2 : 0;
+    im_slice_merge_ = getDoubleOption_("trace:im_slice_merge");
+    merge_same_bin_ = getStringOption_("assembly:merge_same_bin") == "true";
+    faint_frames_ = getIntOption_("gate:faint_max_frames");
+    faint_drt_ = getDoubleOption_("gate:faint_delta_rt");
+    faint_cp_ = getDoubleOption_("gate:faint_corr_power");
+    if (shrink_ && log_overlap_)
+      throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "gate:shrinkage fisher needs a correlation: it does not apply to gate:coelution logoverlap");
     corr_power_ = getDoubleOption_("assembly:corr_power");
     const double min_corr = getDoubleOption_("gate:min_correlation");
     const int min_corr_pts = getIntOption_("gate:min_correlation_points");
@@ -3965,6 +4267,16 @@ protected:
     double _t_inf = phase_clock_(), _c_inf = cpu_seconds_();   // [perf-instr]
     vector<Precursor_> precursors = inferPrecursors_(ms1_traces, ms1_store, max_charge, delta_rt, iso_im_tol,
                                                      mass_ppm, env_scoring);
+    if (adaptive_auto_)   // [adaptive] auto: decide the run's gate from its precursor span distribution (MS1 points)
+    {
+      size_t nf = 0;
+      for (const Precursor_& pc : precursors) if ((int)ms1_traces[pc.trace_idx].np() <= faint_frames_) ++nf;
+      const double frac = precursors.empty() ? 0.0 : (double)nf / (double)precursors.size();
+      adaptive_ = frac >= auto_faint_frac_;
+      if (!adaptive_) shrink_ = coloc_ = short_conc_ = false;   // auto:off = the plain gate for every precursor, not 'off'
+      writeLogInfo_("[adaptive] auto: " + String(nf) + " of " + String(precursors.size()) + " precursors span <= " + String(faint_frames_)
+                    + " MS1 points (" + String(frac) + ", threshold " + String(auto_faint_frac_) + "): faint gate " + (adaptive_ ? "ON" : "OFF"));
+    }
     if (detOn_())
     {
       vector<uint64_t> b;
@@ -4259,11 +4571,14 @@ protected:
       throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
             "the .d streaming source needs a fixed perf:trace_bands: the auto setting derives the band count from the WINDOW COUNT, and the streaming source counts every window of the acquisition while the resident source counts only the windows that delivered a frame -- the two would band differently (review 3b).");
     // [tile] The cells grouped into TILES. A tile owns the precursors whose MS1 frame time lies in
-    // [lo - delta_rt, hi - delta_rt) -- the half-open ranges partition RT (lo = -inf for the first,
+    // [lo - tile_drt, hi - tile_drt) -- the half-open ranges partition RT (lo = -inf for the first,
     // hi = +inf for the last) -- and traces its windows on the tile's frames only; a precursor's
-    // candidates (|rtOf - rt| <= delta_rt) then lie in [lo - 2 delta_rt, hi): the tile's own
-    // fragments plus those CARRIED from the previous tile (rtOf >= lo - 2 delta_rt, re-carried
-    // transitively). One tile = today's loop, statement for statement.
+    // candidates (|rtOf - rt| <= tile_drt) then lie in [lo - 2 tile_drt, hi): the tile's own
+    // fragments plus those CARRIED from the previous tile (rtOf >= lo - 2 tile_drt, re-carried
+    // transitively). One tile = today's loop, statement for statement. tile_drt is the WIDEST RT
+    // window any precursor's gate may use: gate:faint_delta_rt under gate:adaptive (a faint precursor
+    // 3-6 s from a cut line otherwise sees different candidates per tile grid -- gate D 2026-09-26).
+    const double tile_drt = adaptive_ ? std::max(delta_rt, faint_drt_) : delta_rt;
     struct Tile { double lo, hi; bool last; };
     vector<Tile> tiles;
     const int cells_per_tile = getIntOption_("tile:cells_per_tile");
@@ -4372,6 +4687,14 @@ protected:
     out_exp.setMetaValue("spx:pearson_G", "frames");
     out_exp.setMetaValue("spx:tile_boundaries", cell_boundaries.empty() ? String("none") : cell_boundaries);
     out_exp.setMetaValue("spx:corr_power", corr_power_);
+    out_exp.setMetaValue("spx:gate_adaptive", adaptive_auto_ ? String(adaptive_ ? "auto:on" : "auto:off") : String(adaptive_ ? "faint" : "off"));
+    out_exp.setMetaValue("spx:gate_faint", String(faint_frames_) + " frames, " + String(faint_drt_) + " s, power " + String(faint_cp_));
+    out_exp.setMetaValue("spx:gate_shrinkage", shrink_ ? String("fisher r0 ") + String(shrink_r0_) + " sd " + String(shrink_sd_) + " from " + String(shrink_min_pts_) : String("off"));
+    out_exp.setMetaValue("spx:gate_colocation", coloc_ ? String("ranges ") + String(coloc_overlap_) : String("off"));
+    out_exp.setMetaValue("spx:gate_short_traces", short_conc_ ? String("concentric tol ") + String(short_center_tol_) + " from " + String(short_min_pts_) : String("off"));
+    out_exp.setMetaValue("spx:cap_rank", String(cap_rank_ == 2 ? "evidence" : cap_rank_ == 1 ? "umpire" : "corr_inten"));
+    out_exp.setMetaValue("spx:same_bin_merge", String("im_slices ") + (!integer_detector ? String("n/a (openms detector)") : im_slice_merge_ >= 0.0 ? String(im_slice_merge_) + " (span " + String(2.0 * im_slice_merge_) + ")" : String("off"))
+                         + ", assembly " + (merge_same_bin_ ? (integer_detector ? "on" : "on (exact m/z)") : "off"));
     out_exp.setMetaValue("spx:im_weight_sigma", im_weight_sigma_);
     // [dnoise] what was applied: the port, "off", or skipped because the input is no .d
     out_exp.setMetaValue("spx:dnoise_ms1", dnoise.on ? String(String(spx::dnoise::kPortedFrom) + " MS1") : String(dnoise_req ? "skipped (input is not a Bruker .d)" : "off"));
@@ -4446,7 +4769,7 @@ protected:
       }
       for (auto& kv : tile_slabs) indexRt(kv.second);
       { long long sb = 0; for (const auto& kv : tile_slabs) sb += (long long)kv.second.bytes(); ledSet_(LC_SLAB, sb); }
-      if (detOn_())
+      if (detOn_() && integer_detector)   // the OpenMS path needs the slabs in m/z quanta (materializeWindow)
         // [det] the reader's exactness: the per-(window, tile) slab digest, chained over the tiles.
         // The tiles partition a window's frames in RT order and the digest is a sequential fold, so
         // the chain of a window's tiles EQUALS the whole-window digest a resident run prints -- the
@@ -4760,9 +5083,9 @@ protected:
             n_carried_in = ci.rec.size();
           } }
         // [tile] the precursors this tile OWNS, decided with the SCORER's own arithmetic: a
-        // fragment at frame time x is a candidate of rt iff fabs(x - rt) <= delta_rt (doubles), so
-        // rt has no candidate at or beyond an edge T iff (T - rt) > delta_rt -- the same
-        // subtraction, monotone in T. The first tile k with (T_{k+1} - rt) > delta_rt owns rt:
+        // fragment at frame time x is a candidate of rt iff fabs(x - rt) <= tile_drt (doubles), so
+        // rt has no candidate at or beyond an edge T iff (T - rt) > tile_drt -- the same
+        // subtraction, monotone in T. The first tile k with (T_{k+1} - rt) > tile_drt owns rt:
         // exactly one does (-inf never, +inf always). Marked here, before any early exit, so the
         // coverage check after the last tile sees every precursor exactly once. Only this
         // window's precursors (by mono m/z); NaN sorts to the end, excluded; charge 0 kept.
@@ -4773,8 +5096,8 @@ protected:
         {
           const Precursor_& pc = precursors[pi];
           if (!std::isfinite(pc.rt) || !std::isfinite(pc.im)) continue;
-          if (!(tk == 0 || !(tile.lo - pc.rt > delta_rt))) continue;   // an earlier tile owns it
-          if (!(tile.last || (tile.hi - pc.rt > delta_rt))) continue;  // a later tile owns it
+          if (!(tk == 0 || !(tile.lo - pc.rt > tile_drt))) continue;   // an earlier tile owns it
+          if (!(tile.last || (tile.hi - pc.rt > tile_drt))) continue;  // a later tile owns it
           pidx.push_back((uint32_t)pi);
         }
         { vector<uint8_t>& vis = visited.at(wl[wi].first);
@@ -4807,7 +5130,7 @@ protected:
         });
         vector<double> frag_im(frag_traces.size());
         for (size_t i = 0; i < frag_traces.size(); ++i) frag_im[i] = frag_traces[i].im;
-        FragRt frag_rt; frag_rt.build(frag_traces, wst, delta_rt);
+        FragRt frag_rt; frag_rt.build(frag_traces, wst, tile_drt);   // [adaptive] buckets cover the wider window
         w_sort = secs(std::chrono::steady_clock::now() - _tso);
 
         // Precompute the common correlation grid once per window; pdense is reused across the
@@ -4856,7 +5179,7 @@ protected:
                 const Precursor_& pc = precursors[pidx[(size_t)j]];
                 MSSpectrum ms2;
                 assembleOne_(pc, win_lo, win_hi, frag_traces, wst, frag_im, frag_rt, ms1_traces, ms1_store, fg,
-                             delta_im, delta_rt, min_corr, min_corr_pts, min_frags, max_frags, pdense, ms2);
+                             gate_dim, delta_rt, min_corr, min_corr_pts, min_frags, max_frags, pdense, ms2);
                 if (!ms2.empty())
                 { ledAdd_(LC_SPECTRA, (long long)(sizeof(MSSpectrum) + ms2.size() * 12)); pslot[(size_t)j] = std::move(ms2); }
               }
@@ -4871,17 +5194,17 @@ protected:
           w_emit = secs(_t7 - _t6);
         }
         // [tile] carry the boundary fragments to the next tile: every record (own or carried in)
-        // whose RT is within 2 delta_rt of this tile's upper edge -- the candidates of a precursor
+        // whose RT is within 2 tile_drt of this tile's upper edge -- the candidates of a precursor
         // the next tile owns. Over ALL of frag_traces, so the carry is transitive by induction.
-        // A precursor a later tile owns has (T - rt) <= delta_rt, its candidates x have
-        // (rt - x) <= delta_rt: x >= T - 2 delta_rt up to two roundings of ~1e-12 s. The slack
+        // A precursor a later tile owns has (T - rt) <= tile_drt, its candidates x have
+        // (rt - x) <= tile_drt: x >= T - 2 tile_drt up to two roundings of ~1e-12 s. The slack
         // over-carries by a hair (a carried fragment no precursor accepts changes nothing), never
         // under-carries (review, step 2: the exact form dropped a fragment at 1.2000000000000002).
         static const bool no_carry = std::getenv("DIASPEXTRACT_TILE_NO_CARRY") != nullptr;   // e2e falsifier only
         if (!tile.last && !no_carry)
         {
           Carry& co = carry_out.at(wl[wi].first);
-          const double keep_from = tile.hi - 2.0 * delta_rt - 1e-6;
+          const double keep_from = tile.hi - 2.0 * tile_drt - 1e-6;
           for (const Trace& t : frag_traces)
             if (rtOf(wst, t) >= keep_from)
             {
@@ -5030,6 +5353,18 @@ protected:
     writeLogInfo_("Wrote " + String(n_out) + " pseudo-MS2 spectra to " + out
                   + " (" + String(FileTypes::typeToName(out_type)) + ")");
     if (twin_im >= 0.0) writeLogInfo_("[twins] " + String(n_twins) + " spectra folded into a twin (assembly:twin_im_tolerance " + String(twin_im) + ")");
+    {   // [merge] how much splitting the two merges removed
+      auto& m = mergeCount_();
+      writeLogInfo_("[merge] im-slice merge (trace:im_slice_merge " + (!integer_detector ? String("n/a, openms detector") : im_slice_merge_ >= 0.0 ? String(im_slice_merge_) : String("off")) + "): " + String(m[0].load())
+                    + " picked MS2 peaks merged away in " + String(m[1].load()) + " frames; assembly same-bin merge (" + (merge_same_bin_ ? "on" : "off") + "): "
+                    + String(m[2].load()) + " fragments merged away");
+    }
+    {   // [pspan] the precursor MS1-span histogram, for choosing gate:faint_max_frames per data set
+      auto& h = pspanHist_(); long long tot = 0; for (int i = 0; i < 8; ++i) tot += h[i].load();
+      writeLogInfo_("[pspan] precursors by MS1 span (window frames): 1:" + String(h[0].load()) + " 2:" + String(h[1].load()) + " 3:" + String(h[2].load())
+                    + " 4:" + String(h[3].load()) + " 5-6:" + String(h[4].load()) + " 7-10:" + String(h[5].load()) + " 11-20:" + String(h[6].load())
+                    + " >20:" + String(h[7].load()) + " total " + String(tot) + (adaptive_ ? " faint(<=" + String(faint_frames_) + "): " + String(h[8].load()) : String("")));
+    }
     report_phases_(phase_clock_());
     return EXECUTION_OK;
   }

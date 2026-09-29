@@ -252,12 +252,12 @@ static void testAccumulationTime()
   refused("acc_null", dShaped() + "UPDATE Frames SET AccumulationTime = NULL WHERE Id = 6;", "AccumulationTime");
   CHECK(loads(makeTdf("acc_text.tdf", dShaped() + "UPDATE Frames SET AccumulationTime = '99.953' WHERE Id = 6;"), in, why) &&
           in.frames[6].corr == 100.0 / 99.953 && in.frames[1].corr == 100.0 / 99.958, "AccumulationTime as TEXT and as REAL: %s", why.c_str());
-  // above 100 ms the correction loads, and the setup refusal names it
-  CHECK(loads(makeTdf("acc_125.tdf", dShaped() + "UPDATE Frames SET AccumulationTime = '125' WHERE Id = 6;"), in, why) && in.frames[6].corr == 0.8 &&
-          has(dn::recover::correctionRefusal(6, in.frames[6].corr), "AccumulationTime 125 ms exceeds 100 ms") &&
-          dn::recover::correctionRefusal(1, in.frames[1].corr).empty(), "AccumulationTime 125: %s", why.c_str());
+  // above 100 ms the correction loads and is accepted (raw counts approximated, see recoverPoint)
+  CHECK(loads(makeTdf("acc_166.tdf", dShaped() + "UPDATE Frames SET AccumulationTime = '166' WHERE Id = 6;"), in, why) && in.frames[6].corr == 100.0 / 166.0 &&
+          dn::recover::correctionRefusal(6, in.frames[6].corr).empty() && dn::recover::correctionRefusal(1, in.frames[1].corr).empty(),
+        "AccumulationTime 166: %s", why.c_str());
   CHECK(loads(makeTdf("acc_100042.tdf", dShaped() + "UPDATE Frames SET AccumulationTime = 100.042 WHERE Id = 6;"), in, why) && in.frames[6].corr < 1.0 &&
-          !dn::recover::correctionRefusal(6, in.frames[6].corr).empty(), "AccumulationTime 100.042 (REAL): %s", why.c_str());
+          dn::recover::correctionRefusal(6, in.frames[6].corr).empty(), "AccumulationTime 100.042 (REAL): %s", why.c_str());
   // opentims parses under a C-locale guard; so must the port, whatever LC_NUMERIC the process has
   bool comma = false;
   if (const char* prev = std::setlocale(LC_NUMERIC, nullptr))

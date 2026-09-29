@@ -356,18 +356,16 @@ inline bool opentimsCorrection(const std::string& text, double& corr)
 
 /// Why the raw counts of MS1 frame @p fid cannot be recovered through its correction @p corr, or empty when they can. At
 /// corr >= 1 (AccumulationTime <= 100 ms) raw counts below 2^24 do not collide (checked exhaustively at 19 values, 1 + 1 ulp
-/// among them); below 1 they do, from raw 3 at 125 ms and from raw 1191 at 100.042 ms. 1e6 is a plausibility bound.
+/// among them), so recovery is exact; below 1 they do (from raw 3 at 125 ms, from raw 1191 at 100.042 ms) and recoverPoint
+/// takes the candidate nearest v / corr -- an approximation, accepted (user decision 2026-09-24). 0.01 .. 1e6 is a plausibility
+/// range: below 0.01 (AccumulationTime above 10 s) recoverPoint would visit 1 / corr + 3 candidates per point.
 inline std::string correctionRefusal(std::size_t fid, double corr)
 {
-  if (corr >= 1.0 && corr < 1e6) return std::string();
+  if (corr >= 0.01 && corr < 1e6) return std::string();
   std::ostringstream m;   // the classic locale, as for every number this header reads
   m.imbue(std::locale::classic());
-  m << "MS1 frame " << fid << ": ";
-  if (corr < 1.0)
-    m << "AccumulationTime " << 100.0 / corr << " ms exceeds 100 ms, so opentims' intensity correction 100/" << 100.0 / corr << " = "
-      << corr << " < 1 maps several raw counts to one intensity and the raw counts dnoise filters cannot be recovered";
-  else
-    m << "opentims' intensity correction 100 / AccumulationTime = " << corr << " is not invertible";
+  m << "MS1 frame " << fid << ": opentims' intensity correction 100 / AccumulationTime = " << corr
+    << " is outside the invertible range 0.01 .. 1e6 (AccumulationTime 0.0001 ms .. 10 s)";
   return m.str();
 }
 
@@ -436,8 +434,8 @@ inline Refusal frameCheck(const std::vector<FrameRow>& frames, std::uint32_t fid
 }
 
 /// One point of a frame with factor @p b (Cal::mzToTof inverts the m/z model the loader calibrated with:
-/// TdfMzCalibration in the tool), correction @p corr (correctionRefusal empty, so the search visits at most five raw
-/// counts), scan table @p asc / @p falls (buildScanTable) and @p num_scans scans: the TOF bin, scan and raw count the
+/// TdfMzCalibration in the tool), correction @p corr (correctionRefusal empty; the search visits 1 / corr + 3 raw counts at
+/// most), scan table @p asc / @p falls (buildScanTable) and @p num_scans scans: the TOF bin, scan and raw count the
 /// loader turned into @p mz, @p im and @p v. Checked in that order; on Refusal::none @p tof, @p scan and @p raw hold the
 /// point. For a message: @p t is the fractional TOF, @p hits the raw counts whose correction is @p v (0 until the
 /// intensity is checked).
@@ -458,11 +456,16 @@ inline Refusal recoverPoint(const Cal& cal, double b, double mz, float im, float
   if (v >= 16777216.0f) return Refusal::intensity_range;   // a float32 holds every count below 2^24 exactly, and no more
   std::uint32_t found = 0;
   int n = 0;
+  double best = HUGE_VAL;
   if (v >= 0.0f && v == std::floor(v))
     for (double r = std::max(0.0, std::floor((v - 0.5) / corr) - 1.0), r_end = std::ceil((v + 0.5) / corr) + 1.0; r <= r_end; r += 1.0)
-      if ((std::uint32_t)(r * corr + 0.5) == (std::uint32_t)v) { found = (std::uint32_t)r; ++n; }   // opentims.cpp:225: double(raw) * correction + 0.5, into a uint32
+      if ((std::uint32_t)(r * corr + 0.5) == (std::uint32_t)v)   // opentims.cpp:225: double(raw) * correction + 0.5, into a uint32
+      {
+        ++n;
+        if (std::fabs(r - v / corr) < best) { best = std::fabs(r - v / corr); found = (std::uint32_t)r; }   // n > 1 only at corr < 1
+      }
   hits = n;
-  if (n != 1) return Refusal::intensity;
+  if (n == 0) return Refusal::intensity;
   tof = (std::uint32_t)bin; scan = (std::uint32_t)s; raw = found;
   return Refusal::none;
 }

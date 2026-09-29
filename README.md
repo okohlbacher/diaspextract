@@ -33,12 +33,20 @@ patched OpenMS source tree but lives outside it. Earlier releases were named spe
    envelope that lies on the run's own 2+ trend line, and hypotheses without an isotope partner are dropped.
 3. **Fragments and the gate.** For every isolation window and 600-s cell, the tile's MS2 frames are read and fragment
    mass traces are detected in 12 flight-time bands on the integer TOF axis, then split and trimmed like the precursors.
+   Before tracing, the peaks of one frame that share a flight-time bin at nearly the same 1/K0 are merged into one
+   (`-trace:im_slice_merge`): the ion-mobility picker cuts a broad ion into slices, and each slice would otherwise
+   become its own trace and a second peak at the same m/z.
    A fragment joins a precursor's spectrum when both lie in the same isolation window, its apex is within 3 s and
    0.01 1/K0 of the precursor's, and the two elution profiles correlate (Pearson ≥ 0.3 over the full retention-time
-   grid, with at least 3 shared points).
-4. **Assembly and output.** The accepted fragments are ranked by correlation-weighted intensity and the top 500 kept;
-   a spectrum with at least 3 of them is written with a synthetic precursor (apex m/z, charge, retention time, 1/K0),
-   each fragment's emitted intensity multiplied by its correlation raised to `-assembly:corr_power` (2 by default, so squared). Spectra are sorted per tile,
+   grid, with at least 3 shared points). A faint precursor — signal in at most 4 window frames, the short tip of an
+   elution peak — gets a relaxed gate instead (`-gate:adaptive`): a 6 s window, the correlation shrunk toward a prior
+   of 0.6 from as little as one shared point, an apex inside the precursor's span, and traces too short to correlate
+   judged by their centre.
+4. **Assembly and output.** The accepted fragments are ranked by evidence — max(r, 0) × ln(1 + intensity) × (1 + shared
+   points) — and the top 500 kept;
+   fragments that still share a flight-time bin are merged into one peak first (`-assembly:merge_same_bin`), so no
+   spectrum carries two peaks at one m/z; a spectrum with at least 3 of them is written with a synthetic precursor (apex m/z, charge, retention time, 1/K0),
+   each fragment's emitted intensity multiplied by its correlation raised to `-assembly:corr_power` (2 by default, so squared; 1 for faint precursors, `-gate:faint_corr_power`). Spectra are sorted per tile,
    a precursor claimed twice is folded into one spectrum that carries the union of the members' fragment lists
    (`-assembly:twin_im_tolerance`), and the tile is serialised in parallel. The header records every setting that shaped the output.
 
@@ -202,6 +210,7 @@ and trying `-trace:detector openms` on your own data. Charge and FDR: `-charge:m
 | `-trace:max_span_sec` | 120 | trim every trace to this many seconds around its apex; 0 = no cap. **Changes output** (within 0.1 % of the peptides from 0 to 240) |
 | `-trace:mz_estimator` | apex | reported m/z of a precursor trace: the most intense peak's (`apex`), the intensity-weighted centroid (`mean`) or the `median`. Fragment traces of the integer detector always report the calibrated m/z of their apex bin; with `-trace:detector openms` the estimator applies to them too. **Changes output**; `apex` identifies the most peptides on both engines |
 | `-trace:band_edges` | acquisition | where the integer detector's band edges come from; leave at `acquisition`. `slab` (edges from the window's own peaks) needs `-perf:stream_load false`; the spectra differ slightly, the identifications hardly |
+| `-trace:im_slice_merge` | 0.015 | integer detector: before tracing, merge a frame's MS2 peaks in one flight-time bin whose 1/K0 lies within this distance of the previous one (the group spans at most twice this distance) into one peak, intensity summed, 1/K0 intensity-weighted; negative = off. **Changes output** |
 | `-trace:native_ms1_neighbors` | 0 | sum this many neighbouring MS1 frames on each side before picking (1 = 3 frames); needs `-perf:stream_load true` and `-dnoise:ms1 false`. **Changes output**: about 2.7× the spectra for about 8 % more Sage peptides, measured on older defaults |
 
 **Precursor charge (`charge:`)**
@@ -221,27 +230,45 @@ and trying `-trace:detector openms` on your own data. Charge and FDR: `-charge:m
 | option | default | meaning |
 |---|---|---|
 | `-gate:delta_rt` | 3 s | maximum apex retention-time difference between precursor and fragment |
-| `-gate:delta_im` | 0.01 | maximum 1/K0 difference |
+| `-gate:delta_im` | 0.01 | maximum 1/K0 difference between precursor and fragment; it also sets the ion-mobility picker's box and the tracing 1/K0 tolerance, so it changes detection too (`-gate:fragment_delta_im` widens the gate alone) |
 | `-gate:min_correlation` | 0.3 | minimum Pearson correlation of the two elution profiles; raise for cleaner, sparser spectra |
 | `-gate:min_correlation_points` | 3 | minimum shared XIC points for a correlation to count |
-| `-gate:coelution` | pearson | correlation over the full RT grid, or `logoverlap` (AlphaDIA-style; the scale differs, retune the threshold) |
+| `-gate:coelution` | pearson | correlation over the full RT grid, or `logoverlap` (AlphaDIA-style; the scale differs, retune the threshold; needs `-gate:shrinkage off`, the default `fisher` refuses it) |
 | `-gate:variance_support` | off | Pearson over the union support of the two profiles instead of the full grid (scale differs) |
+| `-gate:adaptive` | faint | `faint`: the relaxed gate below (`shrinkage`, `colocation`, `short_traces`, `faint_delta_rt`, `faint_corr_power`) applies only to faint precursors — signal in at most `faint_max_frames` window frames, the short tip of an elution peak — and every other precursor keeps the plain gate above. `auto`: `faint` when at least `auto_faint_fraction` of the run's precursors have that few MS1 points (the choice is stamped as `spx:gate_adaptive`), else the plain gate above for every precursor (`shrinkage`, `colocation` and `short_traces` switched off). `off`: `shrinkage`, `colocation` and `short_traces` apply to every precursor at `delta_rt` and `corr_power` (`faint_delta_rt` and `faint_corr_power` are unused) |
+| `-gate:faint_max_frames` | 4 | most window frames with precursor signal for a faint precursor |
+| `-gate:faint_delta_rt` | 6 s | `gate:delta_rt` for faint precursors |
+| `-gate:faint_corr_power` | 1 | `assembly:corr_power` for faint precursors |
+| `-gate:auto_faint_fraction` | 0.45 | `adaptive auto`: the fraction of precursors with at most `faint_max_frames` MS1 points at which the faint gate switches on |
+| `-gate:shrinkage` | fisher | `fisher`: gate on the posterior mean of the Fisher-z correlation (prior `shrink_prior_r` ± `shrink_prior_sd`, n − 3 effective points) instead of the raw r, so one or two shared points are judged by the prior rather than by their ±1; replaces `min_correlation_points` with `shrink_min_points`; `off` |
+| `-gate:shrink_prior_r` | 0.6 | prior mean correlation: 0.6 shrinks toward moderate co-elution, 0 toward none (and loses most faint fragments) |
+| `-gate:shrink_prior_sd` | 0.3 | prior standard deviation in Fisher-z units; smaller = stronger shrinkage |
+| `-gate:shrink_min_points` | 1 | fewest shared points for a correlation under `shrinkage`; at 1 a one-point overlap is scored almost at the prior, which is why the mode is confined to faint precursors |
+| `-gate:colocation` | ranges | `ranges`: the fragment apex must lie inside the precursor's detected retention-time span and the precursor apex inside the fragment's (one cycle of slack each), and the spans overlap by at least `colocation_overlap` of the shorter; `off` |
+| `-gate:colocation_overlap` | 0.3 | least span overlap as a fraction of the shorter span |
+| `-gate:short_traces` | concentric | `concentric`: a fragment trace too short to correlate passes when its span lies inside the precursor's (one cycle of slack) and its centre is within max(1 cycle, `short_center_tol` × the precursor's half-width) of the precursor's centre; `off` drops it |
+| `-gate:short_center_tol` | 0.5 | centre tolerance as a fraction of the precursor half-width |
+| `-gate:short_min_points` | 1 | fewest points of a short fragment trace |
+| `-gate:fragment_delta_im` | −1 | 1/K0 window of the gate alone (tracing keeps `delta_im`); −1 = `delta_im` |
 
 **Assembly (`assembly:`)**
 
 | option | default | meaning |
 |---|---|---|
-| `-assembly:min_fragments` | 3 | emit a spectrum only if at least this many fragments pass the gate (checked before the cap below) |
+| `-assembly:min_fragments` | 3 | emit a spectrum only if at least this many fragments remain after the gate and the same-bin merge (checked before the cap below) |
+| `-assembly:merge_same_bin` | true | merge a spectrum's fragments of one flight-time bin (one exact m/z with the OpenMS detector) into one peak before `max_fragments`: members overlapping the strongest in retention time are summed, retention-time-disjoint pieces dropped. Two peaks at one m/z stall the fragment matching of OpenMS-based search engines. **Changes output** |
 | `-assembly:max_fragments` | 500 | keep at most this many, top-ranked; keep it at or above `min_fragments`. Applied before the twin fold below, so a folded spectrum can hold more |
+| `-assembly:cap_rank` | evidence | which fragments survive `max_fragments`: `evidence` ranks by max(r, 0) × ln(1 + I) × (1 + shared points), so long correlated support outranks an intense one-frame coincidence; `corr_inten` by gate score × intensity (the 1.4 key); `umpire` by max(r, 0)² × ln(1 + I). r is the raw co-elution score before shrinkage (Pearson, or the `logoverlap` score) |
 | `-assembly:corr_power` | 2 | multiply each emitted fragment's intensity by its correlation to this power; 0 = off. 2 gives +8–10 % Sage peptides over 0 on three files, and +4 % MSFragger peptides on the one file measured with it |
 | `-assembly:im_weight_sigma` | 0 = off | additionally weight fragments by their 1/K0 distance to the precursor (Gaussian, this sigma); this also changes which fragments survive the cut. 0.005 gave up to 7 % more Sage peptides and no change on MSFragger |
 | `-assembly:require_isotope_support` | true | drop precursor hypotheses without an isotope partner; `false` doubles the spectra, runs about 7× slower and identifies fewer peptides |
 | `-assembly:default_charge` | 2 | charge given to a precursor left without a charge call (only matters when guessed precursors are kept) |
 | `-assembly:twin_im_tolerance` | 0.005 | fold spectra that claim one precursor twice — same MS1 frame, same charge, precursor m/z within 20 ppm, 1/K0 within this tolerance — into one, which takes the union of the cluster's fragments, peaks within 10 ppm fused (so it can exceed `max_fragments`); −1 = off, the spectra of 1.3 (0 still folds twins of identical 1/K0). On a 2-hour HeLa run (PXD029836): 24 % fewer spectra for 0.2 % of the peptides on both engines, entrapment FDR 0.98 % with the fold against 0.98 % without |
 
-**MS1 denoising (`dnoise:`)** — a bit-identical port of dnoise v0.1.0's MS1 path (Garrett, Diedrich & Yates III,
+**MS1 denoising (`dnoise:`)** — a port of dnoise v0.1.0's MS1 path (Garrett, Diedrich & Yates III,
 bioRxiv 2026.08.27.747603; MIT, `LICENSES/dnoise-MIT.txt`), applied to the raw points of every MS1 frame of a Bruker
-`.d` before peak picking. Other inputs pass through, logged and stamped.
+`.d` before peak picking. Other inputs pass through, logged and stamped. It is bit-identical to dnoise for frames up to
+100 ms `AccumulationTime`; above that the reader's intensities no longer identify one raw count, and the nearest is taken.
 
 | option | default | meaning |
 |---|---|---|
@@ -257,10 +284,12 @@ lost precursor can be attributed to a stage.
 
 Every emitted spectrum is MS2 with a synthetic precursor: `selected ion m/z` (the apex m/z of the monoisotopic
 trace), `charge state`, the precursor's retention time and 1/K0, and the isolation window it was taken from. The run
-header carries seventeen `spx:` userParams that make any file attributable to the configuration that produced it: the
+header carries twenty-four `spx:` userParams that make any file attributable to the configuration that produced it: the
 detector and calibration (`spx:detector`, `spx:mz_calibration`, `spx:require_isotope_support`, `spx:corr_power`,
 `spx:pearson_G` (the correlation support, always `frames`), `spx:im_weight_sigma`), the twin fold (`spx:twin_merge`: its relation and
-tolerance, or `off`), MS1 denoising (`spx:dnoise_ms1`, `spx:dnoise_ms1_params`,
+tolerance, or `off`), the co-elution gate (`spx:gate_adaptive`, `spx:gate_faint`, `spx:gate_shrinkage`,
+`spx:gate_colocation`, `spx:gate_short_traces`), the cap ranking (`spx:cap_rank`), the same-bin merges
+(`spx:same_bin_merge`), MS1 denoising (`spx:dnoise_ms1`, `spx:dnoise_ms1_params`,
 `spx:dnoise_ms1_points`), the cell grid and tiling (`spx:tile_rt_sec`, `spx:tile_cells_per_tile`, `spx:tiles`,
 `spx:tile_boundaries`, `spx:tile_source`), the band edges (`spx:band_edges`) and the frozen frame table
 (`spx:frame_table`). `spx:mz_calibration` starts with `tdf_table_modeltype1` (mzPeak input appends how the table was recovered), or is

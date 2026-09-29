@@ -750,13 +750,16 @@ static void testRecover()
   }
   CHECK(rc::correctionRefusal(7, 0x1.001b896437031p+0).empty() && rc::correctionRefusal(7, 1.0).empty() &&
           rc::correctionRefusal(7, std::nextafter(1.0, 2.0)).empty(), "corr >= 1 is invertible");
-  const std::string r125 = rc::correctionRefusal(7, 100.0 / 125.0);
-  CHECK(r125.find("MS1 frame 7: AccumulationTime 125 ms exceeds 100 ms") == 0 && r125.find("= 0.8 < 1") != std::string::npos,
-        "AccumulationTime 125 ms: '%s'", r125.c_str());
-  CHECK(rc::opentimsCorrection("100.042", corr) && corr < 1.0 && !rc::correctionRefusal(1, corr).empty(), "AccumulationTime 100.042 ms is refused");
-  CHECK(!rc::correctionRefusal(7, 0.5).empty() && !rc::correctionRefusal(7, std::nextafter(1.0, 0.0)).empty() &&
-          !rc::correctionRefusal(7, 1e6).empty() && !rc::correctionRefusal(7, std::numeric_limits<double>::infinity()).empty(),
-        "corr 0.5, 1 - 1 ulp, 1e6 and inf are refused");
+  // above 100 ms raw counts are approximated (recoverPoint), not refused: only the plausibility bound refuses
+  CHECK(rc::correctionRefusal(7, 100.0 / 125.0).empty() && rc::correctionRefusal(7, 100.0 / 166.0).empty() &&
+          rc::correctionRefusal(7, 0.5).empty() && rc::correctionRefusal(7, std::nextafter(1.0, 0.0)).empty(),
+        "corr 0.8, 100/166, 0.5 and 1 - 1 ulp are accepted");
+  CHECK(rc::opentimsCorrection("100.042", corr) && corr < 1.0 && rc::correctionRefusal(1, corr).empty(), "AccumulationTime 100.042 ms is accepted");
+  const std::string r1e6 = rc::correctionRefusal(7, 1e6);
+  CHECK(r1e6.find("MS1 frame 7: opentims' intensity correction") == 0 && !rc::correctionRefusal(7, std::numeric_limits<double>::infinity()).empty(),
+        "corr 1e6 and inf are refused: '%s'", r1e6.c_str());
+  CHECK(!rc::correctionRefusal(7, 0.005).empty() && rc::correctionRefusal(7, 0.01).empty() && !rc::correctionRefusal(7, 0.0).empty(),
+        "corr below 0.01 (AccumulationTime above 10 s) and 0 are refused, 0.01 is accepted");
 
   for (const RecoverFile& f : {recoverD(), recoverTnbc()})
   {
@@ -870,8 +873,19 @@ static void testRecover()
   rc::opentimsCorrection("99.968", corr);
   CHECK(opentimsCorrect(1562, corr) == 1562 && point(1562.0f, corr) == R::none && raw == 1562 && hits == 1 && point(1563.0f, corr) == R::intensity && hits == 0,
         "the '99.968' tie: 1562 recovers, 1563 has no raw count");
+  // corr < 1 (above 100 ms): several raw counts share a value; the one nearest v / corr is taken, the smaller on a tie
   rc::opentimsCorrection("125", corr);
-  CHECK(point(2.0f, corr) == R::intensity && hits == 2, "corr 0.8: raw counts 2 and 3 both give 2 (%d found)", hits);
+  CHECK(point(2.0f, corr) == R::none && hits == 2 && raw == 2, "corr 0.8: raw counts 2 and 3 both give 2, the tie takes 2 (%d found, raw %u)", hits, raw);
+  rc::opentimsCorrection("166", corr);
+  CHECK(point(1.0f, corr) == R::none && hits == 2 && raw == 2, "corr 100/166: raw 1 and 2 give 1, 2 is nearer 1.66 (%d found, raw %u)", hits, raw);
+  long approx_bad = 0;
+  for (const double c : {0.8, 100.0 / 166.0, 0.5})
+    for (u32 r = 0; r < (1u << 20); ++r)
+    {
+      const u32 v = opentimsCorrect(r, c);
+      approx_bad += point(static_cast<float>(v), c) != R::none || opentimsCorrect(raw, c) != v || std::fabs(static_cast<double>(raw) - v / c) > 0.5 / c + 1e-9;
+    }
+  CHECK(approx_bad == 0, "corr < 1: %ld values below 2^20 do not recover a raw count that corrects back to them", approx_bad);
   rc::opentimsCorrection("50", corr);
   CHECK(opentimsCorrect(1u << 23, corr) == 16777216u && point(16777216.0f, corr) == R::intensity_range, "corr 2: raw 2^23 gives 2^24, refused");
   // the corr >= 1 threshold: no two raw counts collide at corr 1, 1 + 1 ulp or 100/96 (tie-prone), below 2^20

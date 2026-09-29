@@ -14,7 +14,7 @@
   <text x="45" y="258" fill="#2c5282">count walk → monoisotope, charge 1–5</text>
   <text x="45" y="276" fill="#2c5282">z = 1 on the 2+ mobility line → 2+</text>
   <text x="45" y="294" fill="#2c5282">no isotope partner → dropped</text>
-  <text x="45" y="322" fill="#2c5282" font-weight="600">→ m/z (apex), z, RT apex, 1/K0</text>
+  <text x="45" y="340" fill="#2c5282" font-weight="600">→ m/z (apex), z, RT apex, 1/K0</text>
   <rect x="345" y="50" width="330" height="300" rx="8" fill="#fffaf0" stroke="#ed8936"/>
   <text x="510" y="72" text-anchor="middle" font-weight="600" fill="#7b341e">2. Co-elution gate (same isolation window)</text>
   <line x1="370" y1="200" x2="655" y2="200" stroke="#a0aec0"/><text x="655" y="215" text-anchor="end" fill="#718096" font-size="11">retention time →</text>
@@ -27,9 +27,10 @@
   <text x="612" y="115" fill="#a0aec0" font-size="11">rejected</text><text x="405" y="112" fill="#a0aec0" font-size="11">rejected</text>
   <text x="370" y="240" fill="#7b341e">|ΔRT apex| ≤ 3 s  ·  |Δ1/K0| ≤ 0.01</text>
   <text x="370" y="258" fill="#7b341e">Pearson ≥ 0.3 (full RT grid), ≥ 3 shared points</text>
-  <text x="370" y="276" fill="#7b341e">fragment traces valley-split, ≤ 120 s</text>
-  <text x="370" y="294" fill="#7b341e">a fragment may serve several precursors</text>
-  <text x="370" y="322" fill="#7b341e" font-weight="600">→ fragments, each with a correlation</text>
+  <text x="370" y="276" fill="#7b341e">faint (≤ 4 frames): 6 s, r shrunk to 0.6 from 1 pt</text>
+  <text x="370" y="294" fill="#7b341e">fragment traces valley-split, ≤ 120 s</text>
+  <text x="370" y="312" fill="#7b341e">a fragment may serve several precursors</text>
+  <text x="370" y="340" fill="#7b341e" font-weight="600">→ fragments, each with a correlation</text>
   <rect x="700" y="50" width="280" height="300" rx="8" fill="#f0fff4" stroke="#68d391"/>
   <text x="840" y="72" text-anchor="middle" font-weight="600" fill="#22543d">3. Assembly</text>
   <line x1="725" y1="200" x2="960" y2="200" stroke="#a0aec0"/><text x="960" y="215" text-anchor="end" fill="#718096" font-size="11">m/z →</text>
@@ -40,11 +41,12 @@
   <line x1="865" y1="200" x2="865" y2="110" stroke="#2f855a" stroke-width="3"/>
   <line x1="895" y1="200" x2="895" y2="150" stroke="#2f855a" stroke-width="3"/>
   <line x1="930" y1="200" x2="930" y2="185" stroke="#2f855a" stroke-width="3"/>
-  <text x="725" y="240" fill="#22543d">rank by corr × intensity, keep the top 500</text>
-  <text x="725" y="258" fill="#22543d">need ≥ 3; emit intensity × corr² (corr_power 2)</text>
-  <text x="725" y="276" fill="#22543d">precursor m/z, z, RT, 1/K0 (step 1)</text>
-  <text x="725" y="294" fill="#22543d">written as a centroided MS2</text>
-  <text x="725" y="322" fill="#22543d" font-weight="600">→ one pseudo-MS/MS spectrum</text>
+  <text x="725" y="240" fill="#22543d">rank by r · ln(1+I) · (1+shared), top 500</text>
+  <text x="725" y="258" fill="#22543d">same-bin peaks merged; need ≥ 3</text>
+  <text x="725" y="276" fill="#22543d">emit intensity × corr² (faint: corr¹)</text>
+  <text x="725" y="294" fill="#22543d">precursor m/z, z, RT, 1/K0 (step 1)</text>
+  <text x="725" y="312" fill="#22543d">written as a centroided MS2</text>
+  <text x="725" y="340" fill="#22543d" font-weight="600">→ one pseudo-MS/MS spectrum</text>
   <line x1="320" y1="200" x2="343" y2="200" stroke="#4a5568" stroke-width="1.5" marker-end="url(#a)"/>
   <line x1="675" y1="200" x2="698" y2="200" stroke="#4a5568" stroke-width="1.5" marker-end="url(#a)"/>
   <text x="500" y="378" text-anchor="middle" fill="#4a5568" font-size="12">Defaults shown; every threshold is an option (-gate:*, -assembly:*, -charge:*, -trace:*, -max_charge).</text>

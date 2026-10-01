@@ -14,6 +14,7 @@
   <text x="45" y="258" fill="#2c5282">count walk → monoisotope, charge 1–5</text>
   <text x="45" y="276" fill="#2c5282">z = 1 on the 2+ mobility line → 2+</text>
   <text x="45" y="294" fill="#2c5282">no isotope partner → dropped</text>
+  <text x="45" y="312" fill="#2c5282">mono checked on summed isotope traces</text>
   <text x="45" y="340" fill="#2c5282" font-weight="600">→ m/z (apex), z, RT apex, 1/K0</text>
   <rect x="345" y="50" width="330" height="300" rx="8" fill="#fffaf0" stroke="#ed8936"/>
   <text x="510" y="72" text-anchor="middle" font-weight="600" fill="#7b341e">2. Co-elution gate (same isolation window)</text>
@@ -41,11 +42,12 @@
   <line x1="865" y1="200" x2="865" y2="110" stroke="#2f855a" stroke-width="3"/>
   <line x1="895" y1="200" x2="895" y2="150" stroke="#2f855a" stroke-width="3"/>
   <line x1="930" y1="200" x2="930" y2="185" stroke="#2f855a" stroke-width="3"/>
-  <text x="725" y="240" fill="#22543d">rank by r · ln(1+I) · (1+shared), top 500</text>
-  <text x="725" y="258" fill="#22543d">same-bin peaks merged; need ≥ 3</text>
-  <text x="725" y="276" fill="#22543d">emit intensity × corr² (faint: corr¹)</text>
-  <text x="725" y="294" fill="#22543d">precursor m/z, z, RT, 1/K0 (step 1)</text>
-  <text x="725" y="312" fill="#22543d">written as a centroided MS2</text>
+  <text x="725" y="234" fill="#22543d">I × corr² (faint: corr¹) × 1/K0 weight</text>
+  <text x="725" y="251" fill="#22543d">co-isolated precursor envelopes removed</text>
+  <text x="725" y="268" fill="#22543d">same-bin merged; pieces ≤ 25 ppm fused</text>
+  <text x="725" y="285" fill="#22543d">need ≥ 3; rank r · ln(1+I) · (1+shared)</text>
+  <text x="725" y="302" fill="#22543d">top 500, written as a centroided MS2</text>
+  <text x="725" y="319" fill="#22543d">precursor m/z, z, RT, 1/K0 (step 1)</text>
   <text x="725" y="340" fill="#22543d" font-weight="600">→ one pseudo-MS/MS spectrum</text>
   <line x1="320" y1="200" x2="343" y2="200" stroke="#4a5568" stroke-width="1.5" marker-end="url(#a)"/>
   <line x1="675" y1="200" x2="698" y2="200" stroke="#4a5568" stroke-width="1.5" marker-end="url(#a)"/>

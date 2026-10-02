@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.6.1 — 2026-10-02
+
+**Why 1.6.1.** A documentation release for the project's data policy: benchmarks, regression gates and development
+use only public data sets deposited in ProteomeXchange (PXD accessions), so that anyone can reproduce every number.
+No option, default or algorithm changed. The binary differs from 1.6.0 only in its version string, and the spectra of
+every input are identical to those of 1.6.0 (the mzML header records the new version).
+
+### Changed
+
+- **Data policy** in `CONTRIBUTING.md`: benchmarks, regression gates and development use only public ProteomeXchange
+  data; unpublished data are not added, staged or cited.
+- **Memory requirements from the 1.6.0 public measurements.** The README's requirements table and `CONTRIBUTING.md`
+  quoted peak memory measured on unpublished data with an older version. They now give the peaks of 1.6.0 at the
+  defaults with 100 threads, from the release's 43 public runs: 5–20 GB on the 2-hour HeLa runs of PXD017703 (median
+  7.7 GB on the py3 window scheme) and 25–32 GB on the 130-minute TNBC runs of PXD047793 (median about 28 GB). The
+  old "32+ GB" was below the largest of those runs (32.3 GB). `DIASPEXTRACT_PIPE_TILES=1` (one tile at a time) lowers
+  the peak.
+- **Other README figures from unpublished data** on the detectors, memory and wall time are now stated without
+  numbers: the integer detector's memory saving and its overlap with `openms`, and the costs of `-perf:malloc_trim`
+  and `-perf:stream_load false`.
+- `docs/BASELINE.md` opens with a note that its dataset A–F figures are historical in-house measurements.
+
 ## v1.6.0 — 2026-10-02
 
 Seven new defaults and a faster, pipelined tile loop. On 43 public runs, peptides at 1 % FDR rise by 17.8 % with Sage

@@ -74,8 +74,8 @@ patched OpenMS source tree but lives outside it. Earlier releases were named spe
 **Two detectors.** `-trace:detector integer` (default) works on the instrument's flight-time bins and never
 converts its compact store back to double m/z; it needs the vendor calibration and falls back, loudly, to `openms`
 without it. `-trace:detector openms` runs OpenMS `MassTraceDetection` on a materialised peak map. They are different
-algorithms that agree on about 85 % of the identified peptides; neither wins on every file and engine, and `integer`
-uses about 40 % less memory, which is why it is the default. Design notes: [docs/MZ-AXIS-DESIGN.md](docs/MZ-AXIS-DESIGN.md),
+algorithms that identify partly different peptides; neither wins on every file and engine, and `integer`
+uses markedly less memory, which is why it is the default. Design notes: [docs/MZ-AXIS-DESIGN.md](docs/MZ-AXIS-DESIGN.md),
 [docs/INTEGER-TRACING-DESIGN.md](docs/INTEGER-TRACING-DESIGN.md), [docs/charge-inference.md](docs/charge-inference.md).
 
 **Emission is deliberately generous.** Two precursor hypotheses that share fragments each get their own spectrum, and
@@ -105,7 +105,7 @@ neighbours on a shared machine; one window is always admitted whatever the memor
 | Compiler | C++20. CI builds the tool with GCC on Ubuntu; the headers also compile with GCC 11, AppleClang and MSVC |
 | OpenMP | required |
 | CMake | 3.21+ for OpenMS (the tool itself needs 3.16) |
-| Memory | 32+ GB |
+| Memory | at the defaults with 100 threads, 1.6.0 peaked at about 8 GB on a 2-hour HeLa run (median of the PXD017703 py3 runs; 5–20 GB over all its 2-hour runs) and at 25–32 GB on the 130-minute TNBC tissue runs of PXD047793 (median about 28 GB). `DIASPEXTRACT_PIPE_TILES=1` (one tile at a time) needs less; `-tile:cells_per_tile 0` and `.mzpeak` output need several times as much |
 | Disk | about 10 kB per spectrum as mzML, tens of GB for a 2-hour acquisition; mzPeak is about a third of that |
 
 
@@ -211,8 +211,8 @@ Charge and FDR: `-charge:min_charge`. The spectra of 1.5.0: `-assembly:im_weight
 | `-tile:rt_sec` | 600 | pitch of the retention-time cells, cut at MS1 frame times. **Changes output**: peptides eluting within 15 s of a cut line are lost a few points more often than elsewhere, about 0.2 % of the identified set at 600 s. −1 = one cell, the whole run in memory (`-tile:cells_per_tile` then has no effect) |
 | `-perf:mem_fraction` | 0.75 | fraction of the machine's currently free RAM the window loop may commit; re-decided at every window admission |
 | `-perf:max_concurrent_windows` | 0 = all | upper bound on isolation windows in flight; lower it to trade wall time for memory |
-| `-perf:malloc_trim` | true | return free pages to the OS at the phase boundaries and between tiles: about 30 % off the peak of a one-tile run for about 8 % more wall; `false` when time is the constraint |
-| `-perf:stream_load` | true | read the `.d` frame by frame. `false` holds the run in memory (1.75× memory, 1.7× wall) and **changes output** (+2 % Sage peptides on a large file at unchanged entrapment FDR) |
+| `-perf:malloc_trim` | true | return free pages to the OS at the phase boundaries and between tiles, which lowers the peak (most for a one-tile run) at some extra wall time; `false` when time is the constraint |
+| `-perf:stream_load` | true | read the `.d` frame by frame. `false` holds the run in memory, at a much higher peak and a longer wall time, and **changes output** |
 | `-perf:ms1_prune` | true | drop MS1 centroids at or below `trace:noise_threshold_int` while loading, in a way that leaves the output identical; `false` keeps every centroid and only costs memory |
 | `-perf:ms1_trace_bands` | 48 | m/z bands for parallel MS1 trace detection; 1 = off. **Changes output** (slightly: the band count moves it) |
 | `-perf:trace_bands` | 12 | flight-time bands per isolation window for parallel fragment tracing; 1 = off. **Changes output** (the band count moves it) |

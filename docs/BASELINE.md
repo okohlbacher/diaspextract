@@ -1,5 +1,7 @@
 # dataset D is the decision file
 
+> **Historical record (since 1.6.1).** The dataset A–F figures in this file are in-house measurements, kept as the dated record of past decisions; decisions are no longer made on dataset D, and the project's current numbers come from public ProteomeXchange data only (CONTRIBUTING.md, CHANGELOG.md).
+
 > **Naming.** The tool was renamed DIAspeXtractor on 2026-09-11 and DIAspeXtract on 2026-09-15, and this record calls
 > it DIAspeXtract in prose throughout. Commands, variables and paths quoted from earlier runs keep the names they ran
 > under: SpeXtractor (speXtract before 2026-09-06, DIAspeXtractor from 2026-09-11 to 1.2.1), binary `spextractor`

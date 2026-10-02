@@ -12,7 +12,11 @@ pinned in `patches/openms.lock` (develop, 2026-04-24), patched by that script �
 against exactly that commit. `.github/workflows/build.yml` does exactly this and is the reference
 recipe.
 
-**It needs a large machine.** At the shipped defaults (100 threads, one 600-s cell per tile) peak memory is about 22 GB on the 30-minute dataset D and about 21 GB on the 2-hour TNBC 009 (25 GB with `-perf:malloc_trim false`); in one tile (`-tile:cells_per_tile 0`) about 37 and 100 GB (docs/BASELINE.md). The test suite runs on
+**It needs a large machine.** At the shipped defaults (100 threads, one 600-s cell per tile, two tiles in flight)
+DIAspeXtract 1.6.0 peaked at 5–20 GB on the 2-hour HeLa runs of PXD017703 (median 7.7 GB on the py3 window scheme)
+and at 25–32 GB on the 130-minute TNBC runs of PXD047793 (median about 28 GB, largest 32.3 GB), measured on the
+release's 43 public runs (CHANGELOG, v1.6.0). `DIASPEXTRACT_PIPE_TILES=1` runs one tile at a time and lowers the
+peak; one tile for the whole run (`-tile:cells_per_tile 0`) takes several times as much. The test suite runs on
 a synthetic input and needs none of that.
 
 ## The one rule that matters
@@ -29,6 +33,9 @@ default is:
 If a change is *supposed* to be output-neutral, prove it with a spectrum-list digest
 (`bench/semantic_digest.py`) rather than with peptide counts — counts move by ~2% from a last-ulp
 arithmetic difference, so equal counts are not equality.
+
+**Data.** Benchmarks, regression gates and development use only public data sets deposited in ProteomeXchange (PXD
+accessions), so that every number can be reproduced by anyone. Do not add, stage or cite unpublished data.
 
 ## Running the tests
 

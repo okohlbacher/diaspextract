@@ -30,7 +30,8 @@ conclusions in this project, and single-sample iteration removes that class of e
 | across-cycle spread | 2.66 | **correct** — MS1 FWHM is 2.61 cycles |
 | MS1 FWHM | 3.61 s | flat with RT (1.04× across gradient) |
 
-**Current defaults** (registered defaults, verified against the code 2026-09-03 --
+**Defaults on 2026-09-03** (a dated record: the shipped defaults are in README.md's option tables and
+`diaspextract --helphelp`; registered defaults, verified against the code 2026-09-03 --
 `ms2_noise_threshold_int` and `ms2_split_valleys` had been benchmarked at 10 and 7.0 while the
 registered defaults were still 100 and 0, so a default run could not reproduce any figure in this
 file; the defaults were moved to the benchmarked values): `trace:ms1_split_valleys 7.0`,

@@ -1,5 +1,205 @@
 # Changelog
 
+## v1.6.0 — 2026-10-02
+
+Seven new defaults and a faster, pipelined tile loop. On 43 public runs, peptides at 1 % FDR rise by 17.8 % with Sage
+and by 13.4 % with MSFragger over 1.5.0. No run loses peptides on either engine and entrapment FDR is unchanged. The
+extraction takes 28 % less wall time (median per run) and about 30 % more peak memory. Three of the defaults measure a
+setting per run (the isotope-partner 1/K0 tolerance, the MS1 minimum trace length and the twin fold's frame
+tolerance). Each default can be set back.
+
+- **New defaults.**
+
+  | option | 1.5.0 | 1.6.0 | what it does |
+  |---|---|---|---|
+  | `-assembly:im_weight_sigma` | 0 | 0.005 | weights each fragment by a Gaussian of its 1/K0 distance to the precursor, before the 500-peak cap |
+  | `-assembly:foreign_precursor_weight` | (new) | 0 | removes the residual isotope envelopes of co-isolated precursors from the spectrum |
+  | `-assembly:fragment_fuse_ppm` | (new) | 25, `anchored` | fuses the pieces of one fragment ion into one peak before the cap |
+  | `-charge:mono_profile_check` | false | v2 | checks the monoisotope against the summed MS1 intensity at the isotope positions |
+  | `-charge:iso_im_tolerance` | 0.05 | 0 (auto) | measures the isotope-partner 1/K0 tolerance per run |
+  | `-trace:min_length_sec` | 3 | −1 (auto) | sets the MS1 minimum trace length from the run's peak width |
+  | `-assembly:twin_rt_frames` | (new) | 0 (auto) | lets the twin fold join two spectra of one monoisotope from nearby MS1 frames |
+
+  `-assembly:im_weight_sigma 0 -assembly:foreign_precursor_weight 1 -assembly:fragment_fuse_ppm 0
+  -charge:mono_profile_check false -charge:iso_im_tolerance 0.05 -trace:min_length_sec 3` gives the 1.5.0 spectra
+  exactly (same semantic digest, checked on two runs) and the 1.5.0 `spx:` header stamps (checked on one); the
+  cross-frame twin fold needs v2, so these options switch it off too. The options new to the defaults are now listed
+  by `--help`, not only `--helphelp`.
+- **Measured effect** (1.6.0 at its defaults against 1.5.0). The corpus is 43 public runs: PXD017703 (HeLa:
+  10/50/100 ng in the py3 and 25pc window schemes, and Evosep 60/100/200 samples per day) and PXD047793 (TNBC tissue).
+  Each run is extracted once with each release at 100 threads and searched with both engines at 1 % FDR, with a Sage
+  entrapment search for the FDR check.
+
+  | runs | n | Sage | MSFragger | entrapment FDR change, median (largest rise) | extraction wall, 1.6.0 / 1.5.0 (median) | peak RSS, median (1.5.0) |
+  |---|---:|---:|---:|---|---:|---|
+  | HeLa py3 | 9 | +10.9 % | +10.2 % | −0.02 pt (+0.06) | 0.76 | 7.7 GB (6.6) |
+  | HeLa 25pc | 9 | +19.3 % | +18.3 % | −0.09 pt (+0.02) | 0.53 | 11.8 GB (8.6) |
+  | HeLa Evosep | 9 | +36.0 % | +29.0 % | −0.16 pt (+0.02) | 1.03 | 7.2 GB (7.0) |
+  | TNBC | 16 | +15.2 % | +9.0 % | −0.02 pt (+0.13) | 0.68 | 27.9 GB (20.9) |
+  | **all** | **43** | **+17.8 %** | **+13.4 %** | **−0.03 pt (+0.13)** | **0.72** | **11.1 GB (8.6)** |
+
+  - Per run, Sage gains +4.7 to +45.4 % and MSFragger +0.5 to +40.3 %.
+  - Pooled over the runs, the raw entrapment share is 1.95 % at z = 1 (1.5.0: 1.96 %) and 0.56 % at z ≥ 2 (0.58 %).
+  - Measured on the same corpus in steps: the 1/K0 weight and the foreign-envelope removal give +5.8 % Sage and
+    +4.2 % MSFragger; with fragment fusion and the monoisotope check, +12.3 % and +7.7 %. The three per-run settings,
+    the cross-frame twin fold and the cap ranking of fused peaks add the rest (+4.9 % and +5.3 % on top), most of it
+    on Evosep (+18.7 % and +19.5 %).
+  - The spectrum count is about the same (48.8 M against 48.6 M): 35 % more on Evosep, 6 % fewer on HeLa py3.
+  - The two releases ran on different nodes, so each run's extraction wall is taken relative to the reference
+    implementation's, run back to back on the same node, and the table gives the ratio of those relative walls. On
+    the HeLa 25pc scheme, where 1.5.0 took 1.08–1.52x the reference implementation's wall time, 1.6.0 takes 0.58–0.80x.
+  - Peak memory rises because a second tile is in flight (see "Speed and memory" below; `DIASPEXTRACT_PIPE_TILES=1`
+    restores one tile at a time). The largest run peaks at 32.3 GB (1.5.0: 22.7 GB).
+- **Foreign precursor envelopes** (`-assembly:foreign_precursor_weight`, `-assembly:foreign_precursor_ppm` 10,
+  `-assembly:foreign_precursor_dim` 0.015, `-assembly:foreign_precursor_min_iso` 2). A diaPASEF window passes every
+  precursor inside it, and the unfragmented envelope of a co-isolated precursor lands in the spectrum as intense
+  "fragments". A precursor counts as foreign when it meets three conditions:
+  - it is another of the run's isotope-supported precursors whose monoisotope lies in the same window;
+  - its apex is within the gate's retention-time window, and its 1/K0 is within 0.015;
+  - it is neither a twin nor the same ion called again.
+
+  When at least 2 of that precursor's mono…M+3 positions carry a fragment within 10 ppm, those fragments are
+  multiplied by the weight. 0 removes them; 1 is off. This happens before the same-bin merge and the cap, and the cap
+  key follows the attenuated intensity. Fragments on the precursor's own mono…M+3, within the larger of the
+  tolerance and 30 ppm, are never touched. Logged as `[foreign]`, stamped `spx:foreign`.
+- **Fragment fusion** (`-assembly:fragment_fuse_ppm`, `-assembly:fragment_fuse_mode anchored|linkage`). The mobility
+  picker keeps 1–2 flight-time bins of a fragment ion that spans 4–7. One ion therefore becomes several peaks 5–20 ppm
+  apart, each with its own apex intensity and its own slot under the cap. Fragments within the tolerance (at most
+  50 ppm) are fused after the same-bin merge and before `min_fragments` and the cap. A fused peak has:
+  - the sum of its members' emitted intensities;
+  - their intensity-weighted m/z;
+  - a cap key computed as for one fragment from the sum of the members' 1/K0-weighted apex intensities, with the
+    score (and, for `evidence`, the shared points) of the member with the best key. A fused ion ranks under the cap
+    as one ion of its total intensity, never below its best piece (non-negative keys, up to rounding).
+
+  A spectrum that fuses below `min_fragments` is not written. `anchored` takes the fragments strongest first, and each
+  one not yet fused takes every unfused fragment within the tolerance of its own m/z. `linkage` joins m/z neighbours,
+  with the group's span capped at twice the tolerance. Logged as `[fuse]`, stamped `spx:fragment_fuse`.
+- **Monoisotope check v2** (`-charge:mono_profile_check v2`, `-charge:mono_position_min_ratio` 0.2,
+  `-charge:mono_position_im_box` 0 = auto, `-charge:mono_position_extend` 0.6, `-charge:mono_position_iterate` true).
+  The count walk steps leftward onto any unused MS1 trace one isotope lighter, so some precursors were reported one
+  isotope below their monoisotope. v2 sums the apex intensity of every MS1 trace, claimed or not, at each isotope
+  position of the seed. It counts traces within the partner m/z tolerance, the gate's retention-time window and a
+  1/K0 box. The box is sized per run: 3.5 × the 90th percentile of the isotope 1/K0 scatter of the brightest tenth of
+  the seeds, clamped to [0.01, 0.03].
+  - The walk's leftmost step j is rejected when PS(−j) / PS(−j+1) × λ is below `min_ratio`, with PS the position sum
+    and λ = max(0.1, 0.000594 × neutral mass), averagine's M−1/M0 bound. The monoisotope then moves one isotope right,
+    and with `iterate` the test repeats on the new leftmost step.
+  - When nothing was rejected and the walk ended on a miss, the next lighter position becomes the monoisotope if its
+    ratio is at least `extend`. Its trace is not claimed.
+  - Each walk is judged at its precursor's final charge, after `-charge:im_charge_veto`. A z = 1 walk that the veto
+    re-calls 2+ is read at 2+ spacing.
+  - Only the reported monoisotope moves. Claims, charge and `spx_n_isotopes` are unchanged.
+
+  Logged as `[monocheck]`, stamped `spx:monocheck` (with the box and the percentile). `true` selects v1, which
+  correlates each leftward step's elution profile with the seed's (`-charge:mono_profile_min_corr` 0.6,
+  `-charge:mono_profile_max_dim` 0.015). v1 rejects many true steps; it is kept for comparison.
+- **Isotope-partner 1/K0 tolerance per run** (`-charge:iso_im_tolerance` 0 = auto, `-charge:iso_partner first|closest`).
+  The isotope walk took any MS1 trace within 0.05 1/K0 as an isotope partner. On dense short-gradient runs that is
+  many times the spread of real isotopes, so chance traces became partners and took other precursors' monoisotopes.
+  auto measures the tolerance before the walk:
+  - a stride sample of the MS1 traces (at most 200,000) is probed at each charge's +1 isotope position, in the walk's
+    m/z and retention-time window, and at two control positions 50 ppm either side, where no isotope of the probe at
+    that charge can sit;
+  - at each position the nearest trace's 1/K0 gap is kept;
+  - the tolerance is the one that admits the most isotope-position traces net of twice the control traces (true
+    partners admitted minus chance partners admitted), on a 0.001 grid clamped to [0.01, 0.05].
+
+  It measures 0.010 on the four Evosep HeLa runs screened, 0.012 on TNBC, 0.019 on HeLa py3 at 100 ng, 0.027 on HeLa
+  25pc at 10 ng and 0.05 on HeLa py3 at 10 ng (that run's output is unchanged). In a screen (one extraction per run,
+  not the corpus), the Evosep runs gain 5.0–6.7 % Sage and 4.0–6.4 % MSFragger peptides with 6–8 % more spectra;
+  the other runs move between −0.4 % and +1.9 % on either engine, at the same wall time and memory. A value above 0
+  fixes the tolerance; 0.05 is the 1.5.0 behaviour. Logged as `[isotol]`, stamped `spx:iso_im_tolerance` (the
+  measured value and the partner rule). `-charge:iso_partner closest` takes the candidate closest to the seed in apex
+  RT and 1/K0 (each scaled by its tolerance) instead of the first in m/z order. It is off by default: in the same
+  screen it lost 1.6 and 5.0 % MSFragger peptides on the two 10 ng HeLa runs and wrote 14–15 % more spectra on Evosep
+  for about the same peptides.
+- **MS1 minimum trace length per run** (`-trace:min_length_sec` −1 = auto, `-trace:min_length_fwhm` 0.4). The fixed
+  3 s minimum needed 5 MS1 points at a 0.95-s cycle but 2 at a 3.5-s cycle, so short gradients lost their short,
+  faint precursors. auto first measures the run's peak width. It traces a fixed sample of the MS1 map like the run but
+  with no minimum length: every peak in 1-Th m/z slices, one every 25 Th. The minimum is 0.4 × the median FWHM of the
+  brightest tenth of those traces, and at least half an MS1 cycle, so a trace always needs at least 2 MS1 points.
+  Fewer than 100 traces with a measurable FWHM in that brightest tenth, or no positive MS1 cycle, fall back to 3 s.
+  The run's peak width is about 2 MS1 cycles on every scheme screened, so auto asks for 2 points everywhere
+  (0.64–0.84 s on Evosep, 1.5–1.6 s on HeLa 25pc and TNBC, 2.6–2.8 s on HeLa py3, whose output is unchanged). In a
+  screen (one extraction per run, not the corpus), the four Evosep runs gain 7.0–15.8 % Sage and 7.1–17.9 %
+  MSFragger peptides with 30–45 % more spectra; HeLa 25pc at 10 ng gains 5.1 % and 2.9 %, TNBC 1.4 % and 0.6 %.
+  Logged as `[minlen]` (cycle, FWHM median, p10 and p90 in seconds and cycles, the minimum and the points it
+  implies), stamped `spx:ms1_min_length`. Any value ≥ 0 fixes the minimum as before (`3` = 1.5.0, `0` = no filter).
+- **Twin fold across nearby frames** (`-assembly:twin_rt_frames` 0 = auto, `-assembly:twin_rt_match ext`). v2's
+  extension can put a monoisotope on a trace that is another precursor's monoisotope at another MS1 frame, so one ion
+  was written as two spectra that the same-frame fold could not join. The fold now also joins such a pair. Besides the
+  fold's charge and 1/K0 tests, the two must meet four conditions:
+  - their precursor m/z lie in one flight-time bin (within 0.05 ppm);
+  - the monoisotope of at least one of them was placed by the extension;
+  - their apexes are at most n + 0.5 MS1 cycles apart, with n the run's median MS1 peak width in cycles (2 on the public
+    runs);
+  - they lie in one retention-time cell, so the output does not depend on the tiling or the thread count.
+
+  The survivor rule and the fusion are the fold's. Across frames, pairs of one charge and 1/K0 lie either within
+  0.01 ppm (one bin) or 0.3 ppm and more apart (distinct traces). Screened on top of the other two per-run settings
+  (one extraction per run), the fold removes 0.7–2.4 % of the spectra and moves peptides by −0.5 to +0.4 % on either
+  engine. Screened without them, one Evosep 200 SPD run lost 1.7 % with MSFragger; with them, that run lost 0.1 %.
+  The corpus numbers above include it. `bin` (any one-bin pair across frames) and `ppm` (the
+  fold's 20 ppm) are options; both lost peptides in the screen. Without v2 nothing folds across frames, so the 1.5.0
+  options above still give the 1.5.0 spectra. `-1` restores the same-frame fold. Logged as `[twins]` (pairs joined at
+  one frame and across frames, pairs left apart at a cell edge), stamped in `spx:twin_merge`.
+- **Speed and memory.** The parallel structure changed, the output did not: the same semantic digest as without these
+  changes, at 16 and 100 threads and with one or two cells per tile.
+  - The retention-time tiles are pipelined. Up to two tiles have windows in flight; the next tile is read, and the
+    finished one sorted, folded and written, while the windows run. `DIASPEXTRACT_PIPE_TILES=1` restores one tile at
+    a time.
+  - The serial stages of a heavy window run as bounded tasks.
+  - The MS1 conversion and sorts and the precursor-inference batches run in parallel.
+
+  Measured before the per-run defaults, with two or three runs per build on one node: HeLa 25pc at 10 ng takes 44–48 %
+  less wall time at 32 to 192 threads, TNBC 36 % less at 100 threads. On the 1.6.0 defaults (one run per build, back
+  to back on one node, 100 threads): HeLa 25pc 132 → 73 s, TNBC 583 → 416 s, HeLa py3 at 10 ng 24 → 18 s, Evosep
+  200 SPD 14 → 12 s. Peak memory rises with the second tile in flight: TNBC from 22 to 29 GB, HeLa 25pc from 6.3 to
+  7.2 GB, and with `-tile:cells_per_tile 2` TNBC needs 44 GB.
+- **New options, off by default:**
+  - `-assembly:frag_intensity apex|core|sum` (with `-assembly:frag_core_frames` 3) sets the amplitude written for a
+    fragment. The default is the trace's apex. `core` sums the frames centred on the precursor's apex, and `sum` sums
+    the precursor's whole span. The gate and the cap key keep the apex. Stamped `spx:fragint`.
+  - `-gate:anchor_rescue` (with `-gate:anchor_min_count` 3, `-gate:anchor_min_corr` 0.8, `-gate:anchor_rescue_corr`
+    0.7 and `-gate:anchor_max_rescued` 50) applies to a well-sampled precursor with at least 3 strongly correlated
+    fragments. For such a precursor it takes back weak fragments that the gate rejected for too few points or a low
+    correlation, when they follow the consensus elution profile of those anchors. Stamped `spx:anchor`.
+  - `-assembly:post_fusion_cap` re-applies `max_fragments` after the twin fold. The fold unions the members' capped
+    fragment lists. Every peak carries its cap key through the merge, the fusion and the fold. Stamped
+    `spx:post_fusion_cap`.
+- **Header.** A default run now carries 29 `spx:` stamps: `spx:monocheck`, `spx:foreign`, `spx:fragment_fuse`,
+  `spx:ms1_min_length` and `spx:iso_im_tolerance` are added to the 24 that are always written.
+- `-assembly:frag_core_frames` must be odd only with `-assembly:frag_intensity core`, the only mode that uses it.
+- An exception inside the parallel twin fold or the post-fusion cap now ends the run with an error message, not an
+  abort. An allocation failure is one example.
+- **Known limitations.**
+  - **Box narrower than the walk.** The v2 box is at most 0.03 1/K0, but the count walk accepts isotope partners up to
+    `-charge:iso_im_tolerance` away (auto: 0.01–0.05 per run). A walk whose own partner lies outside the box sees an
+    empty position, which counts against the step. The monoisotope can then move one or more isotopes right of the
+    true one (two for one empty position inside the walk, with `iterate`), mainly on runs with wide isotope 1/K0
+    scatter.
+  - **Duplicate monoisotope after the extension, the rest.** The fold joins the extension's pair only within its
+    1/K0 tolerance (0.005) and the run's frame tolerance. A pair farther apart, or one that straddles a retention-time
+    cell edge, is still written as two spectra.
+  - **Fold chains.** The fold joins clusters, not pairs: a same-frame pair and a cross-frame pair that share a
+    spectrum fold all three, so a cluster can hold two spectra that would not fold as a pair (precursor m/z more
+    than one bin apart across frames, or 1/K0 further apart than the tolerance end to end). `[twins]` counts the
+    clusters that span more than the frame tolerance.
+  - **Isotope-tolerance controls.** For a few charge pairs one charge's ±50-ppm control lies within the partner m/z
+    tolerance of another charge's +1 isotope (near m/z 1,000 a 4+ ion's M+1 is 0.2 ppm from the 5+ control), so a
+    true partner there also counts as a chance one and pulls the auto tolerance down. The effect is not measured.
+  - **Fusion and elution.** Fusion sums pieces whose elution does not overlap, unlike the same-bin merge.
+  - **Fusion and twins.** Fusion is not reconciled across twins, so after the fold's 10-ppm merge one ion can still
+    appear as two peaks a little over 10 ppm apart.
+  - **Window edges.** Foreign-envelope removal considers only precursors whose monoisotope lies in the window. A
+    co-isolated precursor whose monoisotope sits just outside the window keeps its heavier isotopes in the spectrum.
+  - **False matches.** Two matched positions are weak evidence when a genuine fragment and its own isotope line up
+    with a co-isolated envelope of the same charge. Both genuine peaks are then removed. How often this happens has
+    not been measured.
+  - **Spectra over the cap.** A folded spectrum can still exceed `max_fragments`. `-assembly:post_fusion_cap true`
+    prevents that but has not been measured at release grade.
+
 ## v1.5.0 — 2026-09-29
 
 - **Low-intensity runs: an adaptive co-elution gate.** At 10 ng the 1.4 gate stripped most true fragments: a faint ion

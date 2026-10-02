@@ -1,6 +1,6 @@
 # Is our emission inflated by M+1/M+2 precursors, and can those spectra be merged?
 
-**Hypothesis (user, 2026-09-03).** We emit 927,813 pseudo-spectra on dataset D where the reference implementation emits
+**Hypothesis (user, 2026-09-03).** We emit 927,813 pseudo-spectra on IH2 where the reference implementation emits
 700,434. Two claims to test: (a) the excess comes from selecting M+1/M+2 as precursors in their own
 right instead of the monoisotope; (b) those spectra are basically identical and could be merged.
 
@@ -103,7 +103,7 @@ sharpens it: the gate must be an OWNERSHIP rule, not an m/z ordering rule.
 
 **Pre-registered next experiment (not yet run).** Replace the `used[]` boolean with owner tracking:
 when a new seed's isotope-lattice neighbour at the same charge is already owned by an emitted
-precursor, suppress the new precursor instead of letting it become a fresh monoisotope. A/B on dataset D,
+precursor, suppress the new precursor instead of letting it become a fresh monoisotope. A/B on IH2,
 both engines, plus entrapment. Prediction: emission falls toward ~670-700k with peptides within
 replicate noise. Falsifier: peptides fall by more than the 0.17% replicate spread -- which the 7.2%
 heavy-only-identified population makes a real risk, since suppression discards exactly the member
@@ -128,7 +128,7 @@ consumed run. Intensity is right in both cases, because a spurious peak below th
 the mono outweighs its own M+1 below about 1800 Da. Above that the rule inverts, which is why `light`
 runs as a control rather than as an assumption.
 
-**Pre-registered A/B (dataset D, queued behind the dataset A/dataset B confirmation chain):** arms `intense` K=3,
+**Pre-registered A/B (IH2, queued behind the IH1/IH3 confirmation chain):** arms `intense` K=3,
 `light` K=3, `intense` K=1. Both engines; entrapment on the default arm, since a large emission cut
 changes the FDR denominator. Success = emission near 670-700k with Sage and MSFragger peptides within
 the 0.17% replicate spread and entrapment no worse than the shipping arm's 1.37%. Falsifier = peptides
@@ -137,7 +137,7 @@ the survivor's own extraction does not recover -- and would close the emission q
 
 ## 7. A/B result: the collapse works mechanically and costs peptides at every setting
 
-| dataset D arm | precursors removed | spectra | Sage @1% | MSFragger @1% | wall |
+| IH2 arm | precursors removed | spectra | Sage @1% | MSFragger @1% | wall |
 |---|---|---|---|---|---|
 | apex baseline | -- | 927,813 | 12,537 | 11,927 | 15:21 |
 | **intense, K=1** | 166,440 | 786,300 (−15.3%) | **11,965 (−4.6%)** | **11,546 (−3.2%)** | 14:22 |
@@ -228,14 +228,14 @@ the best collapse setting. Five times the efficiency, and one line of code inste
 algorithm.
 
 `SPEXTRACTOR_MIN_CHARGE=z` implemented. **Pre-registered arm (running):** z>=2, z>=2 with the k=1
-collapse, and z>=3, on dataset D with both engines and entrapment. Prediction: z>=2 loses under 2% of Sage
+collapse, and z>=3, on IH2 with both engines and entrapment. Prediction: z>=2 loses under 2% of Sage
 peptides, and may GAIN, since removing 29% of never-identified spectra also removes their share of
 the multiple-testing burden. Falsifier: peptides fall more than the 1.73% the offline join predicts,
 which would mean the z=1 spectra contribute identifications indirectly through FDR calibration.
 
 ## 11. Result: the charge gate wins, the collapse loses, and they do not combine
 
-| dataset D arm | spectra | Sage @1% | MSFragger @1% | wall | entrapment |
+| IH2 arm | spectra | Sage @1% | MSFragger @1% | wall | entrapment |
 |---|---|---|---|---|---|
 | apex baseline | 927,813 | 12,537 | 11,927 | 15:21 | 1.28% [1.03-1.53] |
 | **z >= 2** | **656,254 (−29.3%)** | **12,642 (+0.8%)** | **12,073 (+1.2%)** | **12:48 (−17%)** | 1.38% [1.15-1.64] |
@@ -254,8 +254,8 @@ lattice removal is taken out of real signal. This closes the collapse line: **th
 in every form** (K=1, K=3, intensity rule, lightest rule, with or without the charge gate).
 
 **Caution before adoption.** Entrapment moves 1.28% -> 1.38%, at the pre-registered 1.4% bound. The
-intervals overlap heavily so this is not yet a difference, but dataset A and dataset B must confirm it.
-**Confirmation arm running:** z >= 2 on dataset A and dataset B, both engines, entrapment against the same apex
+intervals overlap heavily so this is not yet a difference, but IH1 and IH3 must confirm it.
+**Confirmation arm running:** z >= 2 on IH1 and IH3, both engines, entrapment against the same apex
 baselines. Adopt as default only if peptides do not fall on either engine on either file and
 entrapment stays within the apex interval; a rise past 1.4% on a second file means the gate is buying
 peptides with false positives and must be reconsidered as an option rather than a default.

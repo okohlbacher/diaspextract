@@ -34,7 +34,7 @@ Three measurements, in increasing order of how much they depend on assumptions
 
 Pre-registered falsification (written before the first run)
 -----------------------------------------------------------
-Closed-search ratio split_count/base on dataset B = 8411/5817 = 1.446.
+Closed-search ratio split_count/base on IH3 = 8411/5817 = 1.446.
 
   * modified-peptide ratio >= 1.446  -> "the closed benchmark rewards shotgunning" is FALSIFIED.
                                         The defaults are vindicated for BOTH purposes, the six

@@ -108,7 +108,7 @@ Repeated on a second file, and it is stronger there:
 | wall | +11% | +20% |
 
 So on this dataset class the z>=2 default costs 14-20% of Sage peptides and most of the MSFragger
-deficit, with entrapment FDR unchanged or better on both files. That directly contradicts the dataset D
+deficit, with entrapment FDR unchanged or better on both files. That directly contradicts the IH2
 measurement that established the default (where dropping z=1 GAINED peptides on both engines), so
 `charge:min_charge` is dataset-dependent. Resolved below: the default changed to 1. Cost at the
 shipped default on 009: +67% spectra (2,343,822 -> 3,918,321), +15% wall (12:42 against the 11:01
@@ -206,9 +206,9 @@ now documented rather than hidden.
 One refinement after the first measurement: the veto's 3+ arm was re-calling 7% of z=1
 calls to 3+, but only ~1.8% of z=1 calls are genuinely on the 3+ band (the 2+ and 3+ mobility lines
 are ~1 sigma apart at low m/z), and the re-calls identified nothing on either file (z=3 peptides
-5,313 -> 5,322 on 009, 3,888 -> 3,935 on dataset D) while adding 178k / 93k re-called precursors
+5,313 -> 5,322 on 009, 3,888 -> 3,935 on IH2) while adding 178k / 93k re-called precursors
 (117k / 73k spectra). A z=1 call on
-the 3+ band is now dropped rather than re-labelled. The dataset D pair is on record in
+the 3+ band is now dropped rather than re-labelled. The IH2 pair is on record in
 docs/BASELINE.md; the 009 pair exists only in the source comment beside the veto's 3+ branch in
 `src/spextractor.cpp` and in no docs/BASELINE.md entry.
 

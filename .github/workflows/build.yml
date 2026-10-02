@@ -86,7 +86,7 @@ jobs:
           cmake --build diaspextract/build
 
       # The C++ unit tests again, under the tool build's own flags (tests.yml builds them without OpenMS):
-      # dnoise_ms1 pins D's FMA-sensitive gate boxes, tdf_load the analysis.tdf metadata loader. Each must
+      # dnoise_ms1 pins IH2's FMA-sensitive gate boxes, tdf_load the analysis.tdf metadata loader. Each must
       # actually run -- a regex that matches no registered test passes vacuously.
       - name: C++ unit tests in the tool build (dnoise MS1 port, analysis.tdf loader)
         run: |

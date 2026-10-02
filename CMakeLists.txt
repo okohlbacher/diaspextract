@@ -15,7 +15,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # src/DnoiseMs1.h reproduces dnoise's MS1 window gate bit for bit only without floating-point
-# contraction: an FMA flips 3 of dataset D's 24 boxes, and Apple clang on arm64 contracts by default.
+# contraction: an FMA flips 3 of IH2's 24 boxes, and Apple clang on arm64 contracts by default.
 # The header guards its own arithmetic; the flag keeps the translation units around it honest too, and
 # matches the cluster's in-tree build, where OpenMS compiles with it but does not export it.
 add_compile_options($<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffp-contract=off>)

@@ -7,7 +7,7 @@
 # tool exists to avoid: a charge error fabricates dM = (z'-z)(m/z - 1.00728), hundreds of Da, and
 # a +-25 ppm search simply does not report those PSMs. This measures in the mode the tool is for.
 #
-# Arms, all on dataset_B, all from EXISTING mzML (no re-extraction -- the spectra are already produced):
+# Arms, all on ih3, all from EXISTING mzML (no re-extraction -- the spectra are already produced):
 #   base         ms1_split_valleys 0,   charge:scoring envelope   (the pre-2026-07-21 default)
 #   split_count  ms1_split_valleys 7.0, charge:scoring count      (the shipped default)
 #   envelope     ms1_split_valleys 7.0, charge:scoring envelope   (POSITIVE CONTROL: 10,199 known
@@ -40,7 +40,7 @@ echo "entrapment: $NT target / $NE foreign, ratio $RATIO" >> $L
 # precisely the error class this benchmark was built to eliminate, so it is re-extracted here
 # rather than copied.
 TOOL=/path/to/scratch/OpenMS/build/bin/diaspextract
-DD=/path/to/scratch/rawd/<acquisition-B>
+DD=/path/to/scratch/rawd/<acquisition-ih3>
 COMMON="-trace:ms2_chrom_peak_snr 1.0 -trace:ms2_noise_threshold_int 10 -trace:ms2_min_length_sec 0 -trace:ms2_split_valleys 7.0"
 SC=$B/out/open_split_count
 if [ ! -s "$SC/pseudo.mzML" ]; then
@@ -54,7 +54,7 @@ if [ ! -s "$SC/pseudo.mzML" ]; then
 fi
 
 declare -A MZ
-MZ[base]=$B/out/m_<dataset-B>_base/pseudo.mzML
+MZ[base]=$B/out/m_<ih3>_base/pseudo.mzML
 MZ[split_count]=$SC/pseudo.mzML
 MZ[envelope]=$B/out/way2_both/pseudo.mzML
 

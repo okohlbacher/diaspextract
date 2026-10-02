@@ -81,7 +81,7 @@ produces, exactly as it does now, so that stage's behaviour is unchanged and out
 
 ## 4. What this is expected to buy, and what would falsify it
 
-Trace detection is 3,869 s of 4,256 s of window-elapsed time on dataset D.
+Trace detection is 3,869 s of 4,256 s of window-elapsed time on IH2.
 
 | source of gain | mechanism | estimate |
 |---|---|---|
@@ -90,7 +90,7 @@ Trace detection is 3,869 s of 4,256 s of window-elapsed time on dataset D.
 | **cache** | a frame's peaks are three contiguous arrays instead of `Peak1D` + a parallel array behind an `MSSpectrum` | **the term that should dominate** |
 | no double conversion | the store's integers are used as integers | one pass over 1.2e9 peaks removed |
 
-**Estimate: 30-50% off trace detection, i.e. dataset D from 7:04 to roughly 5:00-6:00**, with peak memory
+**Estimate: 30-50% off trace detection, i.e. IH2 from 7:04 to roughly 5:00-6:00**, with peak memory
 down by the materialisation. Stated as a range because the split between bandwidth and the
 detector's own arithmetic has not been isolated -- the same uncertainty that made me underestimate
 the scoring gate by a factor of five, in the conservative direction.
@@ -106,7 +106,7 @@ closest-peak tie-breaks will differ. Judged on identified peptides with both eng
 ## 4b. What was measured (2026-09-03, after the fact)
 
 The falsifier in section 4 fired. The first corrected detector reached parity on peptides (12,650
-vs 12,642 on dataset D) and was SLOWER (9:28 vs 7:22), with lower occupancy (46.9x vs 78.9x) and MORE
+vs 12,642 on IH2) and was SLOWER (9:28 vs 7:22), with lower occupancy (46.9x vs 78.9x) and MORE
 peak memory (174 vs 166 GB). The estimate above was wrong about where the time was: not in the
 layout of the peak arrays, but in bookkeeping the reimplementation added -- twelve per-band
 full-window sorts and a calibration call per visited candidate. Those are removed in the version

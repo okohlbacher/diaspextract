@@ -1,32 +1,32 @@
 # Full benchmark matrix: all tools x all datasets x all calibration methods x both engines
 
-dataset D/dataset A/dataset B (in-house diaPASEF, same cohort/instrument). Both engines deterministic (sigma=0),
+IH2/IH1/IH3 (in-house diaPASEF, same cohort/instrument). Both engines deterministic (sigma=0),
 so counts are exact. DIAspeXtractor config throughout: isotope-support gate + corr_power=2 (current
-defaults); only the TOF->m/z calibration path varies. the reference implementation references for dataset A/dataset B created
-2026-09-01 (previously dataset D-only).
+defaults); only the TOF->m/z calibration path varies. the reference implementation references for IH1/IH3 created
+2026-09-01 (previously IH2-only).
 
 ## Sage, closed search, peptides @1% peptide_q
 | file | chord (old default) | **TDF-table model (open)** | vendor SDK | the reference implementation | table vs dt |
 |---|---|---|---|---|---|
-| dataset D | 10,802 | **11,976** | 12,128 | 11,517 | **104.0%** |
-| dataset A |  9,735 | **10,333** | -- | 10,242 | **100.9%** |
-| dataset B |  9,032 | **9,891**  | -- |  8,948 | **110.5%** |
+| IH2 | 10,802 | **11,976** | 12,128 | 11,517 | **104.0%** |
+| IH1 |  9,735 | **10,333** | -- | 10,242 | **100.9%** |
+| IH3 |  9,032 | **9,891**  | -- |  8,948 | **110.5%** |
 Calibration effect (chord -> table): **+10.9% / +6.1% / +9.5%**.
 
 ## MSFragger 4.4.1, peptidoform-level @1% target-decoy FDR
 | file | chord | **TDF-table model** | vendor SDK | the reference implementation | table vs dt |
 |---|---|---|---|---|---|
-| dataset D | 11,560 | **11,463** | 11,460 | 13,932 | 82.3% |
-| dataset A | 11,350 | **11,465** | -- | 13,666 | 83.9% |
-| dataset B |  9,486 | **9,404**  | -- | 10,606 | 88.7% |
+| IH2 | 11,560 | **11,463** | 11,460 | 13,932 | 82.3% |
+| IH1 | 11,350 | **11,465** | -- | 13,666 | 83.9% |
+| IH3 |  9,486 | **9,404**  | -- | 10,606 | 88.7% |
 Calibration effect: **-0.8% / +1.0% / -0.9% = FLAT within noise on every file.**
 
 ## Mass accuracy (median ppm on identified precursors, |delta| < 0.9 Da)
 | file | chord | table model | vendor SDK | the reference implementation |
 |---|---|---|---|---|
-| dataset D | -8.29 | +1.49 | +1.74 | -1.37 |
-| dataset A | --    | +3.19 | --    | +0.27 |
-| dataset B | --    | +2.29 | --    | -0.60 |
+| IH2 | -8.29 | +1.49 | +1.74 | -1.37 |
+| IH1 | --    | +3.19 | --    | +0.27 |
+| IH3 | --    | +2.29 | --    | -0.60 |
 
 ## What the matrix says
 1. **The calibration fix is real and generalises** on Sage: +8.8% mean, 95% CI [+2.7, +15.0] (n=3
@@ -36,7 +36,7 @@ Calibration effect: **-0.8% / +1.0% / -0.9% = FLAT within noise on every file.**
    mass error is a discriminant FEATURE. And since the reference implementation's spectra always carried vendor
    calibration, every earlier head-to-head was biased AGAINST us by this same mechanism: **the
    +6-11% is the removal of a self-inflicted handicap, not a lead over the reference implementation.**
-2. **The table model reproduces the vendor SDK** (dataset D 11,976 vs 12,128; the 1.3% delta is the
+2. **The table model reproduces the vendor SDK** (IH2 11,976 vs 12,128; the 1.3% delta is the
    vendor IM converter, not m/z) and is exact against the vendor oracle (2.5e-5 ppm, tests/).
 3. **MSFragger is INSENSITIVE to input calibration** (flat across chord/table/SDK on all 3 files).
    CORRECTED REASON: NOT "calibrate_mass absorbs it" -- that was
@@ -52,7 +52,7 @@ Calibration effect: **-0.8% / +1.0% / -0.9% = FLAT within noise on every file.**
 4. **The engine asymmetry is the headline honesty problem -- and n=3 statistics make it worse for us:
    Sage 105.1% mean, 95% CI [93.0, 117.3] = CONSISTENT WITH PARITY, NOT AN ADVANTAGE; MSFragger
    85.0%, 95% CI [76.7, 93.2] = a STATISTICALLY SUPPORTED DEFICIT.** "Matches or exceeds on all
-   three files" is not a defensible claim (dataset A's +91 peptides is inside noise). Any public claim must show both engines. The MSFragger gap is
+   three files" is not a defensible claim (IH1's +91 peptides is inside noise). Any public claim must show both engines. The MSFragger gap is
    search/detection-side (it survives perfect masses) -- consistent with the earlier finding that
    ~34% of missed peptides already have a near-threshold PSM.
 5. **Our residual ppm (+1.5..+3.2) is consistently 2-4 ppm above the reference implementation's (-1.4..+0.3)** on the

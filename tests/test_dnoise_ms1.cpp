@@ -2,7 +2,7 @@
 // no cluster -- only a C++20 compiler. Build: c++ -std=c++20 -ffp-contract=off -I src tests/test_dnoise_ms1.cpp
 //
 // Bit-identity with the dnoise binary itself was established on real frames of both files below (SDK-read and
-// blob-decoded, every point). What is pinned here is what that identity rests on: both files' gate boxes -- D's three
+// blob-decoded, every point). What is pinned here is what that identity rests on: both files' gate boxes -- IH2's three
 // FMA-sensitive edges and TNBC 009's "Bruker otofControl" widening included --, each streak, halo and gate rule on a
 // synthetic frame, and the optimised implementation against a direct transliteration of the Rust on random frames.
 // Also the tool's point recovery (recover::) against the loader's forward maths, and its frame bookkeeping.
@@ -34,10 +34,10 @@ static int g_fail = 0;
 
 // ---- the gate inputs of two real files, from read-only queries of their analysis.tdf -------------------------------
 // Rows are SELECT DISTINCT ScanNumBegin, ScanNumEnd, IsolationMz, IsolationWidth FROM DiaFrameMsMsWindows, as exact
-// doubles. Boxes are {scan_lo, scan_hi, tof_lo, tof_hi}: D's reproduced the dnoise binary on real frames; both sets
+// doubles. Boxes are {scan_lo, scan_hi, tof_lo, tof_hi}: IH2's reproduced the dnoise binary on real frames; both sets
 // come from an independent CPython implementation of the spec.
 
-static dn::RunMeta metaD()   // dataset D
+static dn::RunMeta metaIH2()   // IH2
 {
   dn::RunMeta m;
   m.acquisition_software = "timsTOF";
@@ -49,7 +49,7 @@ static dn::RunMeta metaD()   // dataset D
   m.max_num_scans = 944;
   return m;
 }
-static const std::vector<dn::WindowRow> kRowsD = {
+static const std::vector<dn::WindowRow> kRowsIH2 = {
   {34, 602, 0x1.676c28f5c28f6p+9, 0x1.70cccccccccc0p+4},  {602, 944, 0x1.8e28f5c28f5c2p+8, 0x1.1a8f5c28f5c28p+7},
   {34, 579, 0x1.734f5c28f5c29p+9, 0x1.a800000000000p+4},  {579, 944, 0x1.e431eb851eb85p+8, 0x1.0651eb851eb80p+5},
   {34, 568, 0x1.7ff1eb851eb85p+9, 0x1.a0a3d70a3d700p+4},  {568, 944, 0x1.fff1eb851eb84p+8, 0x1.8b5c28f5c2900p+4},
@@ -63,7 +63,7 @@ static const std::vector<dn::WindowRow> kRowsD = {
   {34, 409, 0x1.10928f5c28f5cp+10, 0x1.6628f5c28f5c0p+6}, {409, 944, 0x1.50e7ae147ae14p+9, 0x1.6f5c28f5c2900p+4},
   {34, 295, 0x1.3cd5c28f5c28fp+10, 0x1.0a8f5c28f5c28p+8}, {295, 944, 0x1.5c270a3d70a3ep+9, 0x1.807ae147ae180p+4},
 };
-static const std::vector<dn::GateBox> kBoxesD = {
+static const std::vector<dn::GateBox> kBoxesIH2 = {
   {0, 661, 335024, 347539}, {542, 943, 161592, 238906}, {0, 638, 343405, 357004}, {519, 943, 233745, 253491},
   {0, 627, 352940, 366144}, {508, 943, 248497, 264073}, {0, 616, 362146, 376020}, {497, 943, 259193, 273460},
   {0, 605, 372090, 385555}, {485, 943, 268677, 281541}, {0, 583, 381689, 396648}, {464, 943, 276838, 289229},
@@ -123,27 +123,27 @@ static void checkBoxes(const char* name, const dn::RunMeta& meta, const std::vec
 
 static void testGate()
 {
-  checkBoxes("D", metaD(), kRowsD, kBoxesD);
+  checkBoxes("IH2", metaIH2(), kRowsIH2, kBoxesIH2);
   checkBoxes("TNBC 009", metaTnbc(), kRowsTnbc, kBoxesTnbc);
 
-  // D boxes 11, 15 and 16 sit on razor edges (s1 = 582.0000000000001 and 547.0, s0 = 428.9999999999999): with
+  // IH2 boxes 11, 15 and 16 sit on razor edges (s1 = 582.0000000000001 and 547.0, s0 = 428.9999999999999): with
   // `intercept + slope * scan` fused into one FMA they become [0,582], [0,548] and [429,943]. Named for the report.
-  const dn::GateBuild d = dn::buildMs1WindowGate(metaD(), kRowsD, dn::Params{});
+  const dn::GateBuild d = dn::buildMs1WindowGate(metaIH2(), kRowsIH2, dn::Params{});
   if (d.gate && d.gate->boxes().size() == 24)
   {
     const std::vector<dn::GateBox>& b = d.gate->boxes();
     CHECK(b[10].scan_hi == 583 && b[14].scan_hi == 547 && b[15].scan_lo == 428,
-          "D boxes 11/15/16: scan_hi %u (583), scan_hi %u (547), scan_lo %u (428) -- floating-point contraction?",
+          "IH2 boxes 11/15/16: scan_hi %u (583), scan_hi %u (547), scan_lo %u (428) -- floating-point contraction?",
           b[10].scan_hi, b[14].scan_hi, b[15].scan_lo);
   }
   // The goldens can tell the quirks apart: honouring the exclusive ScanNumEnd, or dropping the otofControl widening,
   // changes the boxes.
-  std::vector<dn::WindowRow> exclusive = kRowsD;
+  std::vector<dn::WindowRow> exclusive = kRowsIH2;
   for (dn::WindowRow& r : exclusive) --r.scan_num_end;
-  const dn::GateBuild e = dn::buildMs1WindowGate(metaD(), exclusive, dn::Params{});
+  const dn::GateBuild e = dn::buildMs1WindowGate(metaIH2(), exclusive, dn::Params{});
   std::size_t changed = 0;
-  for (std::size_t i = 0; e.gate && i < e.gate->boxes().size(); ++i) changed += !same(e.gate->boxes()[i], kBoxesD[i]);
-  CHECK(changed > 0, "an exclusive ScanNumEnd must change D's boxes");
+  for (std::size_t i = 0; e.gate && i < e.gate->boxes().size(); ++i) changed += !same(e.gate->boxes()[i], kBoxesIH2[i]);
+  CHECK(changed > 0, "an exclusive ScanNumEnd must change IH2's boxes");
   dn::RunMeta plain = metaTnbc();
   plain.acquisition_software = "timsTOF";
   const dn::GateBuild t = dn::buildMs1WindowGate(plain, kRowsTnbc, dn::Params{});
@@ -169,25 +169,25 @@ static void testGate()
   // When the builder gives no gate, and when it refuses the run.
   dn::Params off;
   off.dia_ms1_window = false;
-  const dn::GateBuild a = dn::buildMs1WindowGate(metaD(), kRowsD, off);
+  const dn::GateBuild a = dn::buildMs1WindowGate(metaIH2(), kRowsIH2, off);
   CHECK(!a.gate && a.error.empty(), "dia_ms1_window false: no gate, no error");
   const dn::GateBuild n = dn::buildMs1WindowGate(dn::RunMeta{}, {{10, 10, 500.0, 20.0}, {20, 5, 500.0, 20.0}}, dn::Params{});
   CHECK(!n.gate && n.error.empty(), "no row with ScanNumEnd > ScanNumBegin: no gate, and the metadata is never read");
-  dn::RunMeta bad = metaD();
+  dn::RunMeta bad = metaIH2();
   bad.digitizer_num_samples.reset();
-  const dn::GateBuild x = dn::buildMs1WindowGate(bad, kRowsD, dn::Params{});
+  const dn::GateBuild x = dn::buildMs1WindowGate(bad, kRowsIH2, dn::Params{});
   CHECK(!x.gate && !x.error.empty(), "a missing DigitizerNumSamples refuses the run");
-  bad = metaD();
+  bad = metaIH2();
   bad.one_over_k0_acq_range_lower = "0,600000";
-  const dn::GateBuild y = dn::buildMs1WindowGate(bad, kRowsD, dn::Params{});
+  const dn::GateBuild y = dn::buildMs1WindowGate(bad, kRowsIH2, dn::Params{});
   CHECK(!y.gate && !y.error.empty(), "a decimal comma refuses the run");
-  bad = metaD();
+  bad = metaIH2();
   bad.one_over_k0_acq_range_lower = "1e-999";   // Rust parses 0 here and dnoise builds a degenerate gate; the port refuses
-  const dn::GateBuild u = dn::buildMs1WindowGate(bad, kRowsD, dn::Params{});
+  const dn::GateBuild u = dn::buildMs1WindowGate(bad, kRowsIH2, dn::Params{});
   CHECK(!u.gate && u.error.find("OneOverK0AcqRangeLower '1e-999'") != std::string::npos, "an underflowing value refuses the run (%s)", u.error.c_str());
-  bad = metaD();
+  bad = metaIH2();
   bad.max_num_scans = 0;
-  const dn::GateBuild z = dn::buildMs1WindowGate(bad, kRowsD, dn::Params{});
+  const dn::GateBuild z = dn::buildMs1WindowGate(bad, kRowsIH2, dn::Params{});
   CHECK(!z.gate && z.error.empty(), "no scans: no gate");
 }
 
@@ -676,9 +676,9 @@ struct RecoverFile
   u32 no_preimage;                  ///< the first corrected value no raw count gives
 };
 
-static RecoverFile recoverD()
+static RecoverFile recoverIH2()
 {
-  RecoverFile f{"D", {}, 25.727120813485598, 634073,
+  RecoverFile f{"IH2", {}, 25.727120813485598, 634073,
                 {1, 943, 234.09826168388614, 95.59372590131042, 33.9622641509434, 1, -0.0031464178402676644, 167.9496150068565, 16.646316600032645, 2241.865411900982},
                 944, "99.958", {0x1.6e4c14p+0f, 0x1.6e124p+0f, 0x1.03cfc8p+0f, 0x1.33a7e6p-1f}, 1190};
   f.cal.model_type = 1; f.cal.digitizer_timebase = 0.125; f.cal.digitizer_delay = 25655.375; f.cal.C0 = 279.3262846272992;
@@ -761,7 +761,7 @@ static void testRecover()
   CHECK(!rc::correctionRefusal(7, 0.005).empty() && rc::correctionRefusal(7, 0.01).empty() && !rc::correctionRefusal(7, 0.0).empty(),
         "corr below 0.01 (AccumulationTime above 10 s) and 0 are refused, 0.01 is accepted");
 
-  for (const RecoverFile& f : {recoverD(), recoverTnbc()})
+  for (const RecoverFile& f : {recoverIH2(), recoverTnbc()})
   {
     const double b = f.cal.frameFactor(f.t1);
     double c = 0.0;
@@ -821,13 +821,13 @@ static void testRecover()
 
   // a negative C2 (PXD029836 run 1418, timsTOF Pro 2): the inverse the recovery uses is exact there too -- every one of the
   // digitizer's 397,657 bins comes back at frame 1's temperature and at the run's coldest and warmest frame, and half a bin
-  // and +1 ppm are refused. The scan and intensity geometry is D's: the TOF is checked first and does not depend on it.
+  // and +1 ppm are refused. The scan and intensity geometry is IH2's: the TOF is checked first and does not depend on it.
   {
     diaspextract::TdfMzCalibration neg;
     neg.model_type = 1; neg.digitizer_timebase = 0.19999999999999998; neg.digitizer_delay = 25779.8; neg.C0 = 314.1341896383674;
     neg.C1 = 154199.217568937; neg.C2 = -0.0010422663259118895; neg.T1_ref = 25.618823611312585; neg.dC1 = 20.0;
     CHECK(neg.isSupported(), "PXD029836's row: %s", neg.unsupportedReason().c_str());
-    const RecoverFile g = recoverD();
+    const RecoverFile g = recoverIH2();
     double c = 0.0;
     rc::opentimsCorrection(g.accumulation_time, c);
     std::vector<float> asc;
@@ -855,8 +855,8 @@ static void testRecover()
     std::printf("    negative C2 (PXD029836 1418): %ld bins x 3 temperatures recovered, worst round trip %.2g bins\n", n_bins, worst);
   }
 
-  // intensity edge cases, on D's frame geometry
-  const RecoverFile d = recoverD();
+  // intensity edge cases, on IH2's frame geometry
+  const RecoverFile d = recoverIH2();
   const double b = d.cal.frameFactor(d.t1), mz = d.cal.tofToMz(1000.0, b);
   std::vector<float> asc;
   bool falls = false;
@@ -938,7 +938,7 @@ int main()
   testGate();
   testParse();
   if (g_fail == before)
-    std::printf("OK  gate: D 24 boxes (FMA-sensitive 11/15/16 intact), TNBC 009 28 boxes (otofControl); lookup, refusal and parse rules\n");
+    std::printf("OK  gate: IH2 24 boxes (FMA-sensitive 11/15/16 intact), TNBC 009 28 boxes (otofControl); lookup, refusal and parse rules\n");
   before = g_fail;
   testStreak();
   testHalo();
@@ -955,7 +955,7 @@ int main()
   testRecover();
   testCoverage();
   if (g_fail == before)
-    std::printf("OK  point recovery on D and TNBC 009 metadata: every TOF bin and scan, raw counts to 2^24; correction, frame and coverage rules\n");
+    std::printf("OK  point recovery on IH2 and TNBC 009 metadata: every TOF bin and scan, raw counts to 2^24; correction, frame and coverage rules\n");
   if (g_fail) std::fprintf(stderr, "%d check(s) failed\n", g_fail);
   return g_fail ? 1 : 0;
 }

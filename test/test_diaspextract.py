@@ -151,7 +151,7 @@ def synth(path, n_cycles=14, cycle_s=1.4, gap_cycles=(), groups=None, z1_shift=0
 
 
 def mzcal_table(db):
-    """Write dataset D's MzCalibration row (tests/calibration_golden.json) into db; return the golden entry."""
+    """Write IH2's MzCalibration row (tests/calibration_golden.json) into db; return the golden entry."""
     g = json.load(open(os.path.join(os.path.dirname(__file__), "..", "tests", "calibration_golden.json")))[0]
     db.execute("CREATE TABLE MzCalibration (Id INTEGER PRIMARY KEY, ModelType INTEGER, DigitizerTimebase REAL,"
                " DigitizerDelay REAL, C0 REAL, C1 REAL, C2 REAL, T1 REAL, dC1 REAL, dC2 REAL, C3 REAL, C4 REAL)")
@@ -161,9 +161,9 @@ def mzcal_table(db):
 
 
 def synth_tdf(path, n_frames):
-    """A minimal analysis.tdf: the real dataset D MzCalibration row plus a Frames table.
+    """A minimal analysis.tdf: the real IH2 MzCalibration row plus a Frames table.
 
-    The calibration constants are the measured dataset D ones from tests/calibration_golden.json, not
+    The calibration constants are the measured IH2 ones from tests/calibration_golden.json, not
     invented numbers -- an invented row would either fail isSupported() or silently define a
     different mass scale. T1 is given a small per-frame spread so the per-frame factor is actually
     exercised rather than collapsing to the reference.
@@ -181,7 +181,7 @@ def synth_tdf(path, n_frames):
     # GlobalMetadata: the run-level bounds of the flight-time axis. A real tdf always has them and
     # trace:band_edges=acquisition (the default since 2026-09-10) REFUSES a run without them, so a
     # fixture that omits them cannot exercise the integer detector at all. Values are TEXT, as the
-    # vendor writes them; the digitizer sample count is dataset D's.
+    # vendor writes them; the digitizer sample count is IH2's.
     db.execute("CREATE TABLE GlobalMetadata (Key TEXT PRIMARY KEY, Value TEXT)")
     db.executemany("INSERT INTO GlobalMetadata VALUES (?,?)",
                    [("MzAcqRangeLower", "99.990834"), ("MzAcqRangeUpper", "1700.000000"),
@@ -193,8 +193,8 @@ def synth_tdf(path, n_frames):
 def synth_fake_d(d):
     """A Bruker .d holding only its analysis.tdf: no analysis.tdf_bin, so the loader cannot read a single frame.
 
-    The metadata carries everything the tool decides before the load: dataset D's MzCalibration row and the
-    GlobalMetadata bounds (as in synth_tdf), and what dnoise:ms1's setup reads -- dataset D's TimsCalibration row,
+    The metadata carries everything the tool decides before the load: IH2's MzCalibration row and the
+    GlobalMetadata bounds (as in synth_tdf), and what dnoise:ms1's setup reads -- IH2's TimsCalibration row,
     ten Frames (ids 1 and 6 MS1) of 944 scans with integer NumScans/NumPeaks and AccumulationTime 99.958 ms, and 24
     diaPASEF window rows. The shapes are those of the dnoise port's second-review fixtures.
     """

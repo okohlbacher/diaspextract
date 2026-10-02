@@ -4,7 +4,7 @@
 Guards the calibration that produced the 2026-09-01 +6-11% closed-search gain. The 270 golden cases
 were produced by Bruker's own timsdata library and are stored in tests/calibration_golden.json, so this
 test needs NO vendor library, NO cluster and NO raw data:
-  * 60 on three diaPASEF files sharing one calibration vector (dataset D/dataset A/dataset B, 4 frames x 5
+  * 60 on three diaPASEF files sharing one calibration vector (IH2/IH1/IH3, 4 frames x 5
     TOF positions each);
   * 210 on six runs of the public PXD029836 (timsTOF Pro 2, acquisition software 2.0.53), whose C2 is
     NEGATIVE: 1418/1420/1422 share one vector, 1431, 1408 and 1347 carry one each (5 frames x 7 TOF

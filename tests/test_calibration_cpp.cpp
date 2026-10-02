@@ -15,8 +15,8 @@ using Cal = diaspextract::TdfMzCalibration;
 
 static bool has(const std::string& s, const char* part) { return s.find(part) != std::string::npos; }
 
-/// Dataset D's row (the first golden file): valid, so each negative path below changes exactly one thing.
-static Cal validD()
+/// IH2's row (the first golden file): valid, so each negative path below changes exactly one thing.
+static Cal validIH2()
 {
   Cal c;
   c.model_type = 1; c.digitizer_timebase = 0.125; c.digitizer_delay = 25655.375;
@@ -146,7 +146,7 @@ int main(int argc, char** argv)
     ++n_files;
     pos = fstart + 10;
   }
-  // 60 cases on dataset D's vector, 210 on six PXD029836 runs (four negative-C2 vectors)
+  // 60 cases on IH2's vector, 210 on six PXD029836 runs (four negative-C2 vectors)
   if (n_files < 9 || n_cases < 270 || n_negative < 6)
   { std::fprintf(stderr, "only %d golden cases in %d files (%d with C2 < 0) parsed\n", n_cases, n_files, n_negative); return 1; }
   if (worst_noc2 < 5.0)
@@ -156,18 +156,18 @@ int main(int argc, char** argv)
 
   // negative paths must be REJECTED, not approximated -- each one a valid row with exactly one defect, and the
   // reason must name it (a row refused for something else would pass a bare isSupported() check vacuously)
-  if (!validD().isSupported()) { std::fprintf(stderr, "dataset D's row must be supported: %s\n", validD().unsupportedReason().c_str()); return 1; }
+  if (!validIH2().isSupported()) { std::fprintf(stderr, "IH2's row must be supported: %s\n", validIH2().unsupportedReason().c_str()); return 1; }
   {
     struct Neg { const char* what; Cal cal; const char* reason; };
     std::vector<Neg> negs;
-    Cal c = validD(); c.model_type = 2;          negs.push_back({"ModelType 2", c, "ModelType 2"});
-    c = validD(); c.dC2 = 1e-9;                   negs.push_back({"dC2 != 0", c, "dC2 != 0"});
-    c = validD(); c.C3 = 1e-9;                    negs.push_back({"C3 != 0", c, "C3 != 0"});
-    c = validD(); c.C1 = 1e-300;                  negs.push_back({"implausible C1", c, "C1 outside"});
-    c = validD(); c.C1 = 0.0;                     negs.push_back({"C1 <= 0", c, "C1 outside"});
-    c = validD(); c.C0 = std::nan("");            negs.push_back({"NaN C0", c, "NaN"});
-    c = validD(); c.C2 = std::nan("");            negs.push_back({"NaN C2", c, "NaN"});
-    c = validD(); c.digitizer_timebase = 0.0;     negs.push_back({"timebase 0", c, "DigitizerTimebase"});
+    Cal c = validIH2(); c.model_type = 2;          negs.push_back({"ModelType 2", c, "ModelType 2"});
+    c = validIH2(); c.dC2 = 1e-9;                   negs.push_back({"dC2 != 0", c, "dC2 != 0"});
+    c = validIH2(); c.C3 = 1e-9;                    negs.push_back({"C3 != 0", c, "C3 != 0"});
+    c = validIH2(); c.C1 = 1e-300;                  negs.push_back({"implausible C1", c, "C1 outside"});
+    c = validIH2(); c.C1 = 0.0;                     negs.push_back({"C1 <= 0", c, "C1 outside"});
+    c = validIH2(); c.C0 = std::nan("");            negs.push_back({"NaN C0", c, "NaN"});
+    c = validIH2(); c.C2 = std::nan("");            negs.push_back({"NaN C2", c, "NaN"});
+    c = validIH2(); c.digitizer_timebase = 0.0;     negs.push_back({"timebase 0", c, "DigitizerTimebase"});
     for (const Neg& n : negs)
     {
       const std::string why = n.cal.unsupportedReason();
@@ -239,7 +239,7 @@ int main(int argc, char** argv)
     }
     if (!(worst_rt <= 1e-6)) { std::fprintf(stderr, "negative C2 round trip: %.3g bins\n", worst_rt); return 1; }
     // a stored -0.0 is zero: accepted, and the same conversion bit for bit
-    Cal nz = validD(), z = validD(); nz.C2 = -0.0; z.C2 = 0.0;
+    Cal nz = validIH2(), z = validIH2(); nz.C2 = -0.0; z.C2 = 0.0;
     if (!nz.isSupported()) { std::fprintf(stderr, "C2 = -0.0 must be ACCEPTED: %s\n", nz.unsupportedReason().c_str()); return 1; }
     for (double tof : {0.0, 1000.0, 300000.0, 634072.0})
       if (nz.tofToMz(tof, nz.frameFactor(25.7)) != z.tofToMz(tof, z.frameFactor(25.7))) { std::fprintf(stderr, "C2 = -0.0 differs from 0.0\n"); return 1; }
@@ -251,8 +251,8 @@ int main(int argc, char** argv)
       if (!has(px.frameReason(t1), "Frames.T1")) { std::fprintf(stderr, "T1 %g must be refused for a negative C2\n", t1); return 1; }
     for (double t1 : {1e9, -1e9, std::nan("")})
     {
-      Cal zero = validD(); zero.C2 = 0.0;
-      if (!validD().frameReason(t1).empty() || !zero.frameReason(t1).empty()) { std::fprintf(stderr, "C2 >= 0 must not refuse a frame\n"); return 1; }
+      Cal zero = validIH2(); zero.C2 = 0.0;
+      if (!validIH2().frameReason(t1).empty() || !zero.frameReason(t1).empty()) { std::fprintf(stderr, "C2 >= 0 must not refuse a frame\n"); return 1; }
     }
 
     // a negative C2 whose root stops existing INSIDE the domain is refused, and the reason names the TOF index where the
@@ -287,7 +287,7 @@ int main(int argc, char** argv)
     if (minus_inf.isSupported()) { std::fprintf(stderr, "C2 = -inf must be rejected\n"); return 1; }
     // a temperature coefficient that takes the C1 factor through zero within the span cannot be checked
     Cal hot = px; hot.dC1 = 1000.0;
-    Cal hot_pos = validD(); hot_pos.dC1 = 1000.0;
+    Cal hot_pos = validIH2(); hot_pos.dC1 = 1000.0;
     if (!has(hot.unsupportedReason(), "dC1") || !hot_pos.isSupported())
     { std::fprintf(stderr, "dC1 1000: refused for C2 < 0 ('%s'), accepted for C2 > 0 ('%s')\n", hot.unsupportedReason().c_str(), hot_pos.unsupportedReason().c_str()); return 1; }
     std::printf("OK  negative C2: PXD029836 accepted (corner disc/b^2 %.4f, round trip %.1e bins up to TOF index 1e8); C2 -0.1 refused at TOF index %s, "

@@ -189,7 +189,7 @@ The fold shipped as `-assembly:twin_im_tolerance` (default 0.005), run per tile 
 same-MS1-frame RT clause -- the relation measured here, since every linked pair shared its frame. On run 1418 it
 equals `bench/twin_merge.py --im=0.005` for 802,099 of 802,099 spectra and every fragment; fold off equals the v1.3.1
 spectra; entrapment FDR is 0.98 % [0.87, 1.09] with the fold at 0.005 against 0.98 % without (+0.01 points unrounded). On two
-further runs (dataset D, see docs/BASELINE.md, and run 009 of PXD047793) the fold off reproduces the 1.3 output
+further runs (IH2, see docs/BASELINE.md, and run 009 of PXD047793) the fold off reproduces the 1.3 output
 digests exactly, and the fold on gives the same digest at every tile grouping and thread count tried.
 
 ## 8. Proposed on 2026-09-20 (superseded by what 1.4.0 shipped)

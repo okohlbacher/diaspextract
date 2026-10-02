@@ -1,7 +1,7 @@
 # Public HeLa (PXD017703), 27 acquisitions
 
 Measured 2026-09-05 on the build published that day at 15:42 (v0.3.0 + calibration-row / C2==0 / C4 /
-WindowGroup fixes, commits 07609d6..08a84eb; dataset D digest `ca609dc4...`, the digest the memory
+WindowGroup fixes, commits 07609d6..08a84eb; IH2 digest `ca609dc4...`, the digest the memory
 work later reproduced -- see docs/BASELINE.md). Shipped defaults of that build:
 `charge:min_charge=2`, `perf:ms1_trace_bands=12`, 72-byte trace record, no `perf:malloc_trim`;
 `-threads 100`, one node per chain. Table committed a6c9003, 2026-09-05 18:30.

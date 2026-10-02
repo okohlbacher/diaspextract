@@ -37,7 +37,7 @@ failure it was built to detect.
 
 ### Pre-registered falsification — written before the first run
 
-Closed ratio `split_count/base` on dataset B = 8,411/5,817 = **1.446**.
+Closed ratio `split_count/base` on IH3 = 8,411/5,817 = **1.446**.
 
 | modified-peptide ratio | conclusion |
 |---|---|

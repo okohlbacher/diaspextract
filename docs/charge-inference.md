@@ -130,7 +130,7 @@ What still stands, because it is a direct observation rather than a null compari
 
 Hypothesis was that diaPASEF's mobility dimension constrains charge — the acquisition
 tiles themselves track the charge-2 line, so charge ought to be separable in (m/z, 1/K0).
-Tested against DIA-NN dataset A ground truth (43,499 precursors with m/z, IM **and** true charge):
+Tested against DIA-NN IH1 ground truth (43,499 precursors with m/z, IM **and** true charge):
 
 | m/z 600–700 | z=2 | z=3 | z=4 |
 |---|---|---|---|
@@ -190,7 +190,7 @@ except that the comparison tool's name is written as `the reference tool`.
 
 ## Charge inference: the two defaults are coupled, not independent
 
-Measured against a DIA-NN dataset B reference (`charge agreement` = our charge vs truth on matched
+Measured against a DIA-NN IH3 reference (`charge agreement` = our charge vs truth on matched
 spectra; always answering z=2 would score **69.6%**):
 
 | arm | charge agreement | `4->2` errors |

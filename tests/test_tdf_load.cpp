@@ -1,6 +1,6 @@
 // Tests of src/TdfLoad.h: every analysis.tdf read the tool makes is whole or refused, and each refusal names what it
 // refuses. Needs SQLite, not OpenMS: CMake builds it only where it finds SQLite3, with a shim include directory that maps
-// <OpenMS/FORMAT/TdfMzCalibration.h> onto src/TdfMzCalibration.h. The fixtures are synthetic tdfs shaped like dataset D's,
+// <OpenMS/FORMAT/TdfMzCalibration.h> onto src/TdfMzCalibration.h. The fixtures are synthetic tdfs shaped like IH2's,
 // written through the sqlite3 C API into a temporary directory; corrupted ones get 12 bytes of 0xff over a page header.
 #include "TdfLoad.h"
 #include <chrono>
@@ -28,7 +28,7 @@ static constexpr long kPageSize = 4096;
   std::exit(2);
 }
 
-/// D's metadata, MzCalibration and TimsCalibration rows; @p n_frames frames (every fifth MS1, 944 scans, 1000 points,
+/// IH2's metadata, MzCalibration and TimsCalibration rows; @p n_frames frames (every fifth MS1, 944 scans, 1000 points,
 /// AccumulationTime 99.958); @p n_windows window rows in a table named @p windows (nullptr: no table). Frames columns carry
 /// no type, so a test can store TEXT or REAL where Bruker stores INTEGER.
 static std::string dShaped(int n_frames = 10, int n_windows = 24, const char* windows = "DiaFrameMsMsWindows")

@@ -1,6 +1,6 @@
 {
   "_comment": [
-    "CLOSED search, max_fragment_charge=1. This is the config behind the +1.1% dataset D / +0.35% small-file",
+    "CLOSED search, max_fragment_charge=1. This is the config behind the +1.1% IH2 / +0.35% small-file",
     "result, and it was previously measured from a TEMP config on the cluster and never committed --",
     "so the win was real but not reproducible by anyone reading this repo.",
     "",

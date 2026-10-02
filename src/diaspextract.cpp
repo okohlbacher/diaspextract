@@ -1353,7 +1353,7 @@ namespace
   };
 
   /// The MS1-frame -> window-frame map over ALL window frames (every frame carries fragment
-  /// support: G == F, measured on 28/28 TNBC and 24/24 D windows), ties to the LATER frame.
+  /// support: G == F, measured on 28/28 TNBC and 24/24 IH2 windows), ties to the LATER frame.
   inline vector<int> nearestLocal(const vector<double>& win_rt, const vector<double>& ms1_rt, double delta_rt)
   {
     vector<int> nl(ms1_rt.size(), -1);
@@ -1984,7 +1984,7 @@ namespace
 
   /// MSSpectrum::select right-sizes the peaks but reserves every data array at its OLD size (OpenMS MSSpectrum.cpp:49,
   /// 71, 93): without this a selected spectrum keeps its Ion Mobility array's capacity for every peak it lost, 4 B each
-  /// (+2.3 GB resident on dataset D's pruned MS1 map). [ms1-prune] [dnoise]
+  /// (+2.3 GB resident on IH2's pruned MS1 map). [ms1-prune] [dnoise]
   inline void shrinkDataArrays(MSSpectrum& s)
   {
     for (auto& a : s.getFloatDataArrays()) a.shrink_to_fit();
@@ -2600,7 +2600,7 @@ namespace
   private:
     /// [ledger] DIASPEXTRACT_LOAD_TRIM=N: malloc_trim(0) every Nth flush (0 = never). The load's retention
     /// sits in per-thread arenas, which only an explicit malloc_trim reaches (MALLOC_TRIM_THRESHOLD_ does
-    /// not). Priced in docs/BASELINE.md, "The composition on D".
+    /// not). Priced in docs/BASELINE.md, "The composition on IH2".
     static int loadTrimEvery_() { static const int v = []{ const char* e = std::getenv("DIASPEXTRACT_LOAD_TRIM");
                                                            return e ? std::atoi(e) : 0; }(); return v; }
     static void loadTrim_()
@@ -2620,7 +2620,7 @@ namespace
     static size_t kBatch_() { static const size_t v = []{ const char* e = std::getenv("DIASPEXTRACT_PICK_BATCH");
       const long x = e ? std::atol(e) : 0; return x > 0 ? (size_t)x : (size_t)256; }(); return v; }
     /// [batch] DIASPEXTRACT_PICK_BATCH_MS1: the MS1-only flush batch (unset = kBatch_), so shrinking it for memory does not
-    /// re-batch the MS2 tile reads (a smaller MS2 batch only costs CPU). Output-invariant; priced in docs/BASELINE.md "The composition on D".
+    /// re-batch the MS2 tile reads (a smaller MS2 batch only costs CPU). Output-invariant; priced in docs/BASELINE.md "The composition on IH2".
     static size_t kBatchMS1_() { static const size_t v = []{ const char* e = std::getenv("DIASPEXTRACT_PICK_BATCH_MS1");
       const long x = e ? std::atol(e) : 0; return x > 0 ? (size_t)x : (size_t)0; }();
       return v ? v : kBatch_(); }
@@ -3158,9 +3158,9 @@ protected:
                        "detection on the tile's frames only, scoring of the precursors the tile owns (an MS1 frame time in [T_k - gate:delta_rt, T_{k+1} - gate:delta_rt)) "
                        "with the previous tile's boundary fragments carried over, the tile's spectra sorted and written before the next tile starts. "
                        "Output is digest-identical for any tile count (the cell grid); memory is one tile's. At the defaults TNBC 009 peaks at 99.70 GB in one "
-                       "tile and 21.07 GB in 13 tiles with a trim between tiles (wall 9:42 -> 9:57, same node), dataset D at 37.44 -> 21.99 GB in 3 tiles "
+                       "tile and 21.07 GB in 13 tiles with a trim between tiles (wall 9:42 -> 9:57, same node), IH2 at 37.44 -> 21.99 GB in 3 tiles "
                        "(3:15 -> 3:47). 0 = all cells in one tile; mzPeak output always runs as one tile (it is written in one piece).", false, true);
-    registerStringOption_("trace:split_scan_time", "<mode>", "frame", "Scan time behind the valley splitter's window (chrom_fwhm / scan time). 'frame': the run's MS1 cycle time, one value for every trace. 'trace': each trace's own average cycle time (OpenMS's behaviour; the default before 2026-09-09, Sage -5.7% on dataset D): docs/BASELINE.md '2026-09-09: the valley splitter's scan time'.", false, true);
+    registerStringOption_("trace:split_scan_time", "<mode>", "frame", "Scan time behind the valley splitter's window (chrom_fwhm / scan time). 'frame': the run's MS1 cycle time, one value for every trace. 'trace': each trace's own average cycle time (OpenMS's behaviour; the default before 2026-09-09, Sage -5.7% on IH2): docs/BASELINE.md '2026-09-09: the valley splitter's scan time'.", false, true);
     setValidStrings_("trace:split_scan_time", {"frame", "trace"});
     registerStringOption_("trace:detector", "<mode>", "integer", "Mass-trace detector. 'integer' works on the instrument's flight-time bins "
                           "and needs the vendor calibration (without it: 'openms', logged). 'openms' runs OpenMS MassTraceDetection. Different "
@@ -3174,7 +3174,7 @@ protected:
     registerDoubleOption_("trace:ms1_split_valleys", "<chrom_fwhm>", 7.0, "Split MS1 mass traces at chromatographic valleys (ElutionPeakDetection), so two peptides eluting apart within the m/z tolerance do not merge into one precursor with the wrong monoisotope and charge. Value = chrom_fwhm (seconds); 0 = off.", false);
     registerDoubleOption_("trace:max_span_sec", "<sec>", 120.0, "Trim each mass trace (precursor and fragment) to at most this many seconds "
                           "around its apex, after detection and valley splitting. 0 = no cap. CHANGES OUTPUT (peptides within 0.08% from 0 "
-                          "to 240 on dataset D: docs/BASELINE.md '0c. trace:max_span_sec sweep').", false);
+                          "to 240 on IH2: docs/BASELINE.md '0c. trace:max_span_sec sweep').", false);
     setMinFloat_("trace:max_span_sec", 0.0);
 
     // NB: "threads" is reserved by TOPPBase (the standard -threads option), so this lives under "perf".
@@ -3187,7 +3187,7 @@ protected:
                           "IT IS NOT FREE: the loop then faults those pages back in cold (minor faults +26%), which "
                           "costs about 8.5% of wall time -- so this trades ~30% of peak memory for ~8% of runtime, "
                           "measured interleaved on one node. Between tiles (after tile k is written, before tile k+1 is read) it "
-                          "takes about 4 GB off TNBC 009 and 0.5 GB off dataset D at the defaults. On by default because memory is "
+                          "takes about 4 GB off TNBC 009 and 0.5 GB off IH2 at the defaults. On by default because memory is "
                           "what bounds this tool (it decides how many isolation windows fit at once, and whether the run fits the "
                           "machine at all). Turn it off when time is the binding constraint. The spectra are digest-identical "
                           "either way.", false);
@@ -3272,10 +3272,10 @@ protected:
     registerIntOption_("gate:shrink_min_points", "<n>", 1, "gate:shrinkage fisher: fewest overlapping frames to compute a correlation; at 1 a one-frame overlap is scored almost at the prior (the data get weight 1/(1 + 1/gate:shrink_prior_sd^2)), so pair it with gate:adaptive faint.", false, true);
     setMinInt_("gate:shrink_min_points", 1);
     registerFlag_("gate:variance_support", "Compute the Pearson co-elution score over the union support of the two profiles instead of the full RT grid (gate:coelution pearson only; the scale changes, retune gate:min_correlation). Falsified 2026-07-27, kept for reproducibility: docs/BASELINE.md 'What is already falsified'.");
-    registerIntOption_("perf:ms1_trace_bands", "<n>", 48, "Split MS1 mass-trace detection into N m/z bands traced concurrently (the halo partition of perf:trace_bands). Not exact: the band count changes the spectrum list slightly. Default 48 since 2026-09-07, gated on datasets D and A: docs/BASELINE.md 'ms1_trace_bands=48 adopted'. 1 = off; 0 is read as 1.", false);
+    registerIntOption_("perf:ms1_trace_bands", "<n>", 48, "Split MS1 mass-trace detection into N m/z bands traced concurrently (the halo partition of perf:trace_bands). Not exact: the band count changes the spectrum list slightly. Default 48 since 2026-09-07, gated on IH2 and IH1: docs/BASELINE.md 'ms1_trace_bands=48 adopted'. 1 = off; 0 is read as 1.", false);
     registerStringOption_("perf:ms1_prune", "<true/false>", "true",
                           "Drop picked MS1 centroids at or below trace:noise_threshold_int as they load, keeping the witnesses that leave every MS1 "
-                          "band spectrum as it was. Digest-identical spectra, smaller MS1 map (peak at one cell per tile, dnoise off: dataset D 31.99 -> "
+                          "band spectrum as it was. Digest-identical spectra, smaller MS1 map (peak at one cell per tile, dnoise off: IH2 31.99 -> "
                           "25.90 GB, TNBC 009 69.11 -> 31.97 GB). false = keep every centroid. docs/BASELINE.md 'MS1 prune, output-identical'.", false);
     setValidStrings_("perf:ms1_prune", {"true", "false"});
     registerIntOption_("perf:trace_bands", "<n>", 12, "Split each window's fragment m/z range into N bands traced concurrently, lifting parallelism past the window count. The band count changes the output: docs/BASELINE.md 'perf:trace_bands 48: FAILS the gate'. 1 = off. 0 = auto (windows x bands >= threads), which the integer detector refuses at a positive tile:rt_sec (the default) and on the .d streaming source.", false);
@@ -3292,7 +3292,7 @@ protected:
     registerTOPPSubsection_("charge", "Isotope / charge-state inference");
     registerIntOption_("charge:min_charge", "<n>", 1, "Minimum precursor charge to emit. Default 1 since 2026-09-08: identified z=1 peptides on tryptic data are genuine 1+ ions (mobility on the 1+ trend line; 14-20% of Sage peptides on a 2-hour acquisition), but their stratum carries a higher entrapment FDR than a pooled 1% cut implies, so control FDR per charge downstream. "
                        "-charge:min_charge 2 -charge:im_charge_veto false restores the old charge handling (the veto runs first). docs/BASELINE.md 'charge:min_charge 1 + the ion-mobility charge veto'.", false);
-    registerStringOption_("charge:scoring", "<mode>", "count", "Charge/monoisotope inference: 'count', the partner-count walk (ties favour the lower charge); 'envelope', averagine cosine x isotope co-elution (the default until 2026-07-21; 49.7% vs 71.8% charge agreement with a DIA-NN reference on dataset B). docs/charge-inference.md.", false);
+    registerStringOption_("charge:scoring", "<mode>", "count", "Charge/monoisotope inference: 'count', the partner-count walk (ties favour the lower charge); 'envelope', averagine cosine x isotope co-elution (the default until 2026-07-21; 49.7% vs 71.8% charge agreement with a DIA-NN reference on IH3). docs/charge-inference.md.", false);
     setValidStrings_("charge:scoring", {"envelope", "count"});
     registerStringOption_("charge:im_charge_veto", "<true/false>", "true", "Correct charge halving by ion mobility: fit the run's 2+ and 3+ 1/K0 trend lines from its confident calls (>= 3 isotopes); a z=1 call within charge:im_veto_band sigma of the 2+ line (and nearer it than the 3+ line) is re-called 2+, "
                           "one on the 3+ line loses its charge and becomes a guessed precursor (dropped by assembly:require_isotope_support). Genuine 1+ ions sit on their own line and stay. docs/BASELINE.md 'The veto's 3+ arm dropped'.", false);
@@ -3300,7 +3300,7 @@ protected:
     registerDoubleOption_("charge:im_veto_band", "<sigma>", 2.5, "Half-width of the 2+/3+ mobility band, in MAD-sigma of "
                           "the confident calls' residuals (measured residual sd ~0.037 1/K0 against a 1+/2+ separation of ~0.29).", false);
     registerStringOption_("assembly:require_isotope_support", "<true/false>", "true",
-                          "Drop precursor hypotheses with no isotope partner (the guessed singletons). false keeps them: on dataset D (2026-09-04) "
+                          "Drop precursor hypotheses with no isotope partner (the guessed singletons). false keeps them: on IH2 (2026-09-04) "
                           "that doubled the spectra, ran 6.9x slower and identified fewer peptides on both engines. docs/BASELINE.md (defaults audit, top of file).", false);
     setValidStrings_("assembly:require_isotope_support", {"true", "false"});
     registerDoubleOption_("charge:mono_averagine_guard", "<slack>", 0.0, "Reject a leftward isotope step of the charge:scoring=count walk when the lighter peak is below slack x heavier peak / lambda, averagine's loosest ratio (lambda = 0.000594 x neutral mass; 1.0 = exactly that bound, smaller values add slack). 0 = off. Falsified: it trades the -1.003 Da open-search artefact for a +1.003 Da one, docs/BASELINE.md 'Monoisotope -1.003 Da open-search artefact'.", false);
@@ -3335,7 +3335,7 @@ protected:
                           "Denoise every MS1 frame on its raw points before picking: a port of dnoise v0.1.0's default MS1 path, bit-identical up to AccumulationTime 100 ms "
                           "(Garrett, Diedrich & Yates III, bioRxiv 2026.08.27.747603; MIT, LICENSES/dnoise-MIT.txt). Bruker .d only: other inputs "
                           "pass through, logged and stamped spx:dnoise_ms1. Above 100 ms several raw counts share one intensity and the nearest is taken. A run whose raw points do not recover is refused, as is "
-                          "trace:native_ms1_neighbors > 0. CHANGES OUTPUT (dataset D -4.3% Sage peptides, TNBC 009 +1.5%) and lowers peak memory "
+                          "trace:native_ms1_neighbors > 0. CHANGES OUTPUT (IH2 -4.3% Sage peptides, TNBC 009 +1.5%) and lowers peak memory "
                           "13-21% at one cell per tile: CHANGELOG, 2026-09-10 'MS1 denoising is on by default'. false = the output before 2026-09-10.", false);
     setValidStrings_("dnoise:ms1", {"true", "false"});
     registerIntOption_("dnoise:mz_half_width", "<bins>", 3, "Streak filter: TOF bins on each side of a point's own bin summed per scan (dnoise --mz-half-width).", false, true);
@@ -6437,7 +6437,7 @@ protected:
     n_bands = std::max(1, n_bands);
     // [master/worker] n_conc only caps windows IN FLIGHT (perf:max_concurrent_windows, 0 = uncapped); the
     // free-RAM admission gate is the real bound. Uncapped measured 7:04 vs 7:15 capped at the same 157 GB
-    // peak on dataset D (context: docs/BASELINE.md, "WINDOW-LOOP PERFORMANCE LINE (2026-09-03, evening)").
+    // peak on IH2 (context: docs/BASELINE.md, "WINDOW-LOOP PERFORMANCE LINE (2026-09-03, evening)").
     int n_conc = (int)n_win;
     if (max_conc > 0) n_conc = std::min(n_conc, max_conc);
     if (n_conc < 1) n_conc = 1;
@@ -6533,7 +6533,7 @@ protected:
     // fragments plus those CARRIED from the previous tile (rtOf >= lo - 2 tile_drt, re-carried
     // transitively). One tile = today's loop, statement for statement. tile_drt is the WIDEST RT
     // window any precursor's gate may use: gate:faint_delta_rt under gate:adaptive (a faint precursor
-    // 3-6 s from a cut line otherwise sees different candidates per tile grid -- gate D 2026-09-26).
+    // 3-6 s from a cut line otherwise sees different candidates per tile grid -- gate IH2 2026-09-26).
     const double tile_drt = adaptive_ ? std::max(delta_rt, faint_drt_) : delta_rt;
     struct Tile { double lo, hi; bool last; };
     vector<Tile> tiles;
@@ -7407,7 +7407,7 @@ protected:
 #ifdef __GLIBC__
     // [trim] Between tiles, under perf:malloc_trim: nothing else returns the allocator's free pages here -- the in-loop
     // trim above runs only when there is one tile -- so a tiled loop's RSS would ratchet toward the arena pass 1 sized.
-    // After tile k is written, before tile k+1 is read; about 4 GB off TNBC 009 and 0.5 GB off dataset D. Output-identical.
+    // After tile k is written, before tile k+1 is read; about 4 GB off TNBC 009 and 0.5 GB off IH2. Output-identical.
     // [pipe] Pipelined, the later tiles in flight keep their pages: the trim returns what tile k left behind.
     if (trim_on && tk + 1 < tiles.size())
     { const double _tt = phase_clock_(); const long _r0 = rss_mb_();

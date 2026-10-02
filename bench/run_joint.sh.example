@@ -108,12 +108,12 @@ run_cell () {
 }
 
 mkdir -p $B/joint
-run_cell reference dataset_A "$DTP/<acquisition-A>"
-run_cell reference dataset_B "$DTP/<acquisition-B>"
-run_cell reference dataset_D "$DTP/<acquisition-D>"
-run_cell diaspextract dataset_A "$B/out/m_<dataset-A>_treat/pseudo.mzML"
-run_cell diaspextract dataset_B "$B/out/open_split_count/pseudo.mzML"
-run_cell diaspextract dataset_D "$B/out/m_<dataset-D>_treat/pseudo.mzML"
+run_cell reference ih1 "$DTP/<acquisition-ih1>"
+run_cell reference ih3 "$DTP/<acquisition-ih3>"
+run_cell reference ih2 "$DTP/<acquisition-ih2>"
+run_cell diaspextract ih1 "$B/out/m_<ih1>_treat/pseudo.mzML"
+run_cell diaspextract ih3 "$B/out/open_split_count/pseudo.mzML"
+run_cell diaspextract ih2 "$B/out/m_<ih2>_treat/pseudo.mzML"
 
 echo "--- TABLE ---" >> $L
 python3 $B/joint_bench.py collate $J >> $L 2>&1

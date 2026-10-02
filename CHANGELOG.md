@@ -20,7 +20,7 @@ every input are identical to those of 1.6.0 (the mzML header records the new ver
 - **Other README figures from unpublished data** on the detectors, memory and wall time are now stated without
   numbers: the integer detector's memory saving and its overlap with `openms`, and the costs of `-perf:malloc_trim`
   and `-perf:stream_load false`.
-- `docs/BASELINE.md` opens with a note that its dataset A–F figures are historical in-house measurements.
+- `docs/BASELINE.md` opens with a note that its IH1–IH6 figures are historical in-house measurements.
 
 ## v1.6.0 — 2026-10-02
 
@@ -278,7 +278,7 @@ tolerance). Each default can be set back.
 
 ## v1.4.1 — 2026-09-23
 
-**Why 1.4.1.** Fixes to the interface and to error handling. The spectra are unchanged: the dataset D gate reproduces
+**Why 1.4.1.** Fixes to the interface and to error handling. The spectra are unchanged: the IH2 gate reproduces
 1.4.0's digests with the twin fold on and off, at every tile grouping and thread count it tries.
 
 - **`--help` and CTD export point at this repository.** The "Full documentation" line of `--help` named an OpenMS
@@ -369,7 +369,7 @@ default `-dnoise:ms1 true`, the tool stopped 0.03 s after starting (exit 6) with
 patched loader refused the same file. 1.3.1 accepts a negative `C2` inside a checked domain, which is the
 only change. It affects timsTOF Pro 2 calibrations with a negative `C2`. Options and defaults are
 unchanged, and so are the spectra of every file the tool accepted before: the four pins reproduce
-(dataset D `e43672a0`, run 009 `3aafd0b5` at the defaults; `8c1b047f` and `bff54a1f` with
+(IH2 `e43672a0`, run 009 `3aafd0b5` at the defaults; `8c1b047f` and `bff54a1f` with
 `-dnoise:ms1 false`).
 
 ### Fixed
@@ -420,7 +420,7 @@ unchanged, and so are the spectra of every file the tool accepted before: the fo
 - **Every refusal test now has a valid row behind it.** In the C++ golden test, the "must be rejected" cases
   for `ModelType`, `dC2`, `C3` and `C2 < 0` started from a row whose `C1` of 1.0 was already outside the
   plausible range. They would therefore have passed even if their own check were gone. Each case now
-  changes one field of dataset D's valid row and asserts the refusal names that field.
+  changes one field of IH2's valid row and asserts the refusal names that field.
 
 ### Tests
 
@@ -462,7 +462,7 @@ unchanged, and so are the spectra of every file the tool accepted before: the fo
 **DIAspeXtract** now (executable `diaspextract`), dropping the "-or" of 1.2.x's DIAspeXtractor; the
 spectra do not change. The name reaches only the mzML header (the software entry and the
 data-processing step that references it) and the ini section, which the spectrum-list digest
-excludes, so this release reproduces every 1.2.x pin: dataset D `e43672a0`, run 009 `3aafd0b5` at the
+excludes, so this release reproduces every 1.2.x pin: IH2 `e43672a0`, run 009 `3aafd0b5` at the
 defaults, `8c1b047f` and `bff54a1f` with `-dnoise:ms1 false`. A binary and repository rename breaks
 every script that called `diaspextractor` and every `DIASPEXTRACTOR_*` export, so it ships as its own
 minor release with a migration section rather than folded into the next change to the spectra. Apart
@@ -544,10 +544,10 @@ corrections that leave the spectra alone -- and where an entry says *digest-iden
 measured property of the shipped digests, not a design intent.
 
 **Where it stands.** At the shipped defaults, 100 threads, each pair back to back on one node: a
-30-minute in-house acquisition (dataset D) runs in **3:47 at 21.99 GB peak RSS** and a 2-hour public
+30-minute in-house acquisition (IH2) runs in **3:47 at 21.99 GB peak RSS** and a 2-hour public
 diaPASEF acquisition (PXD047793, run 009) in **9:57 at 21.07 GB** -- against 37.44 GB and 99.70 GB for
 the identical output at one tile (`-tile:cells_per_tile 0`) on the same build, and against 57 GB / 2:54
-and 187 GB / 11:18 before this cycle's memory work. The reference digests are `e43672a0` (dataset D) and
+and 187 GB / 11:18 before this cycle's memory work. The reference digests are `e43672a0` (IH2) and
 `3aafd0b5` (run 009) at the defaults, `8c1b047f` and `bff54a1f` with `-dnoise:ms1 false`. The record is
 docs/BASELINE.md (sections dated 2026-09-08 to 2026-09-11).
 
@@ -605,46 +605,46 @@ docs/BASELINE.md (sections dated 2026-09-08 to 2026-09-11).
   Yates III, bioRxiv 2026.08.27.747603; MIT, see NOTICE and LICENSES/dnoise-MIT.txt. Per MS1 frame it
   runs an ion-mobility streak filter (two passes), a halo filter, and the diaPASEF isolation-window
   gate.
-  - It keeps 12.7% of dataset D's MS1 points and 20.5% of run 009's.
+  - It keeps 12.7% of IH2's MS1 points and 20.5% of run 009's.
   - The output is digest-identical to running the tool on dnoise's own filtered `.d`, so the searches
-    recorded for that route apply: **dataset D Sage -4.3%, MSFragger -4.0% peptides; run 009 +1.5% and
-    -0.5%**; entrapment FDR inside the control's interval on D, just below it on run 009.
-  - New reference digests: **D `e43672a0`, run 009 `3aafd0b5`** (with `-dnoise:ms1 false`, `8c1b047f`
+    recorded for that route apply: **IH2 Sage -4.3%, MSFragger -4.0% peptides; run 009 +1.5% and
+    -0.5%**; entrapment FDR inside the control's interval on IH2, just below it on run 009.
+  - New reference digests: **IH2 `e43672a0`, run 009 `3aafd0b5`** (with `-dnoise:ms1 false`, `8c1b047f`
     and `bff54a1f`).
-  - Memory at one cell per tile, against the prune-on default: D peak 25.90 -> 22.48 GB (-13%),
-    run 009 31.97 -> 25.17 GB (-21%); wall D 4:13 -> 3:41 (-13%); on run 009 the wall change depended
+  - Memory at one cell per tile, against the prune-on default: IH2 peak 25.90 -> 22.48 GB (-13%),
+    run 009 31.97 -> 25.17 GB (-21%); wall IH2 4:13 -> 3:41 (-13%); on run 009 the wall change depended
     on the node and the run (-15% to +3% across three shared-node pairs).
   - Bruker `.d` input only. Other inputs are not filtered, and the header records it (`spx:dnoise_ms1`).
   - It refuses in milliseconds, naming the escape, when `trace:native_ms1_neighbors` > 0, or when a
     point's flight-time index, scan index or raw intensity cannot be recovered exactly from the
     loader's values.
   - **`-dnoise:ms1 false` restores the previous output.** Defaulting it on was the user's decision,
-    taken with the dataset D result in hand: it costs peptides on D and gains a little on run 009, and
+    taken with the IH2 result in hand: it costs peptides on IH2 and gains a little on run 009, and
     it is what makes the memory figures above reachable.
 - **`tile:cells_per_tile` defaults to 1: one 600-s retention-time cell per tile** (it arrived in this
   cycle at 0, one tile). The spectra are digest-identical for any tile count, so only memory and wall
   move. Final build, 100 threads, dnoise and the prune on, each pair back to back on one node:
   - run 009: **99.70 GB at one tile, 21.07 GB at 13 tiles** with the trim between tiles; wall
     9:42 -> 9:57.
-  - dataset D: **37.44 GB at one tile, 21.99 GB at 3 tiles** with the trim between tiles; wall
+  - IH2: **37.44 GB at one tile, 21.99 GB at 3 tiles** with the trim between tiles; wall
     3:15 -> 3:47.
   - `-tile:cells_per_tile 0` restores one tile. mzPeak output is written in one piece, so a run that
     writes mzPeak runs all its cells as one tile (the whole run's memory) and logs a warning. The
     output format is resolved before the load; an mzPeak run with more than one tile used to be refused
     only after the load and the MS1 tracing.
 - **`perf:malloc_trim` (on) also trims between tiles**, after tile k is written and before tile k+1 is
-  read. It takes about 4 GB off run 009 and 0.5 GB off D at the defaults. The `[trim] tile k/n` log
+  read. It takes about 4 GB off run 009 and 0.5 GB off IH2 at the defaults. The `[trim] tile k/n` log
   line is unchanged.
 - **Not adopted: an eager glibc trim threshold** (`M_TRIM_THRESHOLD` 64 MiB with `M_TOP_PAD` 0). On
   run 009 it went only 0.3 GB below the between-tile trim (20.73 against 21.07 GB) and nearly tripled
-  the MS1 load (34.3 -> 96.3 s); on D it cost 11% wall (3:41 -> 4:06).
+  the MS1 load (34.3 -> 96.3 s); on IH2 it cost 11% wall (3:41 -> 4:06).
 - **The integer detector's band partition comes from the acquisition's metadata**
   (`trace:band_edges=acquisition`, the default). Each isolation window is traced in flight-time bands;
   their edges used to be the window's resident peaks' extremes -- data a reader holding only a tile's
   frames cannot see. They are now `[0, DigitizerNumSamples - 1]` (the digitizer's last bin through the
   store's quantum, or the acquisition's upper m/z through the calibration, whichever is larger):
   run-level constants from `analysis.tdf`'s GlobalMetadata. The interior edges move by a bin or two,
-  which re-assigns the seeds nearest each edge; measured against `slab` on the same build: dataset D
+  which re-assigns the seeds nearest each edge; measured against `slab` on the same build: IH2
   Sage 13,491 vs 13,490 (13,488 common), MSFragger 12,918 both, entrapment FDR 1.30% both; run 009 Sage
   29,067 vs 29,066, MSFragger 27,949 vs 27,952, entrapment 1.09% vs 1.08%. `-trace:band_edges slab`
   reproduces the earlier output. With the integer detector, `acquisition` refuses an input without a
@@ -654,9 +654,9 @@ docs/BASELINE.md (sections dated 2026-09-08 to 2026-09-11).
   ElutionPeakDetection derives its Savitzky-Golay window from each mass trace's own average cycle time,
   and the tool hands it a trace's real points only, so a trace with gaps was smoothed with a narrower
   window than its neighbours and split more. With one run-wide window the traces are fewer and longer
-  -- 37% fewer MS1 traces and 28% fewer spectra on D, 16% fewer spectra on run 009 -- and identify MORE
+  -- 37% fewer MS1 traces and 28% fewer spectra on IH2, 16% fewer spectra on run 009 -- and identify MORE
   peptides: Sage 12,625 -> 13,388 (+6.0%) and 27,859 -> 28,845 (+3.5%), MSFragger 12,236 -> 12,732
-  (+4.1%) on D, with the entrapment FDR at nominal 1% moving from 1.35% to 1.16% there (12,496 vs
+  (+4.1%) on IH2, with the entrapment FDR at nominal 1% moving from 1.35% to 1.16% there (12,496 vs
   11,722 target peptides against the entrapment database). Found while measuring RT tiling: the
   per-trace window made a trace's split depend on where the run was cut. The EPD patch gains an
   advanced `scan_time` parameter (0 = the OpenMS default).
@@ -716,9 +716,9 @@ docs/BASELINE.md (sections dated 2026-09-08 to 2026-09-11).
   scores them with the previous tile's boundary fragments carried over (every fragment within
   2 delta_rt of the edge, re-carried transitively), and its spectra are sorted and written as one block
   through the streaming writer before the next tile starts. **Output is the same for every n by
-  construction of the cell grid** -- measured: dataset D at pitch 300 as 1, 2, 3 and 6 tiles at 8 and
+  construction of the cell grid** -- measured: IH2 at pitch 300 as 1, 2, 3 and 6 tiles at 8 and
   100 threads, and run 009 at 600 as 13 tiles, spectrum for spectrum identical to the one-tile runs;
-  Sage reads the tiled file as the same file (13,836 peptides on D at 300 either way). A tiled file
+  Sage reads the tiled file as the same file (13,836 peptides on IH2 at 300 either way). A tiled file
   declares its count through a same-width placeholder patched at the end (`count="0000611034"`), which
   the digest tools normalise. The mzML is written as `<out>.part` and renamed on completion, so a
   failed run never leaves a plausible partial file behind.
@@ -729,7 +729,7 @@ docs/BASELINE.md (sections dated 2026-09-08 to 2026-09-11).
   `spx:tile_boundaries`). This is what makes a tiled run reproduce the whole run exactly -- the halo
   designs could not (docs/BASELINE.md, "cause 2 vs cause 3"). Mass traces that elute across a cut line
   are cut there: on run 009 at 600 s, Sage 28,845 -> 29,066 (+0.8%) with 9.4% of the peptides within
-  15 s of a line lost against 6.0% elsewhere (the usual set churn); on dataset D Sage +0.8%,
+  15 s of a line lost against 6.0% elsewhere (the usual set churn); on IH2 Sage +0.8%,
   MSFragger +1.5%, entrapment FDR 1.16 -> 1.30% (inside its interval); 300 s gives Sage +3.4% at 1.38%
   entrapment and is not the default. `-1` is one cell = the previous output, byte-identical.
 - **`perf:ms1_prune` (default `true`) -- picked MS1 centroids the tracer can never use are dropped at
@@ -737,9 +737,9 @@ docs/BASELINE.md (sections dated 2026-09-08 to 2026-09-11).
   last peak and a minimal chain of sub-threshold witnesses. The band edges are sampled before pruning.
   Together these keep every MS1 band spectrum and the tracer's input exact, so **the digests are
   identical with the prune off and on** on both benchmark files and on dnoise-filtered input. Peak at
-  one cell per tile, with dnoise off: D 31.99 -> 25.90 GB, run 009 69.11 -> 31.97 GB.
+  one cell per tile, with dnoise off: IH2 31.99 -> 25.90 GB, run 009 69.11 -> 31.97 GB.
 - **`DIASPEXTRACTOR_LOAD_TRIM=<n>`, a probe, off by default.** Calls `malloc_trim(0)` every nth picker
-  flush. The repaired ledger shows the resident arm's process peak on D is not live data: RSS falls
+  flush. The repaired ledger shows the resident arm's process peak on IH2 is not live data: RSS falls
   45,279 -> 28,052 MiB at the end of the load while the charged total does not move, so ~17 GiB of the
   peak is one load's worth of allocator free list. `MALLOC_TRIM_THRESHOLD_` cannot reach it, because
   `free()` trims only the top of the main arena and with ~100 threads the retention sits in per-thread
@@ -780,7 +780,7 @@ docs/BASELINE.md (sections dated 2026-09-08 to 2026-09-11).
   note "`PICK_BATCH` is fast and rejected -- the picker carries per-thread state" was this bug: at 4096
   the dropped tail was two whole windows plus 427 frames of two more, 11% of the MS2 spectra. With the
   tail kept, batch 256 and 4096 produce the identical digest: the picker is per-frame pure and the
-  batch size is a resource knob. Dataset D: +758 spectra, Sage 12,609 -> 12,625 peptides. **Output
+  batch size is a resource knob. IH2: +758 spectra, Sage 12,609 -> 12,625 peptides. **Output
   changes; digests re-pinned.**
 - **The parallel mzML writer emitted an empty `<indexList>`** (`count="0"`, one dummy entry): the
   per-thread handlers' spectrum offsets were discarded on concatenation. Search engines do not read the
@@ -908,7 +908,7 @@ otherwise, so the peptide sets are unchanged by construction and no search was n
   frame time: the `off-grid` counter is 0 once the frame offset is signed, so `frame0 + rt_at` is
   invariant under trimming), and `TraceStore::bins` stores the flight-time bin as an `int16` offset from
   the trace's own bin instead of a `uint32`. Interleaved A/B, arms alternating on one node: **peak RSS
-  -5.50 GB (-2.96%) on the 2-hour acquisition and -1.90 GB (-3.29%) on dataset D**, total CPU flat at
+  -5.50 GB (-2.96%) on the 2-hour acquisition and -1.90 GB (-3.29%) on IH2**, total CPU flat at
   -0.06% and the window loop -- where all 2.14e9 records live -- within 0.14%; every arm
   `SPECTRUM DATA IDENTICAL`. Adopted on memory at CPU parity, not on wall. It also prices what is left:
   parents are freed at the split, so ~49 GiB of records are resident at the peak rather than the naive
@@ -921,13 +921,13 @@ otherwise, so the peptide sets are unchanged by construction and no search was n
 - **The mzML is written by a streaming writer (`TileWriter`)**: header once, spectra appended in the
   canonical order in parallel-encoded chunks with the index offsets rebased as they land, the declared
   count exact when the total is known and a same-width placeholder otherwise. Bytes from
-  `<spectrumList>` on are the bulk writer's; **WRITE 19.6 -> 13.2 s on dataset D** (the per-thread
+  `<spectrumList>` on are the bulk writer's; **WRITE 19.6 -> 13.2 s on IH2** (the per-thread
   encoders no longer share a handler). Emitted spectra now carry `id="spectrum=<rank>"`.
 - **The loader builds each window's peak slab directly.** The per-window `CompactFrame` store and its
   copy at window start are gone; frames are appended as they are picked, m/z quanta become flight-time
   bins in place when the window starts, and the batch's windows are appended in parallel from one
   reusable scratch. Output and every per-window slab digest identical. It costs +12 s of LOAD on
-  dataset D today (first-touch page faults on fewer threads; on the backlog) and lifts the load-phase
+  IH2 today (first-touch page faults on fewer threads; on the backlog) and lifts the load-phase
   peak by ~3 GB there, below the window loop's peak on a 2-hour file.
 - **MS1 traces are ordered by content only** (m/z, RT, mobility, intensity, point count, span, first
   frame time); the number of equal-key neighbours is logged (0 on the benchmark file).
@@ -939,7 +939,7 @@ otherwise, so the peptide sets are unchanged by construction and no search was n
   row is marked and left out of the sum. The MS1 band partition -- a full copy of the MS1 map plus a
   1-5% halo, and the largest allocation of the MS1 phase -- was carried under `ms1_map` until detection
   returned; it is handed to `band_arena` at the swap and released band by band, and it measures
-  **13.6 GiB on dataset D where the old ledger reported 0.6**. A window's emitted spectra were charged
+  **13.6 GiB on IH2 where the old ledger reported 0.6**. A window's emitted spectra were charged
   only after the stage that produces them, and are now charged as they are emitted, together with the
   ~700 bytes of empty slot header per owned precursor. The columns were `>>20` of a byte count and were
   labelled `_mb`; they are `_mib`, and `bench/ledger_report.py` reads either. MassTraceDetection's own
@@ -980,9 +980,9 @@ at 100 threads) this release runs in **0.61x the reference implementation's wall
 memory** (12:42 / 187.9 GB against 20:57 / 340.6 GB) and, under per-charge FDR control at 1%, identifies
 **1.28x the peptides with Sage and 1.00x (0.996) with MSFragger** (27,831 / 28,181 against 21,743 / 28,294);
 on run 001 the ratios are 1.25 / 0.98. Whole-run entrapment FDR on the 2-hour files is at the nominal
-1% (0.93-1.03% under the engines' pooled cut, 0.98-0.99% under the per-charge walk; dataset D reads
+1% (0.93-1.03% under the engines' pooled cut, 0.98-0.99% under the per-charge walk; IH2 reads
 1.33%). The
-30-minute dataset D runs in 3:13 at 57 GB. The record is docs/BASELINE.md (sections dated 2026-09-06 to
+30-minute IH2 runs in 3:13 at 57 GB. The record is docs/BASELINE.md (sections dated 2026-09-06 to
 2026-09-08) and docs/REFERENCE-COMPARISON-2026-09-08.md.
 
 ### Changed
@@ -999,12 +999,12 @@ on run 001 the ratios are 1.25 / 0.98. Whole-run entrapment FDR on the 2-hour fi
   cannot be scored at all. TIMS resolves it: the 2+ and 3+ mobility lines are fitted per run from the
   run's own confident calls; a z=1 whose mobility lies on the 2+ line is re-called 2+, and one on the
   3+ line is dropped. The 3+ arm was measured before it was settled: re-calling those to 3+ identified
-  essentially nothing (z=3 peptides +9 on run 009, +47 on dataset D) while adding 178k / 93k re-called
+  essentially nothing (z=3 peptides +9 on run 009, +47 on IH2) while adding 178k / 93k re-called
   precursors (117k / 73k spectra) -- only ~1.8% of z=1 calls are genuinely on the 3+ band, and the two
   lines are ~1 sigma apart at low m/z -- so dropping them takes 2.9% / 7.9% off the v37 spectrum list
   at a cost below 0.3% of peptides on either engine under either walk.
   Two things to know. Under the engines' pooled 1% cut the z=1 stratum carries more entrapment FDR than
-  the rest -- 2.9% on the 2-hour files, ~9% on dataset D where the stratum is ~150 peptides -- and
+  the rest -- 2.9% on the 2-hour files, ~9% on IH2 where the stratum is ~150 peptides -- and
   a whole-run figure hides it. The mechanism is a lower true-match prior in that stratum under one
   pooled threshold, not peptide length (at matched score *and* length z=1 is still 3-5x dirtier than
   z=2; decoys reproduce it). A per-charge FDR walk puts the stratum at 0.87-0.91% on the 2-hour files
@@ -1051,7 +1051,7 @@ on run 001 the ratios are 1.25 / 0.98. Whole-run entrapment FDR on the 2-hour fi
   8-byte copy of the apex intensity the arena holds. The span accessors take the store explicitly,
   the factor is a 4-byte frame index, and the apex intensity is read through the arena (72 -> 56 -> 48).
   On a 2-hour acquisition this is the largest structure in the tool -- ~2.1 billion records, ~144 GiB
-  at 72 bytes if simultaneous. The 72 -> 56 step measured -10.7 GB there and -2.7 GB on dataset D,
+  at 72 bytes if simultaneous. The 72 -> 56 step measured -10.7 GB there and -2.7 GB on IH2,
   less than the 16-24 GiB predicted from the record count because not every window's records are
   resident at once; the 56 -> 48 step, with the splitter's reserve, a further -5.5 GiB. A
   `static_assert` pins the size.
@@ -1106,7 +1106,7 @@ on run 001 the ratios are 1.25 / 0.98. Whole-run entrapment FDR on the 2-hour fi
   deploy and records the
   MassTrace-patch marker and the OpenMS library hash in the provenance.
 - **Repository hygiene**: acquisition and specimen identifiers are scrubbed from the tracked tree
-  (cohort samples are datasets A-F; the dataset-D baseline file is now `docs/BASELINE.md`; the drivers
+  (cohort samples are IH1-IH6; the IH2 baseline file is now `docs/BASELINE.md`; the drivers
   that need real paths are untracked, with tracked `.example` templates; run-directory names quoted in
   the record keep their historical labels); `evidence/` left the tree; CONTRIBUTING.md,
   SECURITY.md, issue and pull-request templates.
@@ -1179,9 +1179,9 @@ on run 001 the ratios are 1.25 / 0.98. Whole-run entrapment FDR on the 2-hour fi
   The default stays `true`; `false` is now documented as the more sensitive setting.
 - **Entrapment FDR on all six datasets at the v0.3.0 defaults (2026-09-05): 1.13-1.31% at a nominal
   1%**, every interval overlapping. At this release's defaults the whole-run figure is 1.33% on
-  dataset D and 0.93% / 1.03% on the 2-hour runs 001 / 009, with the z=1 stratum at 2.9% under the
+  IH2 and 0.93% / 1.03% on the 2-hour runs 001 / 009, with the z=1 stratum at 2.9% under the
   pooled cut and 0.87-0.91% under a per-charge walk. The point estimates sit within a third of a point
-  of the nominal 1% (dataset D's is the high one, 1.33%); intervals were not re-computed for the v38
+  of the nominal 1% (IH2's is the high one, 1.33%); intervals were not re-computed for the v38
   arms.
 - **`SPEXTRACTOR_PICK_BATCH` is fast and rejected.** 256 -> 4096 is -39% on the load phase, but the
   digest changes with the batch size and 4096 loses 7.2% of Sage and 6.1% of MSFragger peptides: the
@@ -1236,14 +1236,14 @@ added the same day, after the tag.
 
 | file | spectra | wall | peak RSS | Sage @1% | MSFragger @1% |
 |---|---|---|---|---|---|
-| dataset A | 862,716 | 8:26 | 108.7 GB | 10,909 | 11,935 |
-| dataset B | 585,503 | 5:37 | 84.6 GB | 10,272 | 9,691 |
-| dataset C | 723,314 | 6:27 | 90.3 GB | 12,149 | 12,516 |
-| dataset D | 655,776 | 5:21 | 79.0 GB | 12,482 | 12,337 |
-| dataset E | 542,533 | 5:38 | 67.9 GB | 11,217 | 10,585 |
-| dataset F | 597,267 | 5:59 | 73.8 GB | 11,362 | 11,049 |
+| IH1 | 862,716 | 8:26 | 108.7 GB | 10,909 | 11,935 |
+| IH3 | 585,503 | 5:37 | 84.6 GB | 10,272 | 9,691 |
+| IH4 | 723,314 | 6:27 | 90.3 GB | 12,149 | 12,516 |
+| IH2 | 655,776 | 5:21 | 79.0 GB | 12,482 | 12,337 |
+| IH5 | 542,533 | 5:38 | 67.9 GB | 11,217 | 10,585 |
+| IH6 | 597,267 | 5:59 | 73.8 GB | 11,362 | 11,049 |
 
-dataset C and dataset F had never been benchmarked before. Peak RSS spans 67.9-108.7 GB across the cohort,
+IH4 and IH6 had never been benchmarked before. Peak RSS spans 67.9-108.7 GB across the cohort,
 which is where the README of the time stated an 80-125 GB requirement.
 
 ### Changed
@@ -1251,7 +1251,7 @@ which is where the README of the time stated an 80-125 GB requirement.
   `registerFlag_`, so they defaulted to OFF -- while every benchmark figure this project has ever
   published passed them explicitly. The shipped default configuration had therefore never been
   measured. It has now been, and it was **6.9x slower and worse on both engines**: with
-  `require_isotope_support` off, dataset D emits 1,255,577 spectra in 36:25 at 6.0x window-loop occupancy
+  `require_isotope_support` off, IH2 emits 1,255,577 spectra in 36:25 at 6.0x window-loop occupancy
   for Sage 12,212 / MSFragger 12,148; on, it emits 655,776 in 5:15 at 65.7x for Sage 12,482 /
   MSFragger 12,337. (An earlier measurement in July had put the gate's cost at −0.78% peptides; the
   sign flipped somewhere behind the charge gate, the apex estimator and the integer detector.)
@@ -1290,12 +1290,12 @@ which is where the README of the time stated an 80-125 GB requirement.
 ### Changed
 - **`trace:detector` now defaults to `integer`.** Mass-trace detection runs on the instrument's own
   integer axes -- flight-time bin for m/z, frame index for retention time -- following OpenMS
-  MassTraceDetection step for step, and never materialises a PeakMap of doubles. On dataset D it is
-  faster and uses ~40% less memory than the OpenMS path (dataset D 86 vs 150 GB, dataset A 126 vs 222 GB; wall
+  MassTraceDetection step for step, and never materialises a PeakMap of doubles. On IH2 it is
+  faster and uses ~40% less memory than the OpenMS path (IH2 86 vs 150 GB, IH1 126 vs 222 GB; wall
   6:21 vs 6:54 and 10:35 vs 11:14). The peptide effect is **mixed and not consistent in sign**: Sage
-  -1.3% on dataset D but +0.2% on dataset A, MSFragger +2.1% on dataset D but -3.5% on dataset A, entrapment indistinguishable
-  on both (dataset D 1.27% [1.03-1.52] vs 1.38% [1.14-1.63]). The detectors **agree on only ~85% of the
-  union** of identified peptides -- 1,148 OpenMS-only and 981 integer-only on dataset D -- so the memory
+  -1.3% on IH2 but +0.2% on IH1, MSFragger +2.1% on IH2 but -3.5% on IH1, entrapment indistinguishable
+  on both (IH2 1.27% [1.03-1.52] vs 1.38% [1.14-1.63]). The detectors **agree on only ~85% of the
+  union** of identified peptides -- 1,148 OpenMS-only and 981 integer-only on IH2 -- so the memory
   saving, not a peptide gain, is the case for the default. Without the vendor flight-time calibration
   the tool **falls back to `openms` and says so**; the emitted mzML records which detector ran as
   `spx:detector`.
@@ -1305,16 +1305,16 @@ Measured old-vs-new with both arms on the same host, three files concurrently on
 one binary from a shared install. **Every arm is digest-identical to its base**, so peptides are
 unchanged by construction and no search was run.
 
-| | dataset D | dataset A | dataset B |
+| | IH2 | IH1 | IH3 |
 |---|---|---|---|
 | RSS at end of the window loop | 65.0 -> **48.3 GB** | 85.6 -> **55.1 GB** | 70.0 -> **49.8 GB** |
 | window-loop occupancy | 67.6 -> 69.9x | 56.2 -> 61.3x | 56.9 -> 63.3x |
 
 **These are memory changes, not speed changes.** Replicated as interleaved base/clean pairs on
-shared machines with the load recorded before each run -- three pairs on dataset D, two on dataset B, every
-digest identical. dataset D: wall 321.3 -> 312.7 s (−2.7%), window-loop CPU 9,229 -> 9,690 (**+5.0%**),
+shared machines with the load recorded before each run -- three pairs on IH2, two on IH3, every
+digest identical. IH2: wall 321.3 -> 312.7 s (−2.7%), window-loop CPU 9,229 -> 9,690 (**+5.0%**),
 RSS at end of the window loop 63,880 -> 46,922 MB (−26.5%), process peak 81.3 -> 77.9 GB (−4.1%),
-all with non-overlapping ranges. dataset B: no wall-clock difference at all, same ~4% CPU cost, same
+all with non-overlapping ranges. IH3: no wall-clock difference at all, same ~4% CPU cost, same
 ~30% memory drop. So the trade is **~27% of the window loop's memory for ~5% more CPU at roughly
 unchanged wall time** -- worth taking because concurrency is bounded by the free-RAM admission
 gate, but it is a memory change. A first pass of single pairs appeared to show 5-6% off wall on
@@ -1326,7 +1326,7 @@ three files; that was load drift on shared nodes and is withdrawn. Do not cite a
   a time and those lines fall to 0.08 MB. `ElutionPeakDetection` is constructed and parameterised
   once per chunk rather than once per trace.
 - **The fragment RT gate rejects on 2 bytes instead of 8.** The gate discards 99.4% of what it
-  visits -- 867 billion visits, 6.9 TB of traffic per dataset D run -- and was reading a `double` to do it.
+  visits -- 867 billion visits, 6.9 TB of traffic per IH2 run -- and was reading a `double` to do it.
   A parallel `uint16` bucket array does the reject; the exact test is unchanged and runs only on
   survivors, so the candidate set and its order are identical (the score-gate counters match to the
   digit between arms).
@@ -1342,7 +1342,7 @@ three files; that was load drift on shared nodes and is withdrawn. Do not cite a
 - **A trace's profile is a span, not a point list.** A trace point has one degree of freedom -- its
   intensity -- so the three parallel 4-byte arrays (frame, intensity, flight-time bin) and their
   three allocations per trace are replaced by an entry frame and a range in a per-window arena, with
-  zero meaning a missed frame. Verified **byte-identical on both detectors** on dataset D. The per-window
+  zero meaning a missed frame. Verified **byte-identical on both detectors** on IH2. The per-window
   correlation grid, which was a second copy of every profile, is gone. Window-loop memory falls from
   a 68.6 GB simultaneous peak to 27.9 GB (integer) / 32.4 GB (OpenMS); process peak RSS 105 -> 88 GB
   and 164 -> 147 GB.
@@ -1357,7 +1357,7 @@ three files; that was load drift on shared nodes and is withdrawn. Do not cite a
 ### Performance (2026-09-03, window loop)
 - **The scoring gate reads its one field from a parallel array instead of striding the 96-byte
   trace record.** The gate rejects 99.4% of the fragments it visits; the scan was moving ~83 TB per
-  dataset D run for 8 bytes of payload per visit. dataset D wall 12:53 -> **7:17**, scoring stage 47% -> 4.8% of
+  IH2 run for 8 bytes of payload per visit. IH2 wall 12:53 -> **7:17**, scoring stage 47% -> 4.8% of
   window time, **peptide set identical** on Sage. Replicated three times.
 - **The window loop is one OpenMP task pool over all threads** (master/worker) instead of a rigid
   threads/bands x bands grid; window-loop occupancy 65x -> 81x on 100 threads. The number of windows
@@ -1396,7 +1396,7 @@ three files; that was load drift on shared nodes and is withdrawn. Do not cite a
 
 ### Runtime
 - **MS1 path parallelised** (loader `[SpeXtractor ms1-par]`: batched parallel MS1 decode with per-thread ZSTD contexts and
-  `FrameCentroider`, ordered hand-off; consumer `flushMS1_`: parallel MS1 pick). dataset D/100 threads: LOAD 445 s -> 39 s,
+  `FrameCentroider`, ordered hand-off; consumer `flushMS1_`: parallel MS1 pick). IH2/100 threads: LOAD 445 s -> 39 s,
   total 22:22 -> **15:21**; spectrum data byte-identical, Sage peptide set identical.
 - Decode-once frame-major parallel MS2 loader (`[SpeXtractor par-load]`), batched parallel MS2 pick; per-phase `[perf]`
   table and `[perf-load]` decode/hand-off/pick timers; `SPEXTRACTOR_LOAD_ONLY=1` for load-only profiling.
@@ -1421,9 +1421,9 @@ three files; that was load drift on shared nodes and is withdrawn. Do not cite a
   (`weighted_()`); they had silently bypassed `corr_power`/`im_weight`, so every earlier A/B of those flags was
   confounded. First clean apportion run: -3.9% peptides (falsified again; NNLS cut).
 - **Reported m/z of every trace is now the APEX member's m/z** (`SPEXTRACTOR_MZ_ESTIMATOR=apex`, the new default;
-  `mean` restores the OpenMS intensity-weighted centroid): dataset D +2.6% Sage (12,537 vs 12,217) and +4.1% MSFragger
+  `mean` restores the OpenMS intensity-weighted centroid): IH2 +2.6% Sage (12,537 vs 12,217) and +4.1% MSFragger
   (11,927 vs 11,463) with the paired precursor mass error vs the reference implementation +1.12 -> +0.78 ppm. Both-engines gate passed;
-  generalises: dataset A +4.4% (10,789), dataset B +2.7% (10,156); mean ratio vs the reference implementation on Sage 105.1% -> 109.2%;
+  generalises: IH1 +4.4% (10,789), IH3 +2.7% (10,156); mean ratio vs the reference implementation on Sage 105.1% -> 109.2%;
   entrapment of the apex arm 1.28% [1.03-1.53] at nominal 1%.
 - Under test (env switches, defaults unchanged): `SPEXTRACTOR_PICK_MZ_MODE=seed|top3` (pick-level m/z; the -2.4 ppm
   fragment offset vs the reference implementation is upstream of the trace estimator), `SPEXTRACTOR_DROP_PREC_ISO=1` (drop the precursor's
@@ -1441,7 +1441,7 @@ three files; that was load drift on shared nodes and is withdrawn. Do not cite a
   dt-only peptides are searched but short by ~2 of ~9 matched ions that never become a trace; raw apex-frame peak
   backfill recovers 1,151 of them (MSFragger 85.6% -> 90.0%). FragPipe rescoring (Percolator, MSBooster off for both) gives 13,211 vs the reference implementation
   15,947 peptides (82.8%; raw-hyperscore walk 85.6%) -- rescoring lifts both tools and leaves the ratio; ours has
-  8.6 PSMs/peptide vs 2.0. Entrapment of the shipping arm: 1.28% / 0.95% / 1.32% at nominal 1% on dataset D/dataset A/dataset B.
+  8.6 PSMs/peptide vs 2.0. Entrapment of the shipping arm: 1.28% / 0.95% / 1.32% at nominal 1% on IH2/IH1/IH3.
 - Falsified today (kept in docs so they are not re-proposed): apportion (clean, -3.9%), precursor-isotope stripping
   (-2.3%), median/seed/top3 m/z estimators, 48 MS1 trace bands (slower, not output-identical), MALLOC_ARENA_MAX=4.
 
@@ -1474,7 +1474,7 @@ every earlier head-to-head was biased against the open path -- this removes a se
 handicap rather than establishing a lead.
 
 ### Benchmarks (3 files, both engines, identical settings; docs/BENCHMARK-MATRIX-2026-09-01.md)
-| | dataset D | dataset A | dataset B | vs the reference implementation |
+| | IH2 | IH1 | IH3 | vs the reference implementation |
 |---|---|---|---|---|
 | Sage peptides @1% FDR | 11,976 | 10,333 | 9,891 | mean 105.1%, 95% CI [93.0, 117.3] -- consistent with PARITY |
 | MSFragger peptidoforms @1% | 11,463 | 11,465 | 9,404 | mean 85.0%, 95% CI [76.7, 93.2] -- a supported DEFICIT |

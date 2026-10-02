@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Which collapses cost peptides, and which were free?
 
-Pre-extraction isotope collapse cut dataset D emission 927,813 -> 691,144 (the reference implementation: 700,434) and 15% of
+Pre-extraction isotope collapse cut IH2 emission 927,813 -> 691,144 (the reference implementation: 700,434) and 15% of
 runtime, but lost 1,659 of 12,537 Sage peptides. That average is useless for deciding what to keep:
 the question is whether the harmful removals are a distinguishable CATEGORY.
 

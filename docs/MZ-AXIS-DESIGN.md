@@ -99,7 +99,7 @@ struct PeakSlab
 ```
 
 Per-peak cost is unchanged at 10 bytes, but the ~20 B/peak `Peak1D` + `FloatDataArray`
-materialisation disappears, along with its per-`MSSpectrum` overhead. On dataset A that materialisation is
+materialisation disappears, along with its per-`MSSpectrum` overhead. On IH1 that materialisation is
 the largest single per-window allocation.
 
 A **trace** keeps the shape it has after the RT-axis change, with m/z now an index too:
@@ -125,7 +125,7 @@ to the loops.
 **Trace detection becomes bucketing, not searching.** The current detector accepts a peak if it is
 within `mass_error_ppm` of the trace's running centroid, which costs a binary search per candidate
 and makes the cost superlinear in peaks per band (measured: 4 bands 18:25 wall / 163 GB against 12
-bands 12:53 / 103 GB on dataset D). On an integer axis, peaks of one ion across frames differ by at most
+bands 12:53 / 103 GB on IH2). On an integer axis, peaks of one ion across frames differ by at most
 `ppmSpan(mz, tol)` index units, so:
 
   * bucket peaks by `mz >> SHIFT` with `1 << SHIFT` chosen just above the largest tolerance span;
@@ -159,11 +159,11 @@ holds.
 
 ## 6. How it is to be measured
 
-Against the current head, on dataset D and dataset A, 100 threads, same node:
+Against the current head, on IH2 and IH1, 100 threads, same node:
 
 | metric | why |
 |---|---|
-| wall time | the headline; the reference implementation is 9:46 on dataset A against our 22:39 |
+| wall time | the headline; the reference implementation is 9:46 on IH1 against our 22:39 |
 | peak RSS | 152 GB is the number that forces the memory admission gate |
 | window-loop parallel speedup | occupancy; 67.9x of 100 before the task pool |
 | stage breakdown | whether the gain is where the design predicts (trace, 47%) |

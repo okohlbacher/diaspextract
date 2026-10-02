@@ -47,7 +47,7 @@ def main(out_path, specs):
     # pass 1: count, so the declared count is exact (no placeholder; the self-check is byte-exact)
     counts = [sum(1 for _ in blocks(path, lo, hi)) for path, lo, hi in tiles]
     total = sum(counts)
-    head, tail = [], []
+    tail = []
     n_out = 0
     with open(out_path, "wb") as out:
         for ti, (path, lo, hi) in enumerate(tiles):

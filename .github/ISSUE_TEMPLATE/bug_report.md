@@ -21,5 +21,5 @@ spx:detector, spx:require_isotope_support, spx:mz_calibration
 **What happened**, and what you expected instead. Include the tail of the run log; it names the
 calibration used and the detector selected, and warns when it falls back.
 
-**Machine**: cores and RAM. Peak memory is 68–110 GB on real acquisitions, and an out-of-memory
-kill can look like an unrelated failure.
+**Machine**: cores and RAM, and the run's peak memory if you measured it (an out-of-memory kill
+can look like an unrelated failure).

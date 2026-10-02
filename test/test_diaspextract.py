@@ -82,7 +82,7 @@ def synth(path, n_cycles=14, cycle_s=1.4, gap_cycles=(), groups=None, z1_shift=0
           ms1_descending=False):
     """Two precursors that co-elute in one isolation window: a z=2 envelope and a z=1 envelope.
 
-    Both are given a 3-peak isotope envelope so `require_isotope_support` keeps them, matching
+    Both are given a 3-peak isotope envelope so the isotope-support filter keeps them, matching
     fragments that co-elute with the precursor, and a distinct ion mobility.
 
     `gap_cycles`: cycles in which the z=2 precursor AND its first fragment are ABSENT. This is
@@ -151,7 +151,7 @@ def synth(path, n_cycles=14, cycle_s=1.4, gap_cycles=(), groups=None, z1_shift=0
 
 
 def mzcal_table(db):
-    """Write IH2's MzCalibration row (tests/calibration_golden.json) into db; return the golden entry."""
+    """Write a real run's MzCalibration row (tests/calibration_golden.json) into db; return the golden entry."""
     g = json.load(open(os.path.join(os.path.dirname(__file__), "..", "tests", "calibration_golden.json")))[0]
     db.execute("CREATE TABLE MzCalibration (Id INTEGER PRIMARY KEY, ModelType INTEGER, DigitizerTimebase REAL,"
                " DigitizerDelay REAL, C0 REAL, C1 REAL, C2 REAL, T1 REAL, dC1 REAL, dC2 REAL, C3 REAL, C4 REAL)")
@@ -161,9 +161,9 @@ def mzcal_table(db):
 
 
 def synth_tdf(path, n_frames):
-    """A minimal analysis.tdf: the real IH2 MzCalibration row plus a Frames table.
+    """A minimal analysis.tdf: a real run's MzCalibration row plus a Frames table.
 
-    The calibration constants are the measured IH2 ones from tests/calibration_golden.json, not
+    The calibration constants are a real run's, from tests/calibration_golden.json, not
     invented numbers -- an invented row would either fail isSupported() or silently define a
     different mass scale. T1 is given a small per-frame spread so the per-frame factor is actually
     exercised rather than collapsing to the reference.
@@ -179,9 +179,8 @@ def synth_tdf(path, n_frames):
     db.executemany("INSERT INTO Frames VALUES (?,?,1)",
                    [(i + 1, g["T1_ref"] + 0.03 * (i % 3)) for i in range(n_frames)])
     # GlobalMetadata: the run-level bounds of the flight-time axis. A real tdf always has them and
-    # trace:band_edges=acquisition (the default since 2026-09-10) REFUSES a run without them, so a
-    # fixture that omits them cannot exercise the integer detector at all. Values are TEXT, as the
-    # vendor writes them; the digitizer sample count is IH2's.
+    # the integer detector REFUSES a run without them, so a fixture that omits them cannot exercise
+    # it at all. Values are TEXT, as the vendor writes them; the digitizer sample count is a real run's.
     db.execute("CREATE TABLE GlobalMetadata (Key TEXT PRIMARY KEY, Value TEXT)")
     db.executemany("INSERT INTO GlobalMetadata VALUES (?,?)",
                    [("MzAcqRangeLower", "99.990834"), ("MzAcqRangeUpper", "1700.000000"),
@@ -193,10 +192,10 @@ def synth_tdf(path, n_frames):
 def synth_fake_d(d):
     """A Bruker .d holding only its analysis.tdf: no analysis.tdf_bin, so the loader cannot read a single frame.
 
-    The metadata carries everything the tool decides before the load: IH2's MzCalibration row and the
-    GlobalMetadata bounds (as in synth_tdf), and what dnoise:ms1's setup reads -- IH2's TimsCalibration row,
+    The metadata carries everything the tool decides before the load: a real run's MzCalibration row and the
+    GlobalMetadata bounds (as in synth_tdf), and what dnoise:ms1's setup reads -- a real run's TimsCalibration row,
     ten Frames (ids 1 and 6 MS1) of 944 scans with integer NumScans/NumPeaks and AccumulationTime 99.958 ms, and 24
-    diaPASEF window rows. The shapes are those of the dnoise port's second-review fixtures.
+    diaPASEF window rows.
     """
     import sqlite3
     os.makedirs(d, exist_ok=True)
@@ -228,7 +227,7 @@ def synth_fake_d(d):
 
 def run(binary, inp, out, extra=(), threads=1, expect_fail=False, env=None):
     cmd = [binary, "-in", inp, "-out", out, "-threads", str(threads),
-           "-assembly:min_fragments", "2", "-assembly:require_isotope_support", "true",
+           "-assembly:min_fragments", "2",
            "-trace:ms2_min_length_sec", "0", "-trace:ms1_split_valleys", "0",
            "-trace:ms2_split_valleys", "0"] + list(extra)
     r = subprocess.run(cmd, capture_output=True, text=True, env=env)
@@ -694,7 +693,7 @@ def main():
     #     3 of 3) and one more precursor, both [det] digests and the band spectra differ. Like every check here this
     #     runs the RESIDENT load (an mzML is never streamed): the prune inside the streaming consumer (flushMS1_) is
     #     covered only by the cluster gates on real .d input.
-    PRUNE_RE = r"\[ms1-prune\] picked (\d+) survivors (\d+) witnesses (\d+) at_noise (\d+) nan (\d+) bad_mz (\d+): kept (\d+)"
+    PRUNE_RE = r"\[ms1-prune\] picked (\d+) survivors (\d+) witnesses (\d+) at_noise (\d+) nan (\d+): kept (\d+)"
     PRUNE_KEYS = {"traces": r"\[det\] MS1 traces n=\S+ digest=\S+", "sorted": r"\[det\] MS1 traces sorted by content: [^\n]*",
                   "prec": r"\[det\] precursors n=\S+ digest=\S+", "bands": r"\[det\] MS1 band spectra \S*", "edges": r"\[ms1-edges\] [^\n]*"}
     nx100 = struct.unpack("<f", struct.pack("<I", struct.unpack("<I", struct.pack("<f", 100.0))[0] + 1))[0]
@@ -728,9 +727,9 @@ def main():
             assert "[ms1-prune]" not in log_off, "perf:ms1_prune false still pruned"
             m = re.search(PRUNE_RE, log_on)
             assert m, "the prune did not log its counters:\n" + log_on[-800:]
-            picked, surv, wit, at_noise, _, bad_mz, kept = (int(x) for x in m.groups())
-            assert kept == surv + wit and picked > kept and wit > 0 and at_noise == 3 and bad_mz == 0, \
-                f"the fixture does not exercise the prune (picked {picked}, survivors {surv}, witnesses {wit}, at_noise {at_noise}, bad_mz {bad_mz}, kept {kept})"
+            picked, surv, wit, at_noise, _, kept = (int(x) for x in m.groups())
+            assert kept == surv + wit and picked > kept and wit > 0 and at_noise == 3, \
+                f"the fixture does not exercise the prune (picked {picked}, survivors {surv}, witnesses {wit}, at_noise {at_noise}, kept {kept})"
             assert digest(on) == digest(off), f"bands {bands}: perf:ms1_prune true changed the spectra"
             for k in PRUNE_KEYS:
                 assert g_on[k] == g_off[k], f"bands {bands}: {k} differs with the prune on:\n  off {g_off[k]}\n  on  {g_on[k]}"
@@ -852,7 +851,7 @@ def main():
     def c21():
         fake = synth_fake_d(os.path.join(work, "fake.d"))
         env = dict(os.environ)
-        for v in ("OPENMS_BRUKER_SDK_PATH", "DIASPEXTRACT_MZPEAK_TDF", "DIASPEXTRACT_TILE_RESIDENT"): env.pop(v, None)
+        for v in ("OPENMS_BRUKER_SDK_PATH", "DIASPEXTRACT_MZPEAK_TDF"): env.pop(v, None)
         setup_line = "MS1 path on the raw frames, before the pick"
         r = run(binary, fake, os.path.join(work, "fake_sdk.mzML"), expect_fail=True, env=dict(env, OPENMS_BRUKER_SDK_PATH="/nonexistent"))
         log = r.stdout + r.stderr
@@ -873,7 +872,7 @@ def main():
         env = {k: v for k, v in os.environ.items() if not k.startswith(("SPEXTRACTOR_", "DIASPEXTRACTOR_"))}
         for tag, old_vars in (("spextractor", {"SPEXTRACTOR_DET": "1"}),
                               ("diaspextractor", {"DIASPEXTRACTOR_DET": "1"}),
-                              ("both", {"SPEXTRACTOR_LEDGER": "x", "DIASPEXTRACTOR_TILE_RESIDENT": "1"})):
+                              ("both", {"SPEXTRACTOR_PIPE_TILES": "1", "DIASPEXTRACTOR_TILE_NO_CARRY": "1"})):
             old = os.path.join(work, f"old_env_{tag}.mzML")
             r = run(binary, inp, old, expect_fail=True, env=dict(env, **old_vars))
             log = r.stdout + r.stderr

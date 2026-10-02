@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """Golden test for the TDF MzCalibration (ModelType 1) TOF->m/z model.
 
-Guards the calibration that produced the 2026-09-01 +6-11% closed-search gain. The 270 golden cases
-were produced by Bruker's own timsdata library and are stored in tests/calibration_golden.json, so this
-test needs NO vendor library, NO cluster and NO raw data:
-  * 60 on three diaPASEF files sharing one calibration vector (IH2/IH1/IH3, 4 frames x 5
-    TOF positions each);
+The 270 golden cases were produced by Bruker's own timsdata library and are stored in
+tests/calibration_golden.json, so this test needs NO vendor library, NO cluster and NO raw data:
+  * 60 on three diaPASEF reference runs sharing one calibration vector (4 frames x 5 TOF positions each);
   * 210 on six runs of the public PXD029836 (timsTOF Pro 2, acquisition software 2.0.53), whose C2 is
     NEGATIVE: 1418/1420/1422 share one vector, 1431, 1408 and 1347 carry one each (5 frames x 7 TOF
     positions each: first, middle and last frame, the coldest and the warmest).
@@ -26,10 +24,9 @@ Regressions this catches:
   * flipping the sign of a negative C2: 38..80 ppm on PXD029836 (checked per file). Taking the other root of the
     quadratic is not in that range: it lands beyond the parabola's vertex, near m/z 1e12;
   * dropping the dC1 temperature term: ~0.67 ppm. (m is proportional to C1_eff, NOT its square
-    root, so dC1*dT/1e6 lands on m/z undiminished -- an earlier note here claimed ~0.33 ppm by
-    applying a spurious halving; the measured guard value 0.669 confirms 0.67. The golden files
-    span only ~0.03 K, so the guard threshold stays loose at 0.1 ppm over the whole set, and 0.05 ppm per
-    file: the smallest per-file value is 0.074 ppm, PXD029836 1408, whose frames lie within 0.004 K of T1.)
+    root, so dC1*dT/1e6 lands on m/z undiminished. The golden files span only ~0.03 K, so the guard
+    threshold stays loose at 0.1 ppm over the whole set, and 0.05 ppm per file: the smallest per-file
+    value is 0.074 ppm, PXD029836 1408, whose frames lie within 0.004 K of T1.)
 Run: python3 tests/test_calibration.py
 """
 import json, math, os, sys
@@ -79,7 +76,6 @@ def check_linear_c2_zero():
     calibration and must be accepted; the quadratic collapses to sqrt(m) = (t - C0) / b."""
     p = {"timebase": 0.2, "delay": 25131.0, "C0": 315.70325869866065,
          "C1": 154272.1271422364, "C2": 0.0, "T1_ref": 25.63315397685876, "dC1": -0.2}
-    import math
     for tof in (60000.0, 120000.0, 240000.0, 400000.0):
         got = tof_to_mz(tof, p, p["T1_ref"])
         t = tof * p["timebase"] + p["delay"]

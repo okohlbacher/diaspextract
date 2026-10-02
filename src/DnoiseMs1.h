@@ -14,35 +14,28 @@
 // exactly the set of points dnoise v0.1.0 (default flags, diaPASEF) writes back -- for GlobalMetadata values
 // that are finite decimal literals equal to zero or of magnitude in [DBL_MIN, DBL_MAX]. A value dnoise would
 // parse otherwise (inf/infinity/nan in any case, overflow to inf, underflow to 0 or a subnormal) makes the port
-// refuse the run where dnoise builds a degenerate gate. Every rule below was
-// checked against the binary's output; each "obvious fix" changes that output measurably (points that
-// differ on IH2 frame 8724, 144,814 kept):
+// refuse the run where dnoise builds a degenerate gate. Every rule below was checked against the binary's
+// output, and each "obvious fix" changes that output:
 //   1. Stage order: the streak filter on the raw points, `iterations` passes, each summing only the
-//      previous pass's survivors (1 pass: 24,906); then the halo ONCE, with the streak survivors as
-//      its reference set (raw points as reference: 122); then the window gate ANDed (gate first: 199).
+//      previous pass's survivors; then the halo ONCE, with the streak survivors as its reference set;
+//      then the window gate ANDed.
 //   2. Raw u32 intensities from the frame blob, not the corrected ones the loaders return -- opentims computes
 //      (uint32)(double(raw) * (100.0 / AccumulationTime) + 0.5), and the Bruker SDK corrects them too. At default
-//      settings they only enter the halo ratio, yet on 24 TNBC 009 frames the corrected values flip 9 of 3.1
-//      million kept points.
+//      settings they only enter the halo ratio, where the corrected values flip kept points.
 //   3. Streak: min_feature_length counts OCCUPIED scans of a gap-bridged run, not its span; points are
 //      kept by span, which only matters for zero-intensity points.
 //   4. Halo: the reference skips EVERY point in the point's own TOF column (that is what spares a
-//      streak), ties are kept (strict >: 15), and an empty box keeps the point.
+//      streak), ties are kept, and an empty box keeps the point.
 //   5. Gate: timsrust's two-point chord calibration (sqrt-linear over MzAcqRange/DigitizerNumSamples,
 //      linear 1/K0 over max NumScans), NOT TdfMzCalibration.h; +-5 Da on the m/z range when the file
-//      says "Bruker otofControl" (TOF edges move 317-1,953 bins without it); ScanNumEnd -- exclusive in
-//      the schema -- converted as if inclusive (42); the union of every window row of every group.
-//   6. Floating-point contraction. On IH2 the 0.05 1/K0 pad is 59 scans to within an ulp, so gate scan
-//      bounds are floor/ceil of values like 542.9999999999999; fusing `intercept + slope * scan` into
-//      one FMA flips 3 of IH2's 24 boxes (13 points on 8724). The builder keeps that product apart
-//      through a volatile and is compiled with contraction off; CMakeLists.txt passes -ffp-contract=off
-//      as well. Value-changing flags the compiler announces in a macro are refused by the #error below.
-//      What that catches depends on the compiler, because only an announced flag can be seen (measured in
-//      CI): GCC 16 announces all four of -freciprocal-math, -funsafe-math-optimizations, -fno-signed-zeros
-//      and -fassociative-math; GCC 11 announces none of them; clang announces only -funsafe-math-optimizations
-//      and -ffp-model=fast, both on x86-64. Do not use them: -freciprocal-math,
-//      -funsafe-math-optimizations and -ffp-model=fast each move IH2's boxes. tests/test_dnoise_ms1.cpp pins
-//      IH2's boxes, the three FMA-sensitive ones included.
+//      says "Bruker otofControl"; ScanNumEnd -- exclusive in the schema -- converted as if inclusive;
+//      the union of every window row of every group.
+//   6. No floating-point contraction. The 0.05 1/K0 pad can be a whole number of scans to within an ulp, so
+//      gate scan bounds are floor/ceil of values like 542.9999999999999, and fusing `intercept + slope * scan`
+//      into one FMA moves box edges. The builder keeps that product apart through a volatile and is compiled
+//      with contraction off; CMakeLists.txt passes -ffp-contract=off as well. Value-changing flags the
+//      compiler announces are refused by the #error below; others cannot be detected, so do not use them.
+//      tests/test_dnoise_ms1.cpp pins the gate, streak, halo and recovery rules.
 // Not ported, because dnoise's defaults never reach it on diaPASEF MS1: the mz_ppm width override,
 // frame_half_width neighbourhoods, the selection-polygon gate (skipped whenever DiaFrameMsMsInfo and
 // DiaFrameMsMsWindows map frames to windows), crop, smooth/watershed/box-centroid, and the MS2 paths.
@@ -355,10 +348,9 @@ inline bool opentimsCorrection(const std::string& text, double& corr)
 }
 
 /// Why the raw counts of MS1 frame @p fid cannot be recovered through its correction @p corr, or empty when they can. At
-/// corr >= 1 (AccumulationTime <= 100 ms) raw counts below 2^24 do not collide (checked exhaustively at 19 values, 1 + 1 ulp
-/// among them), so recovery is exact; below 1 they do (from raw 3 at 125 ms, from raw 1191 at 100.042 ms) and recoverPoint
-/// takes the candidate nearest v / corr -- an approximation, accepted (user decision 2026-09-24). 0.01 .. 1e6 is a plausibility
-/// range: below 0.01 (AccumulationTime above 10 s) recoverPoint would visit 1 / corr + 3 candidates per point.
+/// corr >= 1 (AccumulationTime <= 100 ms) raw counts below 2^24 do not collide, so recovery is exact; below 1 they do and
+/// recoverPoint takes the candidate nearest v / corr (approximate). 0.01 .. 1e6 is a plausibility range: below 0.01
+/// (AccumulationTime above 10 s) recoverPoint would visit 1 / corr + 3 candidates per point.
 inline std::string correctionRefusal(std::size_t fid, double corr)
 {
   if (corr >= 0.01 && corr < 1e6) return std::string();
@@ -478,7 +470,6 @@ inline Refusal recoverPoint(const Cal& cal, double b, double mz, float im, float
 /// Points left after each stage of one frame, for logging.
 struct FrameCounts
 {
-  std::uint64_t raw = 0;
   std::uint64_t after_streak = 0;
   std::uint64_t after_halo = 0;   ///< == after_streak with the halo off
   std::uint64_t kept = 0;         ///< after the window gate; == after_halo without one
@@ -600,7 +591,6 @@ inline FrameCounts denoiseMs1Frame(const std::uint32_t* scan, const std::uint32_
                                    Scratch& w, std::vector<std::uint8_t>& keep)
 {
   FrameCounts c;
-  c.raw = n;
   if (n > std::numeric_limits<std::uint32_t>::max()) throw std::invalid_argument("dnoise: more than 2^32-1 points in one frame");
   if (num_scans > std::numeric_limits<std::uint32_t>::max()) throw std::invalid_argument("dnoise: more than 2^32-1 scans in one frame");
   keep.assign(n, 0);

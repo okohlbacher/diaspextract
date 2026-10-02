@@ -1,74 +1,62 @@
 # Contributing to DIAspeXtract
 
-Thanks for your interest. A few things are specific to this project and will save you time.
+Thanks for your interest. This page covers what is specific to this project.
 
 ## Before you start
 
-**DIAspeXtract cannot be built against a released OpenMS package.** It includes a header that
-`scripts/apply_openms_patches.sh` installs *into* the OpenMS tree, calls an OpenMS method the same
-patch *adds*, uses APIs that postdate the newest OpenMS release, and refuses to compile against a
-`MassTrace` without move operations (the third patch). You need an OpenMS source tree at the commit
-pinned in `patches/openms.lock` (develop, 2026-04-24), patched by that script — the patches are cut
-against exactly that commit. `.github/workflows/build.yml` does exactly this and is the reference
-recipe.
+**You need a patched OpenMS.** DIAspeXtract does not build against a released OpenMS package. It needs
+OpenMS at the commit pinned in `patches/openms.lock`, patched by `scripts/apply_openms_patches.sh`.
+[README.md](README.md#install) lists the steps, and `.github/workflows/build.yml` is the reference recipe.
 
-**It needs a large machine.** At the shipped defaults (100 threads, one 600-s cell per tile, two tiles in flight)
-DIAspeXtract 1.6.0 peaked at 5–20 GB on the 2-hour HeLa runs of PXD017703 (median 7.7 GB on the py3 window scheme)
-and at 25–32 GB on the 130-minute TNBC runs of PXD047793 (median about 28 GB, largest 32.3 GB), measured on the
-release's 43 public runs (CHANGELOG, v1.6.0). `DIASPEXTRACT_PIPE_TILES=1` runs one tile at a time and lowers the
-peak; one tile for the whole run (`-tile:cells_per_tile 0`) takes several times as much. The test suite runs on
-a synthetic input and needs none of that.
+**You need a large machine for real data.** The Requirements table in [README.md](README.md#requirements) gives
+the memory that real runs need, and [docs/options.md](docs/options.md#speed-and-memory) lists the settings that
+lower it. The tests use a small synthetic input and run on any machine.
 
-## The one rule that matters
+## Changing a default
 
-**A change to extraction is judged on identified peptides, never on spectrum counts, and never on
-one search engine alone.** This project has repeatedly found changes that improve one engine and
-harm the other, and changes whose sign flips between acquisitions. The standing bar for altering a
-default is:
+Judge a change on identified peptides, not on spectrum counts. You may screen ideas with Sage alone, because it
+is fast. Before you change a default or quote a gain, show all three:
 
-- both search engines,
-- entrapment FDR inside the previous interval,
-- and confirmation on a second acquisition.
+- more identified peptides with both Sage and MSFragger;
+- entrapment FDR inside the previous interval (`bench/entrapment.py`);
+- the same result on a second public run.
 
-If a change is *supposed* to be output-neutral, prove it with a spectrum-list digest
-(`bench/semantic_digest.py`) rather than with peptide counts — counts move by ~2% from a last-ulp
-arithmetic difference, so equal counts are not equality.
+If a change should leave the output alone, prove it with `bench/semantic_digest.py`: the digests must match.
+Equal peptide counts do not prove equal output, because a last-bit arithmetic difference can move them.
+[bench/README.md](bench/README.md) describes these scripts, including the one MSFragger needs to read the output.
 
-**Data.** Benchmarks, regression gates and development use only public data sets deposited in ProteomeXchange (PXD
-accessions), so that every number can be reproduced by anyone. Do not add, stage or cite unpublished data.
+## Data
+
+Use only public data sets from ProteomeXchange (PXD accessions) for benchmarks, tests and development, so that
+anyone can reproduce every number. Do not add, stage or cite unpublished data.
 
 ## Running the tests
 
 ```bash
-python3 test/test_diaspextract.py /path/to/diaspextract     # 25 end-to-end checks (26 where the build writes mzPeak), synthetic input
+python3 test/test_diaspextract.py /path/to/diaspextract     # 29 end-to-end checks (30 where the build writes mzPeak), synthetic input
 cmake -B build -DDIASPEXTRACT_TESTS_ONLY=ON && cmake --build build && ctest --test-dir build
 ```
 
-The second form needs no OpenMS and is what CI runs on four platforms.
+The second command needs no OpenMS. CI runs it on Linux, macOS and Windows for every pull request. The
+end-to-end checks need OpenMS, so CI runs them only in the full build (`build.yml`: weekly, on release tags and on
+demand). Run them yourself before you open a pull request.
 
-Which CI legs run depends on the repository. The two Linux legs of `tests.yml` run on every push and
-pull request everywhere. The macOS and Windows legs, and the weekly OpenMS-from-source build of
-`build.yml`, run on the public repository (`okohlbacher/diaspextract`) and on a manual
-`workflow_dispatch`; the private development repository runs Linux only on push, because its Actions
-minutes are paid and the release gate is the public repository's CI on the exported code, green on all
-legs before a release is tagged. To run the full matrix on the development repository, dispatch
-`tests.yml` by hand.
-
-Run the end-to-end suite from a shell with no `DIASPEXTRACT_*` variable set: it passes the caller's
-environment through to the tool (check 22 strips only the two old prefixes it tests), so a stray probe
-variable would configure every check. CI runs it under `env -i`, and the cluster publish script starts
-from a clean environment.
+Run the end-to-end checks from a shell with no `DIASPEXTRACT_*` variable set. The suite passes your
+environment to the tool, so a stray variable changes every check.
 
 ## Pull requests
 
-- Say what you measured, on what, and what would have falsified it. "Should be faster" is not a
-  measurement; a wall-clock delta from two runs on a shared machine usually isn't either.
-- Keep defaults reproducible: a run with `-in`, `-out` and `-threads` must reproduce the benchmarked
-  configuration. There is a test for this, because it has been broken before.
-- Don't commit acquisition or specimen identifiers; keep sample paths and names in untracked local files.
+- Say what you measured, on which data, and what result would have proven you wrong. "Should be faster" is not
+  a measurement. Neither, usually, is the wall-time difference of two runs on a shared machine.
+- Keep the defaults reproducible: a run with only `-in`, `-out` and `-threads` must give the benchmarked
+  configuration.
+- If you add, change or remove an option, update its help text, [docs/options.md](docs/options.md) and any
+  mention in README.md. CI fails when README.md or this page names an option the tool does not have. If the
+  change alters the spectra, add a CHANGELOG entry.
+- Do not commit acquisition or specimen identifiers. Keep sample paths and names in untracked local files.
 
 ## Reporting a bug
 
-Include the DIAspeXtract version, the OpenMS version, the full command line, and the `spx:*` userParams
-from the output mzML — they record which detector and which calibration actually ran, which is
-usually the answer.
+Include the DIAspeXtract version, the OpenMS version, the full command line, and the `spx:*` userParams from the
+header of the output mzML. They record the settings that actually ran, which usually explains the problem.
+Report security issues as [SECURITY.md](SECURITY.md) describes, not in a public issue.

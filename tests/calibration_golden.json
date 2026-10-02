@@ -1,6 +1,6 @@
 [
  {
-  "file": "IH2",
+  "file": "reference run 1",
   "model_type": 1,
   "timebase": 0.125,
   "delay": 25655.375,
@@ -134,7 +134,7 @@
   ]
  },
  {
-  "file": "IH1",
+  "file": "reference run 2",
   "model_type": 1,
   "timebase": 0.125,
   "delay": 25655.375,
@@ -268,7 +268,7 @@
   ]
  },
  {
-  "file": "IH3",
+  "file": "reference run 3",
   "model_type": 1,
   "timebase": 0.125,
   "delay": 25655.375,

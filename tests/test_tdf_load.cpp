@@ -1,7 +1,8 @@
 // Tests of src/TdfLoad.h: every analysis.tdf read the tool makes is whole or refused, and each refusal names what it
-// refuses. Needs SQLite, not OpenMS: CMake builds it only where it finds SQLite3, with a shim include directory that maps
-// <OpenMS/FORMAT/TdfMzCalibration.h> onto src/TdfMzCalibration.h. The fixtures are synthetic tdfs shaped like IH2's,
-// written through the sqlite3 C API into a temporary directory; corrupted ones get 12 bytes of 0xff over a page header.
+// refuses. Needs SQLite, not OpenMS: CMake builds it only where it finds SQLite3, with a shim include directory that
+// maps <OpenMS/FORMAT/TdfMzCalibration.h> onto src/TdfMzCalibration.h. The fixtures are synthetic tdfs shaped like a
+// reference run's, written through the sqlite3 C API into a temporary directory; corrupted ones get 12 bytes of 0xff
+// over a page header.
 #include "TdfLoad.h"
 #include <chrono>
 #include <clocale>
@@ -28,10 +29,10 @@ static constexpr long kPageSize = 4096;
   std::exit(2);
 }
 
-/// IH2's metadata, MzCalibration and TimsCalibration rows; @p n_frames frames (every fifth MS1, 944 scans, 1000 points,
-/// AccumulationTime 99.958); @p n_windows window rows in a table named @p windows (nullptr: no table). Frames columns carry
-/// no type, so a test can store TEXT or REAL where Bruker stores INTEGER.
-static std::string dShaped(int n_frames = 10, int n_windows = 24, const char* windows = "DiaFrameMsMsWindows")
+/// The reference run's metadata, MzCalibration and TimsCalibration rows; @p n_frames frames (every fifth MS1, 944
+/// scans, 1000 points, AccumulationTime 99.958); @p n_windows window rows in a table named @p windows (nullptr: no
+/// table). Frames columns carry no type, so a test can store TEXT or REAL where Bruker stores INTEGER.
+static std::string refShaped(int n_frames = 10, int n_windows = 24, const char* windows = "DiaFrameMsMsWindows")
 {
   std::string s =
     "PRAGMA page_size = " + std::to_string(kPageSize) + ";"
@@ -137,7 +138,7 @@ static void testWindows()
 {
   TdfDnoiseInputs in;
   std::string why;
-  const std::string ok = makeTdf("ok24.tdf", dShaped());
+  const std::string ok = makeTdf("ok24.tdf", refShaped());
   CHECK(loads(ok, in, why) && in.windows.size() == 24 && in.meta.max_num_scans == 944 && in.frames.size() == 11 && in.tims_cal.size() == 1,
         "ok24: %s, %zu windows, %u scans, %zu frame slots", why.c_str(), in.windows.size(), in.meta.max_num_scans, in.frames.size());
   const dn::GateBuild g = dn::buildMs1WindowGate(in.meta, in.windows, dn::Params{});
@@ -145,21 +146,21 @@ static void testWindows()
   CHECK(in.meta.acquisition_software == std::optional<std::string>("timsTOF") && in.meta.digitizer_num_samples == std::optional<std::string>("634073"),
         "ok24: GlobalMetadata as stored text");
 
-  const std::string absent = makeTdf("absent.tdf", dShaped(10, 0, nullptr));
+  const std::string absent = makeTdf("absent.tdf", refShaped(10, 0, nullptr));
   CHECK(loads(absent, in, why) && in.windows.empty() && !dn::buildMs1WindowGate(in.meta, in.windows, dn::Params{}).gate,
         "absent: no DiaFrameMsMsWindows table is no gate, not a refusal (%s)", why.c_str());
-  CHECK(loads(makeTdf("lower.tdf", dShaped(10, 24, "diaframemsmswindows")), in, why) && in.windows.size() == 24,
+  CHECK(loads(makeTdf("lower.tdf", refShaped(10, 24, "diaframemsmswindows")), in, why) && in.windows.size() == 24,
         "the table name resolves case-insensitively: %s, %zu windows", why.c_str(), in.windows.size());
-  refused("nocol", dShaped() + keepColumns("DiaFrameMsMsWindows", "WindowGroup, ScanNumBegin, ScanNumEnd, IsolationMz, CollisionEnergy"), "IsolationWidth");
-  refused("null_begin", dShaped() + "UPDATE DiaFrameMsMsWindows SET ScanNumBegin = NULL WHERE rowid = 3;", "NULL ScanNumBegin");
-  refused("null_end", dShaped() + "UPDATE DiaFrameMsMsWindows SET ScanNumEnd = NULL WHERE rowid = 3;", "ScanNumEnd");
+  refused("nocol", refShaped() + keepColumns("DiaFrameMsMsWindows", "WindowGroup, ScanNumBegin, ScanNumEnd, IsolationMz, CollisionEnergy"), "IsolationWidth");
+  refused("null_begin", refShaped() + "UPDATE DiaFrameMsMsWindows SET ScanNumBegin = NULL WHERE rowid = 3;", "NULL ScanNumBegin");
+  refused("null_end", refShaped() + "UPDATE DiaFrameMsMsWindows SET ScanNumEnd = NULL WHERE rowid = 3;", "ScanNumEnd");
 
   // corruption: a whole one-page table and one leaf of eighteen used to read as no gate and as half a gate
-  const std::string c24 = makeTdf("corrupt24.tdf", dShaped());
+  const std::string c24 = makeTdf("corrupt24.tdf", refShaped());
   corruptPage(c24, rootPage(c24, "DiaFrameMsMsWindows"));
   CHECK(!loads(c24, in, why) && has(why, "malformed") && has(why, "DiaFrameMsMsWindows"), "corrupt24: %s", why.c_str());
-  CHECK(loads(makeTdf("ok3000.tdf", dShaped(10, 3000)), in, why) && in.windows.size() == 3000, "ok3000: %s, %zu windows", why.c_str(), in.windows.size());
-  const std::string c3000 = makeTdf("corruptmid3000.tdf", dShaped(10, 3000));
+  CHECK(loads(makeTdf("ok3000.tdf", refShaped(10, 3000)), in, why) && in.windows.size() == 3000, "ok3000: %s, %zu windows", why.c_str(), in.windows.size());
+  const std::string c3000 = makeTdf("corruptmid3000.tdf", refShaped(10, 3000));
   corruptMiddleLeaf(c3000, "DiaFrameMsMsWindows");
   CHECK(!loads(c3000, in, why) && has(why, "malformed"), "corruptmid3000: %s (%zu windows)", why.c_str(), in.windows.size());
 }
@@ -168,11 +169,11 @@ static void testFrames()
 {
   TdfDnoiseInputs in;
   std::string why;
-  CHECK(loads(makeTdf("frames_ok.tdf", dShaped()), in, why), "D-shaped: %s", why.c_str());
+  CHECK(loads(makeTdf("frames_ok.tdf", refShaped()), in, why), "reference-shaped: %s", why.c_str());
   const TdfDnoiseInputs::Frame f1 = in.frames.size() > 2 ? in.frames[1] : TdfDnoiseInputs::Frame{}, f2 = in.frames.size() > 2 ? in.frames[2] : TdfDnoiseInputs::Frame{};
   double corr = 0.0;
   CHECK(dn::recover::opentimsCorrection("99.958", corr) && f1.msms_type == 0 && f1.num_scans == 944 && f1.num_peaks == 1000 && f1.corr == corr && f1.cal == 0 &&
-          f2.msms_type == 9 && in.frames[0].msms_type == -1, "D-shaped frames: MS1 %d/%u/%u corr %a, MS2 %d", f1.msms_type, f1.num_scans, f1.num_peaks, f1.corr, f2.msms_type);
+          f2.msms_type == 9 && in.frames[0].msms_type == -1, "reference-shaped frames: MS1 %d/%u/%u corr %a, MS2 %d", f1.msms_type, f1.num_scans, f1.num_peaks, f1.corr, f2.msms_type);
   CHECK(in.ms1_max_scans == std::vector<std::uint32_t>{944}, "ms1_max_scans");
   // the tool instantiates recover:: and FrameCoverage on TdfDnoiseInputs::Frame
   CHECK(dn::recover::frameCheck(in.frames, 1, 1000, true, 1000) == dn::recover::Refusal::none &&
@@ -181,28 +182,28 @@ static void testFrames()
   CHECK(cov.firstMissing(in.frames) == 1 && cov.mark(1) && cov.mark(6) && cov.firstMissing(in.frames) == 0, "FrameCoverage on the loaded table");
 
   // every integer is typed and ranged before it is narrowed
-  refused("scans_neg", dShaped() + "UPDATE Frames SET NumScans = -1 WHERE Id = 3;", "NumScans");
-  refused("scans_2p32", dShaped() + "UPDATE Frames SET NumScans = 4294967297 WHERE Id = 3;", "NumScans");
-  refused("scans_text", dShaped() + "UPDATE Frames SET NumScans = '944' WHERE Id = 3;", "NumScans");
-  refused("scans_real", dShaped() + "UPDATE Frames SET NumScans = 100.5 WHERE Id = 3;", "NumScans");
-  refused("peaks_2p32", dShaped() + "UPDATE Frames SET NumPeaks = 4294967301 WHERE Id = 3;", "NumPeaks");
-  refused("peaks_neg", dShaped() + "UPDATE Frames SET NumPeaks = -1 WHERE Id = 3;", "NumPeaks");
-  refused("type_2p31", dShaped() + "UPDATE Frames SET MsMsType = 2147483648 WHERE Id = 3;", "MsMsType");
-  refused("type_text", dShaped() + "UPDATE Frames SET MsMsType = '0' WHERE Id = 3;", "MsMsType");
-  refused("cal_2p32", dShaped() + "UPDATE Frames SET TimsCalibration = 4294967297 WHERE Id = 3;", "TimsCalibration");
-  refused("cal_null", dShaped() + "UPDATE Frames SET TimsCalibration = NULL WHERE Id = 3;", "TimsCalibration");
-  refused("cal_unknown", dShaped() + "UPDATE Frames SET TimsCalibration = 7 WHERE Id = 3;", "unknown TimsCalibration");
-  refused("calid_2p32", dShaped() + "INSERT INTO TimsCalibration SELECT 4294967297, ModelType, C0, C1, C2, C3, C4, C5, C6, C7, C8, C9 FROM TimsCalibration;",
+  refused("scans_neg", refShaped() + "UPDATE Frames SET NumScans = -1 WHERE Id = 3;", "NumScans");
+  refused("scans_2p32", refShaped() + "UPDATE Frames SET NumScans = 4294967297 WHERE Id = 3;", "NumScans");
+  refused("scans_text", refShaped() + "UPDATE Frames SET NumScans = '944' WHERE Id = 3;", "NumScans");
+  refused("scans_real", refShaped() + "UPDATE Frames SET NumScans = 100.5 WHERE Id = 3;", "NumScans");
+  refused("peaks_2p32", refShaped() + "UPDATE Frames SET NumPeaks = 4294967301 WHERE Id = 3;", "NumPeaks");
+  refused("peaks_neg", refShaped() + "UPDATE Frames SET NumPeaks = -1 WHERE Id = 3;", "NumPeaks");
+  refused("type_2p31", refShaped() + "UPDATE Frames SET MsMsType = 2147483648 WHERE Id = 3;", "MsMsType");
+  refused("type_text", refShaped() + "UPDATE Frames SET MsMsType = '0' WHERE Id = 3;", "MsMsType");
+  refused("cal_2p32", refShaped() + "UPDATE Frames SET TimsCalibration = 4294967297 WHERE Id = 3;", "TimsCalibration");
+  refused("cal_null", refShaped() + "UPDATE Frames SET TimsCalibration = NULL WHERE Id = 3;", "TimsCalibration");
+  refused("cal_unknown", refShaped() + "UPDATE Frames SET TimsCalibration = 7 WHERE Id = 3;", "unknown TimsCalibration");
+  refused("calid_2p32", refShaped() + "INSERT INTO TimsCalibration SELECT 4294967297, ModelType, C0, C1, C2, C3, C4, C5, C6, C7, C8, C9 FROM TimsCalibration;",
           "TimsCalibration.Id");
-  refused("ms1_no_scans", dShaped() + "UPDATE Frames SET NumScans = 0 WHERE Id = 6;", "no scans");
-  CHECK(loads(makeTdf("ms1_empty.tdf", dShaped() + "UPDATE Frames SET NumScans = 0, NumPeaks = 0 WHERE Id = 6;"), in, why) && in.frames[6].num_peaks == 0,
+  refused("ms1_no_scans", refShaped() + "UPDATE Frames SET NumScans = 0 WHERE Id = 6;", "no scans");
+  CHECK(loads(makeTdf("ms1_empty.tdf", refShaped() + "UPDATE Frames SET NumScans = 0, NumPeaks = 0 WHERE Id = 6;"), in, why) && in.frames[6].num_peaks == 0,
         "an MS1 frame with neither scans nor points is accepted: %s", why.c_str());
-  CHECK(loads(makeTdf("ms2_no_scans.tdf", dShaped() + "UPDATE Frames SET NumScans = 0 WHERE Id = 7;"), in, why), "an MS2 frame without scans is not the port's: %s", why.c_str());
-  refused("no_frames", dShaped() + "DELETE FROM Frames;", "no Frames rows");
-  refused("no_metadata", dShaped() + "DROP TABLE GlobalMetadata;", "GlobalMetadata");
-  refused("no_timscal", dShaped() + "DROP TABLE TimsCalibration;", "linear");
-  refused("no_timscal_col", dShaped() + keepColumns("Frames", "Id, MsMsType, NumScans, NumPeaks, AccumulationTime, MzCalibration, T1"), "TimsCalibration");
-  refused("modeltype", dShaped() + "UPDATE TimsCalibration SET ModelType = 1;", "ModelType 1");
+  CHECK(loads(makeTdf("ms2_no_scans.tdf", refShaped() + "UPDATE Frames SET NumScans = 0 WHERE Id = 7;"), in, why), "an MS2 frame without scans is not the port's: %s", why.c_str());
+  refused("no_frames", refShaped() + "DELETE FROM Frames;", "no Frames rows");
+  refused("no_metadata", refShaped() + "DROP TABLE GlobalMetadata;", "GlobalMetadata");
+  refused("no_timscal", refShaped() + "DROP TABLE TimsCalibration;", "linear");
+  refused("no_timscal_col", refShaped() + keepColumns("Frames", "Id, MsMsType, NumScans, NumPeaks, AccumulationTime, MzCalibration, T1"), "TimsCalibration");
+  refused("modeltype", refShaped() + "UPDATE TimsCalibration SET ModelType = 1;", "ModelType 1");
   {
     std::string w;
     CHECK(!diaspextract::loadTdfDnoise((g_dir / "does_not_exist.tdf").string(), in, w) && has(w, "cannot open"), "a missing file: %s", w.c_str());
@@ -210,7 +211,7 @@ static void testFrames()
 
   // a scan table per TimsCalibration row over its own MS1 frames' scans: MS1 frames on a TNBC-shaped row with 918 scans,
   // MS2 frames on a flat row with 40,000 -- the file's MAX(NumScans), which the gate still uses
-  const std::string two = dShaped() +
+  const std::string two = refShaped() +
     "UPDATE TimsCalibration SET C3 = C2;"
     "INSERT INTO TimsCalibration VALUES (2, 2, 1, 917, 217.9811466010841, 74.83820441307512, 33.0, 1, 0.02256006096271849, 131.32054866963384,"
     "  12.961442137235451, 2637.0446006790567);"
@@ -227,7 +228,7 @@ static void testFrames()
         "each row's table over its MS1 scans builds; over the file's MAX neither would");
 
   // corruption in the middle of Frames: refused at setup, and by the calibration read (whose T1 loop used to stop early)
-  const std::string ok3000 = makeTdf("frames3000.tdf", dShaped(3000));
+  const std::string ok3000 = makeTdf("frames3000.tdf", refShaped(3000));
   {
     diaspextract::TdfMzCalibration cal;
     std::vector<double> t1;
@@ -235,7 +236,7 @@ static void testFrames()
     CHECK(loads(ok3000, in, why) && in.frames.size() == 3001, "frames3000: %s", why.c_str());
     CHECK(diaspextract::loadTdfCalibration(ok3000, cal, t1, w) && t1.size() == 3001 && t1[3000] == 25.727120813485598 + 3000 * 1e-6 && cal.C1 == 155279.13067653627,
           "loadTdfCalibration frames3000: %s (%zu T1)", w.c_str(), t1.size());
-    const std::string bad = makeTdf("framescorrupt3000.tdf", dShaped(3000));
+    const std::string bad = makeTdf("framescorrupt3000.tdf", refShaped(3000));
     corruptMiddleLeaf(bad, "Frames");
     CHECK(!loads(bad, in, why) && has(why, "malformed"), "a corrupt Frames leaf: %s", why.c_str());
     CHECK(!diaspextract::loadTdfCalibration(bad, cal, t1, w) && has(w, "malformed"), "loadTdfCalibration, a corrupt Frames leaf: %s", w.c_str());
@@ -248,15 +249,15 @@ static void testAccumulationTime()
   std::string why;
   int k = 0;
   for (const char* text : {"99,953", "abc", "0", "-99.958", " 99.958", "99.958ms", ""})
-    refused(("acc_bad" + std::to_string(k++)).c_str(), dShaped() + "UPDATE Frames SET AccumulationTime = '" + text + "' WHERE Id = 6;", "AccumulationTime");
-  refused("acc_null", dShaped() + "UPDATE Frames SET AccumulationTime = NULL WHERE Id = 6;", "AccumulationTime");
-  CHECK(loads(makeTdf("acc_text.tdf", dShaped() + "UPDATE Frames SET AccumulationTime = '99.953' WHERE Id = 6;"), in, why) &&
+    refused(("acc_bad" + std::to_string(k++)).c_str(), refShaped() + "UPDATE Frames SET AccumulationTime = '" + text + "' WHERE Id = 6;", "AccumulationTime");
+  refused("acc_null", refShaped() + "UPDATE Frames SET AccumulationTime = NULL WHERE Id = 6;", "AccumulationTime");
+  CHECK(loads(makeTdf("acc_text.tdf", refShaped() + "UPDATE Frames SET AccumulationTime = '99.953' WHERE Id = 6;"), in, why) &&
           in.frames[6].corr == 100.0 / 99.953 && in.frames[1].corr == 100.0 / 99.958, "AccumulationTime as TEXT and as REAL: %s", why.c_str());
   // above 100 ms the correction loads and is accepted (raw counts approximated, see recoverPoint)
-  CHECK(loads(makeTdf("acc_166.tdf", dShaped() + "UPDATE Frames SET AccumulationTime = '166' WHERE Id = 6;"), in, why) && in.frames[6].corr == 100.0 / 166.0 &&
+  CHECK(loads(makeTdf("acc_166.tdf", refShaped() + "UPDATE Frames SET AccumulationTime = '166' WHERE Id = 6;"), in, why) && in.frames[6].corr == 100.0 / 166.0 &&
           dn::recover::correctionRefusal(6, in.frames[6].corr).empty() && dn::recover::correctionRefusal(1, in.frames[1].corr).empty(),
         "AccumulationTime 166: %s", why.c_str());
-  CHECK(loads(makeTdf("acc_100042.tdf", dShaped() + "UPDATE Frames SET AccumulationTime = 100.042 WHERE Id = 6;"), in, why) && in.frames[6].corr < 1.0 &&
+  CHECK(loads(makeTdf("acc_100042.tdf", refShaped() + "UPDATE Frames SET AccumulationTime = 100.042 WHERE Id = 6;"), in, why) && in.frames[6].corr < 1.0 &&
           dn::recover::correctionRefusal(6, in.frames[6].corr).empty(), "AccumulationTime 100.042 (REAL): %s", why.c_str());
   // opentims parses under a C-locale guard; so must the port, whatever LC_NUMERIC the process has
   bool comma = false;
@@ -266,11 +267,11 @@ static void testAccumulationTime()
     if (std::setlocale(LC_NUMERIC, "de_DE.UTF-8") && std::strtod("99.953", nullptr) == 99.0)
     {
       comma = true;
-      CHECK(loads(makeTdf("acc_de.tdf", dShaped() + "UPDATE Frames SET AccumulationTime = '99.953' WHERE Id = 6;"), in, why) &&
+      CHECK(loads(makeTdf("acc_de.tdf", refShaped() + "UPDATE Frames SET AccumulationTime = '99.953' WHERE Id = 6;"), in, why) &&
               in.frames[6].corr == 100.0 / 99.953 && in.frames[1].corr == 100.0 / 99.958, "under de_DE: %s", why.c_str());
-      refused("acc_de_comma", dShaped() + "UPDATE Frames SET AccumulationTime = '99,953' WHERE Id = 6;", "AccumulationTime");
+      refused("acc_de_comma", refShaped() + "UPDATE Frames SET AccumulationTime = '99,953' WHERE Id = 6;", "AccumulationTime");
       diaspextract::TdfAxisBounds bd;   // the preflight's GlobalMetadata bounds parse in the C locale too
-      CHECK(diaspextract::loadTdfAxisBounds(makeTdf("bounds_de.tdf", dShaped()), bd, why) && bd.mz_lo == 99.990834 && bd.mz_hi == 1700.0 && bd.n_bins == 634073,
+      CHECK(diaspextract::loadTdfAxisBounds(makeTdf("bounds_de.tdf", refShaped()), bd, why) && bd.mz_lo == 99.990834 && bd.mz_hi == 1700.0 && bd.n_bins == 634073,
             "loadTdfAxisBounds under de_DE: %s", why.c_str());
     }
     std::setlocale(LC_NUMERIC, saved.c_str());
@@ -283,17 +284,17 @@ static void testCalibrationAndBounds()
   diaspextract::TdfMzCalibration cal;
   std::vector<double> t1;
   std::string why;
-  const std::string ok = makeTdf("cal_ok.tdf", dShaped());
+  const std::string ok = makeTdf("cal_ok.tdf", refShaped());
   CHECK(diaspextract::loadTdfCalibration(ok, cal, t1, why) && t1.size() == 11 && cal.digitizer_timebase == 0.125 && cal.T1_ref == 25.693668980735552,
         "loadTdfCalibration: %s", why.c_str());
-  CHECK(diaspextract::loadTdfCalibration(makeTdf("cal_nocol.tdf", dShaped() + keepColumns("Frames", "Id, MsMsType, NumScans, NumPeaks, AccumulationTime, TimsCalibration, T1")), cal, t1, why),
+  CHECK(diaspextract::loadTdfCalibration(makeTdf("cal_nocol.tdf", refShaped() + keepColumns("Frames", "Id, MsMsType, NumScans, NumPeaks, AccumulationTime, TimsCalibration, T1")), cal, t1, why),
         "no Frames.MzCalibration column and one MzCalibration row: %s", why.c_str());
-  CHECK(!diaspextract::loadTdfCalibration(makeTdf("cal_nocol2.tdf", dShaped() + keepColumns("Frames", "Id, MsMsType, NumScans, NumPeaks, AccumulationTime, TimsCalibration, T1") +
+  CHECK(!diaspextract::loadTdfCalibration(makeTdf("cal_nocol2.tdf", refShaped() + keepColumns("Frames", "Id, MsMsType, NumScans, NumPeaks, AccumulationTime, TimsCalibration, T1") +
                                                  "INSERT INTO MzCalibration SELECT 2, ModelType, DigitizerTimebase, DigitizerDelay, T1, dC1, C0, C1, C2, dC2, C3, C4 FROM MzCalibration;"),
                                          cal, t1, why) && has(why, "need exactly 1"), "no column and two rows: %s", why.c_str());
   // a generated Frames.MzCalibration column (SQLite 3.31+) is the frames' reference like a stored one: PRAGMA table_info skips it
   if (sqlite3_libversion_number() >= 3031000)
-    CHECK(diaspextract::loadTdfCalibration(makeTdf("cal_generated.tdf", dShaped() +
+    CHECK(diaspextract::loadTdfCalibration(makeTdf("cal_generated.tdf", refShaped() +
                                                    "INSERT INTO MzCalibration SELECT 2, ModelType, DigitizerTimebase, DigitizerDelay, T1, dC1, C0, 2 * C1, C2, dC2, C3, C4 FROM MzCalibration;"
                                                    "ALTER TABLE Frames RENAME TO F0;"
                                                    "CREATE TABLE Frames (Id INTEGER PRIMARY KEY, MsMsType, NumScans, NumPeaks, AccumulationTime, TimsCalibration, T1,"
@@ -301,23 +302,23 @@ static void testCalibrationAndBounds()
                                                    "INSERT INTO Frames SELECT Id, MsMsType, NumScans, NumPeaks, AccumulationTime, TimsCalibration, T1 FROM F0; DROP TABLE F0;"),
                                            cal, t1, why) && cal.C1 == 155279.13067653627 && t1.size() == 11,
           "a generated MzCalibration column and two rows: %s", why.c_str());
-  CHECK(!diaspextract::loadTdfCalibration(makeTdf("cal_two.tdf", dShaped() + "INSERT INTO MzCalibration SELECT 2, ModelType, DigitizerTimebase, DigitizerDelay, T1, dC1, C0, C1, C2, dC2, C3, C4 FROM MzCalibration;"
+  CHECK(!diaspextract::loadTdfCalibration(makeTdf("cal_two.tdf", refShaped() + "INSERT INTO MzCalibration SELECT 2, ModelType, DigitizerTimebase, DigitizerDelay, T1, dC1, C0, C1, C2, dC2, C3, C4 FROM MzCalibration;"
                                                  "UPDATE Frames SET MzCalibration = 2 WHERE Id = 4;"), cal, t1, why) && has(why, "2 distinct"),
         "frames on two MzCalibration rows: %s", why.c_str());
-  CHECK(!diaspextract::loadTdfCalibration(makeTdf("cal_notable.tdf", dShaped() + "DROP TABLE MzCalibration;"), cal, t1, why) && has(why, "MzCalibration"),
+  CHECK(!diaspextract::loadTdfCalibration(makeTdf("cal_notable.tdf", refShaped() + "DROP TABLE MzCalibration;"), cal, t1, why) && has(why, "MzCalibration"),
         "no MzCalibration table: %s", why.c_str());
 
   diaspextract::TdfAxisBounds bd;
   CHECK(diaspextract::loadTdfAxisBounds(ok, bd, why) && bd.n_bins == 634073 && bd.mz_lo == 99.990834 && bd.mz_hi == 1700.0, "loadTdfAxisBounds: %s", why.c_str());
-  CHECK(!diaspextract::loadTdfAxisBounds(makeTdf("bounds_notable.tdf", dShaped() + "DROP TABLE GlobalMetadata;"), bd, why) && has(why, "GlobalMetadata"),
+  CHECK(!diaspextract::loadTdfAxisBounds(makeTdf("bounds_notable.tdf", refShaped() + "DROP TABLE GlobalMetadata;"), bd, why) && has(why, "GlobalMetadata"),
         "no GlobalMetadata: %s", why.c_str());
   // the two bounds are the negative-C2 domain's: 1e8 bins and m/z 1e5 are accepted, one more is not
-  CHECK(diaspextract::loadTdfAxisBounds(makeTdf("bounds_max.tdf", dShaped() + "UPDATE GlobalMetadata SET Value = '100000000' WHERE Key = 'DigitizerNumSamples';"
+  CHECK(diaspextract::loadTdfAxisBounds(makeTdf("bounds_max.tdf", refShaped() + "UPDATE GlobalMetadata SET Value = '100000000' WHERE Key = 'DigitizerNumSamples';"
                                                 "UPDATE GlobalMetadata SET Value = '100000' WHERE Key = 'MzAcqRangeUpper';"), bd, why) &&
           bd.n_bins == 100000000 && bd.mz_hi == 1e5, "DigitizerNumSamples 1e8, MzAcqRangeUpper 1e5: %s", why.c_str());
-  CHECK(!diaspextract::loadTdfAxisBounds(makeTdf("bounds_bins.tdf", dShaped() + "UPDATE GlobalMetadata SET Value = '100000001' WHERE Key = 'DigitizerNumSamples';"), bd, why) &&
+  CHECK(!diaspextract::loadTdfAxisBounds(makeTdf("bounds_bins.tdf", refShaped() + "UPDATE GlobalMetadata SET Value = '100000001' WHERE Key = 'DigitizerNumSamples';"), bd, why) &&
           has(why, "DigitizerNumSamples"), "DigitizerNumSamples 1e8 + 1: %s", why.c_str());
-  CHECK(!diaspextract::loadTdfAxisBounds(makeTdf("bounds_mz.tdf", dShaped() + "UPDATE GlobalMetadata SET Value = '100000.001' WHERE Key = 'MzAcqRangeUpper';"), bd, why) &&
+  CHECK(!diaspextract::loadTdfAxisBounds(makeTdf("bounds_mz.tdf", refShaped() + "UPDATE GlobalMetadata SET Value = '100000.001' WHERE Key = 'MzAcqRangeUpper';"), bd, why) &&
           has(why, "not usable"), "MzAcqRangeUpper above 1e5: %s", why.c_str());
 
   // a negative C2 (PXD029836 run 1418's row, timsTOF Pro 2) loads; one whose root stops existing inside the domain is
@@ -325,17 +326,17 @@ static void testCalibrationAndBounds()
   const std::string pxd = "UPDATE MzCalibration SET DigitizerTimebase = 0.19999999999999998, DigitizerDelay = 25779.8, T1 = 25.618823611312585,"
                           "  dC1 = 20, C0 = 314.1341896383674, C1 = 154199.217568937, C2 = -0.0010422663259118895;"
                           "UPDATE Frames SET T1 = 25.614796222167577 - Id * 1e-6;";
-  CHECK(diaspextract::loadTdfCalibration(makeTdf("cal_c2neg.tdf", dShaped() + pxd), cal, t1, why) && cal.C2 == -0.0010422663259118895 &&
+  CHECK(diaspextract::loadTdfCalibration(makeTdf("cal_c2neg.tdf", refShaped() + pxd), cal, t1, why) && cal.C2 == -0.0010422663259118895 &&
           cal.digitizer_timebase == 0.19999999999999998 && t1.size() == 11 && t1[10] == 25.614796222167577 - 10 * 1e-6,
         "a negative C2 inside its domain: %s", why.c_str());
-  CHECK(!diaspextract::loadTdfCalibration(makeTdf("cal_c2deep.tdf", dShaped() + pxd + "UPDATE MzCalibration SET C2 = -0.1;"), cal, t1, why) &&
+  CHECK(!diaspextract::loadTdfCalibration(makeTdf("cal_c2deep.tdf", refShaped() + pxd + "UPDATE MzCalibration SET C2 = -0.1;"), cal, t1, why) &&
           has(why, "C2 -0.1 < 0 outside its verified domain") && has(why, "stops existing at TOF index 7.93471e+07"),
         "C2 -0.1: %s", why.c_str());
-  CHECK(!diaspextract::loadTdfCalibration(makeTdf("cal_c2neg_hot.tdf", dShaped() + pxd + "UPDATE Frames SET T1 = 1100 WHERE Id = 7;"), cal, t1, why) &&
+  CHECK(!diaspextract::loadTdfCalibration(makeTdf("cal_c2neg_hot.tdf", refShaped() + pxd + "UPDATE Frames SET T1 = 1100 WHERE Id = 7;"), cal, t1, why) &&
           has(why, "frame 7: Frames.T1 1100 is not within 1000 K of the MzCalibration T1 25.6188"), "a negative C2, frame 7 at 1100 C: %s", why.c_str());
-  CHECK(diaspextract::loadTdfCalibration(makeTdf("cal_c2neg_null.tdf", dShaped() + pxd + "UPDATE Frames SET T1 = NULL WHERE Id = 7;"), cal, t1, why) &&
+  CHECK(diaspextract::loadTdfCalibration(makeTdf("cal_c2neg_null.tdf", refShaped() + pxd + "UPDATE Frames SET T1 = NULL WHERE Id = 7;"), cal, t1, why) &&
           t1[7] == cal.T1_ref, "a negative C2, a NULL T1 is the reference temperature: %s", why.c_str());
-  CHECK(diaspextract::loadTdfCalibration(makeTdf("cal_c2pos_hot.tdf", dShaped() + "UPDATE Frames SET T1 = 1100 WHERE Id = 7;"), cal, t1, why) && t1[7] == 1100.0,
+  CHECK(diaspextract::loadTdfCalibration(makeTdf("cal_c2pos_hot.tdf", refShaped() + "UPDATE Frames SET T1 = 1100 WHERE Id = 7;"), cal, t1, why) && t1[7] == 1100.0,
         "a positive C2 reads frame 7 at 1100 C as before: %s", why.c_str());
 }
 
@@ -353,7 +354,7 @@ int main()
   if (g_fail == before) std::printf("OK  Frames and TimsCalibration: typed and ranged before narrowing; per-row scan need; corrupt leaf refused\n");
   before = g_fail;
   testAccumulationTime();
-  if (g_fail == before) std::printf("OK  AccumulationTime: whole C-locale decimal > 0; above 100 ms the setup refusal\n");
+  if (g_fail == before) std::printf("OK  AccumulationTime: whole C-locale decimal > 0; above 100 ms accepted (approximate raw counts)\n");
   before = g_fail;
   testCalibrationAndBounds();
   if (g_fail == before) std::printf("OK  loadTdfCalibration and loadTdfAxisBounds: whole reads, schema-decided fallback; a negative C2 inside its domain, frame T1 span\n");

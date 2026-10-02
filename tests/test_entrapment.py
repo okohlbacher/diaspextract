@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Self-checks for the corrected entrapment estimator (bench/entrapment.py).
 
-Guards the two 2026-07-28 corrections that changed published headline numbers:
-peptide-hypothesis ratio (not protein ratio) and foreign-ONLY entrapment counting.
+Guards its two corrections: peptide-hypothesis ratio (not protein ratio) and foreign-ONLY entrapment counting.
 """
 import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bench"))

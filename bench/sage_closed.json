@@ -1,14 +1,8 @@
 {
   "_comment": [
-    "CLOSED search config. Byte-for-byte the configuration used for every peptide_q number in",
-    "README.md and docs/. It previously lived outside the repository,",
-    "untracked -- a reproducibility hole in the single file that DEFINES the project's metric.",
-    "The `fasta` path is rewritten by open_bench.py at run time; everything else is fixed.",
-    "",
-    "Note what this config CANNOT see: precursor_tol is +-25 ppm, so any mass shift larger than",
-    "that is invisible. A charge error fabricates dM = (z'-z)(m/z - 1.00728), i.e. hundreds of Da.",
-    "Those PSMs simply do not appear -- which is why closed search cannot score the failure mode",
-    "this tool exists to avoid."
+    "A closed-search Sage config. Set `fasta` to the target FASTA before running.",
+    "precursor_tol is +-25 ppm, so a charge error (dM = (z'-z)(m/z - 1.00728), hundreds of Da)",
+    "produces no PSM: a closed search cannot see it."
   ],
   "database": {
     "bucket_size": 8192,

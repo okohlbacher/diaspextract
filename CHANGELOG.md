@@ -1,5 +1,79 @@
 # Changelog
 
+## v1.7.0 — 2026-10-02
+
+**Why 1.7.0.** A simplification release. Option values that did no better than the default, and debug settings, are
+removed. The help texts and the README are rewritten in plain language. The spectra do not change (see "Output").
+
+### Removed
+
+Each option or value below is gone, and the default behaviour is now the only one.
+
+- `-gate:coelution`: the gate's co-elution score is always based on the Pearson correlation (`pearson`); `logoverlap`
+  is gone.
+- `-gate:variance_support`: the variant that computed that correlation only over the points where either profile has
+  signal, instead of over the whole retention-time range, is gone.
+- `-charge:scoring`: the charge and the monoisotope always come from counting isotope partners (`count`); `envelope`
+  is gone.
+- `-charge:mono_averagine_guard` and `-charge:mono_averagine_select`: the two averagine tests of the monoisotope
+  (both off by default) are gone.
+- `-charge:mono_profile_check true`, the first version of the monoisotope check, with `-charge:mono_profile_min_corr`
+  and `-charge:mono_profile_max_dim`, which applied only to it. The option now takes `v2` (the default) or `false`.
+- `-charge:iso_partner`: the charge call always takes the first matching isotope partner (`first`); `closest` is gone.
+- `-assembly:cap_rank`: the fragments kept under `-assembly:max_fragments` are always ranked by their evidence
+  (`evidence`); `corr_inten` and `umpire` are gone.
+- `-assembly:fragment_fuse_mode`: fragment fusion always groups around the strongest fragments (`anchored`);
+  `linkage` is gone.
+- `-assembly:require_isotope_support` and `-assembly:default_charge`: precursors left without a charge call (no
+  isotope partner) are always dropped. The charge option applied only to those precursors, when they were kept.
+- `-trace:split_scan_time`: splitting a trace at a valley always uses the run's MS1 cycle time (`frame`); `trace` is
+  gone.
+- `-trace:mz_estimator`: a trace's m/z is always that of its most intense peak (`apex`); `mean` and `median` are gone.
+- `-trace:band_edges`: the integer detector always takes its flight-time band edges from the acquisition
+  (`acquisition`); `slab` is gone, and with it `DIASPEXTRACT_TILE_RESIDENT`, which served it.
+- The gate dump (`DIASPEXTRACT_GATE_DUMP`, `DIASPEXTRACT_GATE_TARGETS`) and thirteen undocumented debug
+  environment variables used during development. Unset, none of them changed the output; set, they now have no
+  effect.
+- Benchmark scripts, run plans and search configurations that are no longer used, from `bench/` and `scripts/`.
+  `bench/README.md` lists the tools that remain.
+- The CMake check that stopped a configure given a pre-1.3.0 name of `DIASPEXTRACT_TESTS_ONLY`
+  (`SPEXTRACTOR_TESTS_ONLY`, `DIASPEXTRACTOR_TESTS_ONLY`). CMake now ignores those names and configures the full
+  build; use `-DDIASPEXTRACT_TESTS_ONLY=ON`.
+
+### Changed
+
+- **Plain help texts.** `--help` describes each option in plain language: what it does and what its default means.
+  Warnings and error messages use the same plain language. The names, defaults, valid values and bounds of the
+  remaining options are unchanged, except that `-charge:mono_profile_check` no longer accepts `true`.
+- **README** rewritten in plain language, with one flow chart of the algorithm in place of the three diagrams.
+- **`docs/options.md`**: the complete option reference, with every option, its default and its valid values.
+- **Study records and design notes** under `docs/` are no longer part of the repository. Earlier entries below link to
+  some of them; they remain available at the `v1.6.1` tag.
+- With `-DMZPEAK_ROOT`, CMake no longer searches the checkout's `build-release/` and `buildfix/` directories for the
+  mzPeak library; build it into `build/`, as `scripts/build_mzpeak_lib.sh` does.
+
+### Output
+
+- The spectra are identical to 1.6.1 at the defaults, checked on public runs of PXD017703 and PXD047793, and under a
+  set of non-default options, checked on a PXD017703 run. On that run every `spx:` header stamp is identical too. The
+  removed code ran only when a removed option or variable selected it.
+- The mzML header's list of tool parameters no longer carries the removed options, and it records the new version.
+- The log is shorter. The step-timing and histogram lines (`[tstage]`, `[infer]`, `[pspan]`, the `[outer]` precursor
+  sub-steps and the `[isotol]` partner-rule line) and the lines of the removed switches are gone. Some lines are
+  reworded: `[ms1-prune]` no longer reports `bad_mz`, the drop of precursors without an isotope partner is now logged
+  as `[emission]`, and a few warnings use plain language.
+
+### Migrating
+
+- A command line that passes a removed option now stops with an unknown-option error. Delete the option. If its value
+  was the default, nothing changes. If it selected a removed mode, the run now uses the default and its spectra
+  change; to keep that mode, stay on 1.6.1. (`-assembly:default_charge`, `-charge:mono_profile_min_corr` and
+  `-charge:mono_profile_max_dim` had no effect outside a removed mode.)
+- `-charge:mono_profile_check true` stops with an invalid-value error. Use `v2` (the default) or `false`.
+- An INI file written by 1.6.1 lists the removed options, so 1.7.0 refuses it: it warns about each unknown parameter
+  and stops before the run. Write a new INI with `-write_ini` and copy over the values you changed.
+- The removed environment variables are ignored.
+
 ## v1.6.1 — 2026-10-02
 
 **Why 1.6.1.** A documentation release for the project's data policy: benchmarks, regression gates and development

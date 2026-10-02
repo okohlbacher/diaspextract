@@ -65,11 +65,13 @@ namespace spx
     double acq_lo = std::numeric_limits<double>::quiet_NaN(), acq_hi = std::numeric_limits<double>::quiet_NaN();   // GlobalMetadata MzAcqRange
     long n_bins = 0; std::string bounds_why;                                                                        // DigitizerNumSamples, or why not
 
+    /// @p from < 0 counts from the member's end; @p len < 0 reads to it.
     static std::vector<char> readMember_(zip_t* z, const char* name, zip_int64_t from = 0, zip_int64_t len = -1)
     {
       zip_int64_t idx = zip_name_locate(z, name, 0);
       if (idx < 0) throw std::runtime_error(std::string("mzpeak: member missing: ") + name);
       zip_stat_t st; zip_stat_index(z, (zip_uint64_t)idx, 0, &st);
+      if (from < 0) from += (zip_int64_t)st.size;
       if (len < 0) len = (zip_int64_t)st.size - from;
       zip_file_t* f = zip_fopen_index(z, (zip_uint64_t)idx, 0);
       if (!f) throw std::runtime_error(std::string("mzpeak: cannot open member ") + name);
@@ -88,13 +90,10 @@ namespace spx
       try
       {
         // (1) two-point transform params from the parquet footer of spectra_peaks.parquet (stored member)
-        zip_int64_t idx = zip_name_locate(z, "spectra_peaks.parquet", 0);
-        if (idx < 0) throw std::runtime_error("mzpeak: spectra_peaks.parquet missing");
-        zip_stat_t st; zip_stat_index(z, (zip_uint64_t)idx, 0, &st);
-        std::vector<char> tail = readMember_(z, "spectra_peaks.parquet", (zip_int64_t)st.size - 8, 8);
+        std::vector<char> tail = readMember_(z, "spectra_peaks.parquet", -8, 8);
         uint32_t flen; std::memcpy(&flen, tail.data(), 4);
         if (std::string(tail.data() + 4, 4) != "PAR1") throw std::runtime_error("mzpeak: peaks member is not parquet");
-        std::vector<char> footer = readMember_(z, "spectra_peaks.parquet", (zip_int64_t)st.size - 8 - flen, flen);
+        std::vector<char> footer = readMember_(z, "spectra_peaks.parquet", -8 - (zip_int64_t)flen, flen);
         uint32_t flen2 = flen;
         std::shared_ptr<parquet::FileMetaData> md = parquet::FileMetaData::Make(footer.data(), &flen2);
         std::shared_ptr<arrow::Schema> schema;
@@ -119,7 +118,10 @@ namespace spx
         else gz = readMember_(z, "vendor/analysis.tdf.gz");
         char tmpl[] = "/tmp/spx_mzpeak_tdf_XXXXXX"; int fd = mkstemp(tmpl); if (fd < 0) throw std::runtime_error("mzpeak: mkstemp");
         close(fd);
-        { z_stream zs{}; inflateInit2(&zs, 16 + MAX_WBITS); FILE* out = std::fopen(tmpl, "wb");
+        struct Rm { const char* p; ~Rm() { std::remove(p); } } rm{tmpl};   // the uncompressed tdf goes on every way out
+        { z_stream zs{}; FILE* out = std::fopen(tmpl, "wb");
+          if (!out) throw std::runtime_error(std::string("mzpeak: cannot write ") + tmpl);
+          if (inflateInit2(&zs, 16 + MAX_WBITS) != Z_OK) { std::fclose(out); throw std::runtime_error("mzpeak: gunzip of analysis.tdf.gz failed"); }
           zs.next_in = (Bytef*)gz.data(); zs.avail_in = (uInt)gz.size(); std::vector<char> ob(1 << 20); int rc;
           do { zs.next_out = (Bytef*)ob.data(); zs.avail_out = (uInt)ob.size(); rc = inflate(&zs, Z_NO_FLUSH);
                if (rc != Z_OK && rc != Z_STREAM_END) { std::fclose(out); inflateEnd(&zs); throw std::runtime_error("mzpeak: gunzip of analysis.tdf.gz failed"); }
@@ -130,7 +132,6 @@ namespace spx
             throw std::runtime_error("mzpeak: " + why);
           std::string w2; diaspextract::TdfAxisBounds bd;
           if (diaspextract::loadTdfAxisBounds(std::string(tmpl), bd, w2)) { acq_lo = bd.mz_lo; acq_hi = bd.mz_hi; n_bins = bd.n_bins; } else bounds_why = w2; }
-        std::remove(tmpl);
       }
       catch (...) { zip_close(z); throw; }
       zip_close(z);
@@ -252,7 +253,7 @@ namespace spx
   {
     if (lastMzPeakMeta() && lastMzPeakMeta()->path == path)
     {
-      // a failed sweep of another archive in between may have reset it (frame-tables review)
+      // a failed sweep of another archive in between may have reset it
       lastMzPeakCalibration() = lastMzPeakMeta()->calibration;
       return lastMzPeakMeta();
     }
@@ -276,7 +277,7 @@ namespace spx
       catch (const std::exception& e)
       {
         throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-          std::string("mzPeak input: cannot recover the exact TDF calibration (") + e.what() + "). The archive's two-point transform is ~7 ppm off and costs ~12% peptides; set DIASPEXTRACT_MZPEAK_TDF=<analysis.tdf.gz> or DIASPEXTRACT_MZPEAK_EXACT=0 to accept it.", path);
+          std::string("mzPeak input: cannot recover the exact TDF calibration (") + e.what() + "). The archive's two-point transform is less exact and identifies fewer peptides; set DIASPEXTRACT_MZPEAK_TDF=<analysis.tdf.gz> or DIASPEXTRACT_MZPEAK_EXACT=0 to accept it.", path);
       }
       lastMzPeakCalibration() = "tdf_table_modeltype1 (recovered from the archive's two-point transform + embedded vendor/analysis.tdf.gz) archive=" + path.substr(path.find_last_of('/') + 1);
     }

@@ -2,126 +2,88 @@
 
 # DIAspeXtract
 
-Extract pseudo-DDA ("pseudo-MS/MS") spectra from Bruker timsTOF **diaPASEF** data, so that any ordinary DDA search
-engine can search them.
+DIAspeXtract turns Bruker timsTOF **diaPASEF** data into pseudo-MS/MS spectra that any DDA search engine can
+search. It finds the precursor ions in the MS1 frames, collects the fragments that elute with each precursor at the
+same ion mobility, and writes one MS2 spectrum per precursor to mzML. It uses no spectral library, so an
+**open or blind search** of the output can find sequence variants and unexpected modifications. It is a standalone
+application under BSD-3-Clause that links a patched OpenMS.
 
-DIAspeXtract reads a diaPASEF acquisition (a Bruker `.d`, or mzML / mzPeak), finds precursor ions in the MS1 frames,
-finds fragment ions in the isolation windows, pairs every precursor with the fragments that co-elute with it in both
-retention time and ion mobility, and writes one MS2 spectrum per precursor hypothesis to mzML or mzPeak. Sage,
-MSFragger, Comet or anything else that reads mzML can then search the output like a DDA file. There is no spectral
-library, no prediction and no enumeration of the search space, which is the point: an **open or blind search** over the
-output can report sequence variants and unexpected modifications that a library-based DIA workflow cannot represent.
-
-It is a standalone application under BSD-3-Clause. **OpenMS is a prerequisite, not a host**: the tool links against a
-patched OpenMS source tree but lives outside it. Earlier releases were named speXtract (up to 1.1.0) and DIAspeXtractor
-(1.2.x); [CHANGELOG.md](CHANGELOG.md) maps the old names, options and defaults to the current ones.
+Earlier releases were named speXtract (up to 1.1.0) and DIAspeXtractor (1.2.x); [CHANGELOG.md](CHANGELOG.md) maps
+the old names to the current ones.
 
 ## How it works
 
-<p align="center"><img src="assets/pipeline.svg" alt="Pipeline: load, MS1 traces and precursor inference, window loop, output" width="1000"></p>
+```mermaid
+flowchart TD
+    IN["Bruker .d diaPASEF run<br/>(recommended) or mzML"] --> MS1["Read the MS1 frames<br/>m/z from the instrument's own calibration"]
+    MS1 --> CLEAN["Remove MS1 noise<br/>centroid peaks along ion mobility"]
+    CLEAN --> TRACE["Trace MS1 peaks over time<br/>minimum length from the run's peak width"]
+    TRACE --> PREC["Group isotope traces into precursors<br/>monoisotopic m/z and charge 1 to 5"]
+    PREC --> CHECK["Check the charge by ion mobility<br/>check the monoisotope<br/>drop precursors without an isotope partner"]
+    subgraph TILE["Per 10-minute tile"]
+        READ["Read the tile's MS2 frames"]
+        subgraph WIN["Per isolation window"]
+            FRAG["Trace fragment peaks over time"] --> GATE["Keep fragments that co-elute with the precursor<br/>apex within 3 s, 6 s if faint, and 0.01 1/K0<br/>elution profiles correlate"]
+            GATE --> SPEC["Build one spectrum per precursor<br/>weight and clean the fragments<br/>keep the best 500"]
+        end
+        FOLD["Sort the spectra<br/>fold spectra of one precursor, within 20 ppm<br/>write the tile"]
+    end
+    CHECK --> READ
+    READ --> FRAG
+    SPEC --> FOLD
+    FOLD --> OUT["Pseudo-MS/MS spectra<br/>mzML"]
+    OUT --> SEARCH["Any DDA search engine"]
+```
 
-1. **Load.** A `.d` is read frame by frame in decode batches and never held whole: the first pass reads the MS1
-   frames only, and the MS2 frames of each retention-time tile are read later, inside the window loop. Flight time
-   becomes m/z through the acquisition's own `MzCalibration` table, evaluated exactly (the vendor model with digitizer
-   temperature, the `C4` mass offset and a quadratic term `C2` of either sign; an unsupported table fails closed). MS1
-   frames pass through the dnoise MS1 filter (streak, halo and isolation-window gates on the raw points), are
-   peak-picked along ion mobility, and pruned of centroids at or below the noise threshold. An mzML input is read
-   whole.
-2. **Precursors.** MS1 mass traces are detected in 48 m/z bands in parallel, split at chromatographic valleys and
-   trimmed to 120 s around their apex. Traces that sit one isotope apart at the same mobility are walked into
-   envelopes: the walk assigns the monoisotopic peak and a charge from 1 to 5, an ion-mobility veto re-calls a z = 1
-   envelope that lies on the run's own 2+ trend line, and hypotheses without an isotope partner are dropped.
-   By default (`-charge:mono_profile_check v2`) the monoisotope is then checked against the summed MS1 intensity at
-   the isotope positions near the seed's mobility: a leftmost step that is too weak for averagine is rejected, and a
-   walk that stopped one isotope short is extended; claims do not change. `true` instead accepts a lighter peak only
-   if its elution profile and mobility match the seed's (otherwise the walk stops before that peak and leaves it
-   free); `false` turns the check off.
-3. **Fragments and the gate.** For every isolation window and 600-s cell, the tile's MS2 frames are read and fragment
-   mass traces are detected in 12 flight-time bands on the integer TOF axis, then split and trimmed like the precursors.
-   Before tracing, the peaks of one frame that share a flight-time bin at nearly the same 1/K0 are merged into one
-   (`-trace:im_slice_merge`): the ion-mobility picker cuts a broad ion into slices, and each slice would otherwise
-   become its own trace and a second peak at the same m/z.
-   A fragment joins a precursor's spectrum when both lie in the same isolation window, its apex is within 3 s and
-   0.01 1/K0 of the precursor's, and the two elution profiles correlate (Pearson ≥ 0.3 over the full retention-time
-   grid, with at least 3 shared points). A faint precursor — signal in at most 4 window frames, the short tip of an
-   elution peak — gets a relaxed gate instead (`-gate:adaptive`): a 6 s window, the correlation shrunk toward a prior
-   of 0.6 from as little as one shared point, an apex inside the precursor's span, and traces too short to correlate
-   judged by their centre. With `-gate:anchor_rescue true` (off by default) a well-sampled precursor whose own fragments
-   correlate strongly (the anchors) also takes back weak fragments the gate rejected for too few points or a low
-   correlation, when their apex and their points follow the anchors' consensus elution profile.
-4. **Assembly and output.** Each accepted fragment is written with its trace's apex intensity, weighted by a Gaussian
-   of its 1/K0 distance to the precursor (`-assembly:im_weight_sigma`, 0.005 by default) and by its correlation raised
-   to `-assembly:corr_power` (2 by default, so squared; 1 for faint precursors, `-gate:faint_corr_power`);
-   `-assembly:frag_intensity core` sums the trace over the frames around the precursor's apex instead of taking its
-   apex, and `sum` over the precursor's whole span. Then, per spectrum: `-assembly:foreign_precursor_weight` (0 by
-   default, which removes them; 1 = off) attenuates the residual isotope envelope of another precursor isolated with
-   this one — one of the run's own precursors whose monoisotope lies in the same window, co-eluting within the gate's
-   window and 0.015 1/K0, with at least 2 of its mono…M+3 positions among the fragments; the precursor's own envelope
-   is never touched. Fragments that still share a flight-time bin are merged into one peak
-   (`-assembly:merge_same_bin`), so no spectrum carries two peaks at one m/z, and `-assembly:fragment_fuse_ppm` (25 by
-   default, `anchored`; 0 = off) fuses the pieces of one fragment ion that the mobility picker split over neighbouring
-   flight-time bins, peaks within that many ppm, into one peak with their summed intensity, so the ion takes one slot
-   under the cap. A spectrum with at least 3 fragments left is written: its fragments ranked by evidence —
-   max(r, 0) × ln(1 + intensity) × (1 + shared points), a fused peak by the same key over its summed apex intensities
-   (r and shared points of its best piece) — and the top 500 kept,
-   with a synthetic precursor (apex m/z, charge, retention time, 1/K0). Spectra are sorted per tile, a precursor
-   claimed twice is folded into one spectrum that carries the union of the members' fragment lists
-   (`-assembly:twin_im_tolerance`; with `-assembly:post_fusion_cap` a folded spectrum is cut back to `max_fragments` by
-   the same `cap_rank` key, which each peak carries through the merge and the fold), and the tile is serialised in parallel. The header records every setting that shaped the output.
-
-<p align="center"><img src="assets/algorithm.svg" alt="The co-elution gate and the assembly of one pseudo-spectrum" width="1000"></p>
-
-**Two detectors.** `-trace:detector integer` (default) works on the instrument's flight-time bins and never
-converts its compact store back to double m/z; it needs the vendor calibration and falls back, loudly, to `openms`
-without it. `-trace:detector openms` runs OpenMS `MassTraceDetection` on a materialised peak map. They are different
-algorithms that identify partly different peptides; neither wins on every file and engine, and `integer`
-uses markedly less memory, which is why it is the default. Design notes: [docs/MZ-AXIS-DESIGN.md](docs/MZ-AXIS-DESIGN.md),
-[docs/INTEGER-TRACING-DESIGN.md](docs/INTEGER-TRACING-DESIGN.md), [docs/charge-inference.md](docs/charge-inference.md).
-
-**Emission is deliberately generous.** Two precursor hypotheses that share fragments each get their own spectrum, and
-a fragment may appear in several spectra. The one exception is a precursor claimed twice — two seeds that resolve to
-the same monoisotope, or one precursor in the overlap of two isolation windows — which is folded into one spectrum by
-default. Search engines cope with the rest well; merging or deduplicating the output further downstream loses peptides,
-so search it as written.
-
-### Streaming and memory
-
-<p align="center"><img src="assets/streaming.svg" alt="Retention-time cells, tiles and the memory admission gate" width="1000"></p>
-
-Memory, not CPU, decides whether a run fits a machine. The window loop therefore runs **tile by tile**: the run is cut
-into fixed 600-s retention-time cells at MS1 frame times, each tile (one cell by default) is read, traced, scored,
-sorted and written, and the fragments that straddle a cut are carried over. Since 1.6.0 the tiles are pipelined: up
-to two tiles have windows in flight, the next tile is read and the finished one sorted, folded and written while the
-windows run, with the same output as one tile at a time (`DIASPEXTRACT_PIPE_TILES=1` restores that, at less memory).
-Tiling bounds the fragment working set; the MS1 traces and precursors of the whole run stay resident throughout. Within a
-tile, isolation windows are admitted while they fit in 75 % of the machine's free RAM, so the run adapts to
-neighbours on a shared machine; one window is always admitted whatever the memory says, so a single oversized window cannot deadlock the run. Between tiles the allocator's free pages are returned to the OS.
+- **Read.** A `.d` is read frame by frame, and flight time becomes m/z through the acquisition's own calibration.
+  MS1 frames are denoised with a port of dnoise (Garrett, Diedrich & Yates III, bioRxiv 2026.08.27.747603) and
+  centroided along ion mobility. An mzML input is read whole, without noise removal (see [Run](#run)).
+- **Precursors.** Traces one isotope apart at the same ion mobility form a precursor with a monoisotopic m/z and a
+  charge from 1 to 5. Ion mobility corrects charge calls, the monoisotope is checked against the isotope pattern,
+  and precursors without an isotope partner are dropped. Some tolerances are measured from each run.
+- **Fragments.** In each isolation window, the MS2 peaks are traced over time on the instrument's flight-time bins.
+- **Co-elution gate.** A fragment joins a precursor's spectrum when their apexes lie within 3 s and 0.01 1/K0 and
+  their elution profiles correlate (r ≥ 0.3 over at least 3 shared points). A faint precursor, seen in at most 4
+  frames, gets a looser test.
+- **Spectrum.** Fragments are weighted by their ion-mobility distance and their correlation. Leftover isotopes of
+  other precursors in the window are removed, split peaks of one fragment ion are fused, and the best 500 fragments
+  are kept; a spectrum needs at least 3. A precursor found twice gets one spectrum with the fragments of both, so it
+  can hold more than 500.
+- **Tiles and memory.** Tiles run in time order, and the next tile is read while the current one runs. On Linux, a
+  window starts only when it fits in 75 % of the free memory; elsewhere windows run one at a time. The output does
+  not depend on the thread count.
 
 ## Requirements
 
 | | |
 |---|---|
-| OpenMS | the development commit pinned in `patches/openms.lock`, patched by `scripts/apply_openms_patches.sh` and built `WITH_OPENTIMS` to read Bruker `.d`. No released OpenMS package works: the tool installs a header into the OpenMS tree, calls a method the patch adds, and refuses to compile against an unpatched `MassTrace` |
-| Compiler | C++20. CI builds the tool with GCC on Ubuntu; the headers also compile with GCC 11, AppleClang and MSVC |
-| OpenMP | required |
+| OpenMS | the development commit pinned in `patches/openms.lock`, patched by `scripts/apply_openms_patches.sh` and built `WITH_OPENTIMS` to read Bruker `.d`. A released OpenMS package does not work |
+| Compiler | C++20 and OpenMP. CI builds the tool with GCC on Ubuntu |
 | CMake | 3.21+ for OpenMS (the tool itself needs 3.16) |
-| Memory | at the defaults with 100 threads, 1.6.0 peaked at about 8 GB on a 2-hour HeLa run (median of the PXD017703 py3 runs; 5–20 GB over all its 2-hour runs) and at 25–32 GB on the 130-minute TNBC tissue runs of PXD047793 (median about 28 GB). `DIASPEXTRACT_PIPE_TILES=1` (one tile at a time) needs less; `-tile:cells_per_tile 0` and `.mzpeak` output need several times as much |
-| Disk | about 10 kB per spectrum as mzML, tens of GB for a 2-hour acquisition; mzPeak is about a third of that |
+| Platform | Linux is recommended. Elsewhere the tool cannot read the free memory and runs one isolation window at a time |
+| Memory | about 5–20 GB for the HeLa runs of PXD017703 and 25–32 GB for the 130-minute tissue runs of PXD047793 (1.6.0 at the defaults with 100 threads, 43 public runs; see [CHANGELOG.md](CHANGELOG.md)) |
+| Disk | the mzML output is large |
 
+These memory figures are for a `.d` at the defaults. `DIASPEXTRACT_PIPE_TILES=1` and a lower
+`-perf:max_concurrent_windows` need less. An mzML input, `-trace:detector openms` and `-tile:cells_per_tile 0`
+process the whole run at once and need several times as much.
 
 ## Install
+
+There are no prebuilt binaries; build from source as below. OpenMS needs its build dependencies, including Arrow
+and Parquet; `.github/workflows/build.yml` lists the Ubuntu packages.
 
 ```bash
 git clone https://github.com/okohlbacher/diaspextract.git
 cd diaspextract
 
-# 1. OpenMS at the pinned commit, patched, built. No released package works.
+# 1. OpenMS at the pinned commit, patched, then built. No released package works.
 git clone https://github.com/OpenMS/OpenMS.git /path/to/OpenMS
 git -C /path/to/OpenMS checkout $(sed -n 's/^OPENMS_BASE=//p' patches/openms.lock)
-cmake -S /path/to/OpenMS -B /path/to/OpenMS/build -DCMAKE_BUILD_TYPE=Release \
-      -DWITH_OPENTIMS=ON -DWITH_GUI=OFF -DHAS_XSERVER=OFF      # plus OpenMS's own dependencies
 scripts/apply_openms_patches.sh /path/to/OpenMS                 # installs a header, applies five patches
-cmake --build /path/to/OpenMS/build -j                          # the patches change headers and libOpenMS
+cmake -S /path/to/OpenMS -B /path/to/OpenMS/build -DCMAKE_BUILD_TYPE=Release \
+      -DWITH_OPENTIMS=ON -DWITH_GUI=OFF -DHAS_XSERVER=OFF
+cmake --build /path/to/OpenMS/build --target OpenMS -j          # the library only, not every OpenMS tool
 
 # 2. The tool.
 cmake -B build -DOpenMS_DIR=/path/to/OpenMS/build
@@ -130,35 +92,19 @@ export OPENMS_DATA_PATH=/path/to/OpenMS/share/OpenMS   # a source-built OpenMS h
 ```
 
 The binary is `build/diaspextract`; `cmake --install build` puts it under `<prefix>/bin`. The GitHub workflow
-`.github/workflows/build.yml` performs the same recipe on Ubuntu and is the reference.
+`.github/workflows/build.yml` runs the same recipe on Ubuntu and is the reference.
 
-### The five OpenMS patches
+`scripts/apply_openms_patches.sh` applies the five small OpenMS patches in `patches/`. They give the Bruker reader the
+acquisition's exact m/z calibration, let the tool set the scan time that peak splitting uses, make tracing and mzML
+writing faster on many threads, and let `--help` and the CTD and CWL export work for a tool outside OpenMS, so it can
+be wrapped for KNIME or Galaxy. Apply all five: leaving one out stops the build, changes the spectra or slows the run.
 
-`scripts/apply_openms_patches.sh` applies them; all five matter, and the build stops without the first, third and fifth.
+A normal run needs no environment variables; the ones a user may set are listed in [docs/options.md](docs/options.md).
+A leftover `SPEXTRACTOR_*` or `DIASPEXTRACTOR_*` variable from an earlier release makes the tool refuse to start and
+names the new spelling.
 
-| patch | what it changes | why |
-|---|---|---|
-| `openms-brukertims-mz-calibration.patch` + `src/TdfMzCalibration.h` | the Bruker reader converts flight time with the acquisition's exact calibration model instead of a two-point chord | the chord is −5 to −11 ppm off, m/z dependent, worth 6–11 % of closed-search identifications; the mzML records which model ran (`spx:mz_calibration`) |
-| `openms-epd-lockfree.patch` | removes a program-global critical section from elution-peak detection | called from a parallel window loop, that one lock burned about a quarter of the CPU in blocked threads |
-| `openms-masstrace-move.patch` | gives `MassTrace` move operations | OpenMS's defaulted copy operations made every `std::move` a deep copy; a `static_assert` enforces the patch |
-| `openms-mzml-parallel-write.patch` | encodes mzML spectra in chunks on all threads, appended in index order | the writer was CPU-bound on one thread; byte-identical spectrum list, 20 s → 6 s on a 30-minute run |
-| `openms-topp-external.patch` | makes `TOPPBase::getDocumentationURL()` virtual, and lets `-write_ctd` / `-write_cwl` skip the tool-registry lookup for a tool OpenMS does not list | OpenMS pointed `--help` at a doxygen page that does not exist for a tool outside the release (DIAspeXtract now points it at this repository), and the unguarded lookup made CTD and CWL export fail outright, so the tool could not be wrapped for KNIME or Galaxy |
-
-Environment variables the patched libOpenMS reads, none needed for a normal run: `DIASPEXTRACT_ALLOW_CHORD_FALLBACK=1`
-opts into the legacy chord when the exact calibration is unavailable (otherwise the run fails closed; the MS1
-denoiser needs the exact model, so this and the SDK path below require `-dnoise:ms1 false`);
-`DIASPEXTRACT_LOAD_BATCH=<n>` sets the frames per decode batch (default 256; output-neutral);
-`DIASPEXTRACT_SDK_PARALLEL` (any value) lets the loader decode frames in parallel even when Bruker's library does
-the conversion, which otherwise runs serially because that library's thread safety is not guaranteed. Optionally,
-`OPENMS_BRUKER_SDK_PATH=/path/to/libtimsdata.so` uses Bruker's own library for the conversion as an independent
-cross-check; it is not redistributed. A leftover `SPEXTRACTOR_*` or `DIASPEXTRACTOR_*` variable from an earlier
-release makes the tool refuse to start, naming the variable and its new spelling.
-
-### Optional: mzPeak
-
-Build the mzPeak C++ library against the same Arrow/Parquet/libzip that OpenMS uses (`scripts/build_mzpeak_lib.sh`)
-and configure the tool with `-DMZPEAK_ROOT=<checkout>`. This also needs the OpenMS mzPeak integration, which the
-pinned commit does not carry. The plain recipe above reads `.d` and mzML and writes mzML; `.d` stays the faster input.
+**mzPeak.** mzPeak input and output need an OpenMS with mzPeak support, which the pinned commit lacks. Read the
+`.d` and write mzML.
 
 ## Run
 
@@ -166,204 +112,80 @@ pinned commit does not carry. The plain recipe above reads `.d` and mzML and wri
 diaspextract -in sample.d -out pseudo.mzML
 ```
 
-That is the whole command. The defaults are the recommended configuration; `-threads` defaults to every core of the
-machine, so pass `-threads <n>` on a shared machine. Then search the output like any DDA file:
+Give the tool the `.d` itself. An mzML input runs without MS1 noise removal and, because it carries no instrument
+calibration, with the `openms` detector on the whole run: it needs more memory and gives different spectra.
+
+Then search the output like any DDA file, for example with Sage (`bench/sage_closed.json` is a closed-search
+configuration; set its FASTA first):
 
 ```bash
-sage sage.json -o results pseudo.mzML
+sage bench/sage_closed.json -o results pseudo.mzML
 ```
 
-Control FDR **per precursor charge** downstream: singly charged precursors are emitted by default (they are genuine
-1+ ions on tryptic data) and their stratum carries a higher entrapment FDR than a pooled 1 % cut implies. If your FDR
-procedure cannot stratify by charge, filter the search results per precursor charge yourself, or run with
-`-charge:min_charge 2` to emit only 2+ and higher.
+Control the FDR **per precursor charge**. Singly charged precursors are written by default: they are real 1+ ions,
+but they carry a higher FDR than a pooled 1 % cut suggests. If your FDR step cannot separate charges, filter the
+results per charge yourself, or run with `-charge:min_charge 2` to write only 2+ and higher.
 
-### Options
+## Options
 
-`diaspextract --helphelp` prints every option with its default. Defaults below are the shipped ones. The detection,
-charge, gate, assembly and denoising options shape the spectra by definition; in the memory and concurrency table,
-only the options marked **changes output** move the spectrum list, the others cost or save time and memory.
+The defaults are the recommended configuration. These are the settings users change most:
 
-**Which option for what.** Memory: `-tile:cells_per_tile` (1 is the smallest footprint), `-perf:max_concurrent_windows`,
-`-perf:mem_fraction` and `DIASPEXTRACT_PIPE_TILES=1` (one tile at a time); avoid `.mzpeak` output and `-trace:detector openms` on a small machine, both process the
-whole run at once. Time: `-threads`, and `-perf:malloc_trim false` when memory is not the constraint. Sensitivity:
-`-perf:stream_load false` on a machine with the memory for it, and trying `-trace:detector openms` on your own data.
-Charge and FDR: `-charge:min_charge`. The spectra of 1.5.0: `-assembly:im_weight_sigma 0
--assembly:foreign_precursor_weight 1 -assembly:fragment_fuse_ppm 0 -charge:mono_profile_check false
--charge:iso_im_tolerance 0.05 -trace:min_length_sec 3`.
-
-**Input and output**
-
-| option | default | meaning |
+| setting | default | what it does |
 |---|---|---|
-| `-in` | required | a Bruker `.d` directory, an mzML, or an mzPeak archive |
-| `-out` | required | output file; the format follows the extension (`.mzML` or `.mzpeak`). mzPeak is written in one piece, so the whole run is processed as one tile at whole-run memory; write `.mzML` when memory is tight or a search comes next |
-| `-out_type` | follows the extension | force `mzML` or `mzpeak` |
-| `-threads` | all cores | worker threads. Without `-threads` on the command line the tool uses every core; an ini value above 1 is honoured, an ini `threads = 1` counts as unset |
-| `-ini`, `-write_ini` | | read or write a TOPP ini file with every option |
-| `-log`, `-no_progress`, `-debug` | | log to a file, silence progress, raise the debug level |
+| `-threads <n>` | all cores | worker threads; set it on a shared machine |
+| `-charge:min_charge` | 1 | lowest precursor charge written; 2 leaves out singly charged precursors |
+| `-tile:cells_per_tile` | 1 | 10-minute cells per tile; 0 processes the whole run as one tile, at several times the memory. The spectra do not change |
+| `-perf:max_concurrent_windows` | 0 (no cap) | most isolation windows processed at once; fewer use less memory and take longer |
+| `-perf:mem_fraction` | 0.75 | share of the free memory the windows may use (Linux) |
+| `DIASPEXTRACT_PIPE_TILES=1` | 2 | environment variable: one tile at a time instead of two. Less memory, longer run, same spectra |
+| `-perf:stream_load` | true | `false` loads the whole run first: much more memory, a longer run and different spectra |
+| `-trace:detector` | integer | `openms` uses OpenMS mass-trace detection on whole windows, without tiles. The two find partly different peptides; `integer` needs a `.d` and uses much less memory |
+| `-dnoise:ms1` | true | MS1 noise removal for `.d` input; `false` turns it off and changes the spectra |
 
-**Memory and concurrency (`perf:`, `tile:`)** — output-neutral unless marked.
+Every option, with its default and valid values, is in [docs/options.md](docs/options.md) and in
+`diaspextract --helphelp`.
 
-| option | default | meaning |
-|---|---|---|
-| `-tile:cells_per_tile` | 1 | cells per tile. The fragment working set is one tile's; 0 runs the whole run as one tile, at several times the memory |
-| `-tile:rt_sec` | 600 | pitch of the retention-time cells, cut at MS1 frame times. **Changes output**: peptides eluting within 15 s of a cut line are lost a few points more often than elsewhere, about 0.2 % of the identified set at 600 s. −1 = one cell, the whole run in memory (`-tile:cells_per_tile` then has no effect) |
-| `-perf:mem_fraction` | 0.75 | fraction of the machine's currently free RAM the window loop may commit; re-decided at every window admission |
-| `-perf:max_concurrent_windows` | 0 = all | upper bound on isolation windows in flight; lower it to trade wall time for memory |
-| `-perf:malloc_trim` | true | return free pages to the OS at the phase boundaries and between tiles, which lowers the peak (most for a one-tile run) at some extra wall time; `false` when time is the constraint |
-| `-perf:stream_load` | true | read the `.d` frame by frame. `false` holds the run in memory, at a much higher peak and a longer wall time, and **changes output** |
-| `-perf:ms1_prune` | true | drop MS1 centroids at or below `trace:noise_threshold_int` while loading, in a way that leaves the output identical; `false` keeps every centroid and only costs memory |
-| `-perf:ms1_trace_bands` | 48 | m/z bands for parallel MS1 trace detection; 1 = off. **Changes output** (slightly: the band count moves it) |
-| `-perf:trace_bands` | 12 | flight-time bands per isolation window for parallel fragment tracing; 1 = off. **Changes output** (the band count moves it) |
+## Output
 
-**Mass-trace detection (`trace:`)**
+Each spectrum is an MS2 spectrum with a synthetic precursor: the monoisotopic m/z, the charge, the retention time,
+the 1/K0 and the isolation window it came from. A precursor gets its own spectrum even when it shares fragments with
+another, and one fragment can appear in several spectra; this is intended, so search the output as written. The mzML
+header records the settings that shaped the file as `spx:` entries.
 
-| option | default | meaning |
-|---|---|---|
-| `-trace:detector` | integer | `integer` (flight-time bins, needs the vendor calibration) or `openms` (`MassTraceDetection`); different algorithms, see above. `openms` traces whole windows: no cells, no tiles, whole-run memory |
-| `-trace:mass_error_ppm` | 15 | m/z tolerance for trace extension |
-| `-trace:noise_threshold_int` | 100 | MS1 noise intensity threshold |
-| `-trace:ms2_noise_threshold_int` | 10 | MS2 noise intensity threshold |
-| `-trace:min_length_sec` | −1 = auto | minimum MS1 trace length in seconds (last minus first point). Auto: `-trace:min_length_fwhm` × the run's median MS1 peak FWHM, measured on a fixed sample of its MS1 traces (1-Th m/z slices every 25 Th, traced with no minimum), at least half an MS1 cycle, so a trace needs at least 2 MS1 points; logged as `[minlen]`, stamped `spx:ms1_min_length`. 0 = no length filter; 3 = the 1.5.0 value. **Changes output** |
-| `-trace:min_length_fwhm` | 0.4 | auto minimum MS1 trace length as a fraction of the run's median MS1 peak FWHM |
-| `-trace:ms2_min_length_sec` | 0 | minimum MS2 trace length; 0 = no length filter |
-| `-trace:ms1_chrom_peak_snr`, `-trace:ms2_chrom_peak_snr` | 3, 1 | apex threshold as a multiple of the noise threshold, MS1 and MS2 |
-| `-trace:ms1_split_valleys`, `-trace:ms2_split_valleys` | 7, 7 | split traces at chromatographic valleys, value = expected peak FWHM in seconds; 0 = off |
-| `-trace:split_scan_time` | frame | scan time behind the valley splitter: the run's MS1 cycle time (`frame`) or each trace's own (`trace`, OpenMS's behaviour, about 6 % fewer Sage peptides). **Changes output**; leave at `frame` |
-| `-trace:max_span_sec` | 120 | trim every trace to this many seconds around its apex; 0 = no cap. **Changes output** (within 0.1 % of the peptides from 0 to 240) |
-| `-trace:mz_estimator` | apex | reported m/z of a precursor trace: the most intense peak's (`apex`), the intensity-weighted centroid (`mean`) or the `median`. Fragment traces of the integer detector always report the calibrated m/z of their apex bin; with `-trace:detector openms` the estimator applies to them too. **Changes output**; `apex` identifies the most peptides on both engines |
-| `-trace:band_edges` | acquisition | where the integer detector's band edges come from; leave at `acquisition`. `slab` (edges from the window's own peaks) needs `-perf:stream_load false`; the spectra differ slightly, the identifications hardly |
-| `-trace:im_slice_merge` | 0.015 | integer detector: before tracing, merge a frame's MS2 peaks in one flight-time bin whose 1/K0 lies within this distance of the previous one (the group spans at most twice this distance) into one peak, intensity summed, 1/K0 intensity-weighted; negative = off. **Changes output** |
-| `-trace:native_ms1_neighbors` | 0 | sum this many neighbouring MS1 frames on each side before picking (1 = 3 frames); needs `-perf:stream_load true` and `-dnoise:ms1 false`. **Changes output**: about 2.7× the spectra for about 8 % more Sage peptides, measured on older defaults |
+## Reporting a problem
 
-**Precursor charge (`charge:`)**
+Open an issue at <https://github.com/okohlbacher/diaspextract/issues>. Include the `Version` line of
+`diaspextract --help` (it names the OpenMS version too), the full command line, the end of the console output, and
+the `spx:` lines from the output's header:
 
-| option | default | meaning |
-|---|---|---|
-| `-charge:min_charge` | 1 | lowest precursor charge to emit; `2` emits only 2+ and higher. Add `-charge:im_charge_veto false` only to reproduce the older charge handling without the mobility re-call |
-| `-max_charge` | 5 | highest charge considered by the isotope walk |
-| `-charge:scoring` | count | monoisotope and charge from the isotope partner count (`count`, ties to the lower charge) or from averagine cosine × co-elution (`envelope`) |
-| `-charge:im_charge_veto` | true | fit the run's 2+ and 3+ mobility trend lines from its confident envelopes; a z = 1 call on the 2+ line is re-called 2+, one on the 3+ line loses its charge |
-| `-charge:im_veto_band` | 2.5 | half-width of that band in MAD-sigma of the fit residuals |
-| `-charge:iso_im_tolerance`, `-charge:iso_partner` | 0 (auto), first | 1/K0 tolerance for isotope partners. 0 (auto, since 1.6.0) measures it per run before the isotope walk: a stride sample of the MS1 traces is probed at each charge's +1 isotope position and at two control positions 50 ppm either side, where no isotope of the probe at that charge can sit, and the tolerance is the one that admits the most isotope-position traces net of twice the control traces (true partners minus chance partners), on a 0.001 grid clamped to [0.01, 0.05]. Dense short-gradient runs get about 0.01, sparse low-load runs up to 0.05; a value > 0 fixes it (0.05 = 1.5.0). Logged as `[isotol]`, stamped `spx:iso_im_tolerance`. `iso_partner` picks the candidate inside the partner box: the first in m/z order (`first`, as in 1.5.0) or the one closest to the seed in apex RT and 1/K0, each scaled by its tolerance (`closest`; screened, lost MSFragger peptides on 10 ng runs, not recommended); **changes output** |
-| `-charge:mono_averagine_guard`, `-charge:mono_averagine_select` | 0, off | averagine-based corrections of the monoisotope; off by default, neither improves identifications |
-| `-charge:mono_profile_check`, `-charge:mono_profile_min_corr`, `-charge:mono_profile_max_dim` | v2 (false = off), 0.6, 0.015 | `true` checks each leftward step of the count walk for the winning charge: the lighter trace becomes the monoisotope only if its MS1 profile correlates with the seed's (Pearson ≥ min_corr; fewer than 3 shared frames pass unchecked) and its 1/K0 is within max_dim of the seed's; the walk stops at the first failure and the rejected trace stays unclaimed. Charge and envelope size are unchanged. `v2` (the default since 1.6.0) is described in the next row. **Changes output** |
-| `-charge:mono_profile_check v2`, `-charge:mono_position_min_ratio`, `-charge:mono_position_im_box`, `-charge:mono_position_extend`, `-charge:mono_position_iterate` | –, 0.2, 0 (auto), 0.6, true | `v2` tests isotope positions, not the claimed partner: PS(k) sums the apex intensity of every MS1 trace, claimed or not, at the seed's isotope position k (partner m/z tolerance, `gate:delta_rt`, im_box 1/K0 of the seed). im_box 0 (auto) sizes the box from the run's own isotope scatter: 3.5 × the 90th percentile of the 1/K0 gap between the brightest tenth of the seeds and their nearest trace one isotope heavier, clamped to [0.01, 0.03] (0.018 and 0.022 on the 2019 HeLa py3 10 and 100 ng runs of PXD017703); a value > 0 fixes it. The walk itself accepts partners up to `iso_im_tolerance` away (auto, 0.01–0.05 per run), so a partner outside the box counts as an empty position. The walk's leftmost step j is rejected when PS(−j)/PS(−j+1) × λ < min_ratio (λ = max(0.1, 0.000594 × neutral mass); 0 = no test), and the monoisotope moves one isotope right; `iterate` (`true`) repeats the test on the new leftmost step while it fails, `false` tests one step only. If nothing was rejected and the walk ended on a miss, the next lighter position becomes the monoisotope (its most intense trace, not claimed) when its ratio is ≥ extend (0 = off). Each walk is judged at its precursor's final charge, after `charge:im_charge_veto` (a z=1 walk re-called 2+ is read at 2+ spacing). Claims, charge and envelope size are unchanged. The default since 1.6.0; **changes output** |
+```bash
+grep -a 'spx:' pseudo.mzML
+```
 
-**Co-elution gate (`gate:`)**
-
-| option | default | meaning |
-|---|---|---|
-| `-gate:delta_rt` | 3 s | maximum apex retention-time difference between precursor and fragment |
-| `-gate:delta_im` | 0.01 | maximum 1/K0 difference between precursor and fragment; it also sets the ion-mobility picker's box and the tracing 1/K0 tolerance, so it changes detection too (`-gate:fragment_delta_im` widens the gate alone) |
-| `-gate:min_correlation` | 0.3 | minimum Pearson correlation of the two elution profiles; raise for cleaner, sparser spectra |
-| `-gate:min_correlation_points` | 3 | minimum shared XIC points for a correlation to count |
-| `-gate:coelution` | pearson | correlation over the full RT grid, or `logoverlap` (AlphaDIA-style; the scale differs, retune the threshold; needs `-gate:shrinkage off`, the default `fisher` refuses it) |
-| `-gate:variance_support` | off | Pearson over the union support of the two profiles instead of the full grid (scale differs) |
-| `-gate:adaptive` | faint | `faint`: the relaxed gate below (`shrinkage`, `colocation`, `short_traces`, `faint_delta_rt`, `faint_corr_power`) applies only to faint precursors — signal in at most `faint_max_frames` window frames, the short tip of an elution peak — and every other precursor keeps the plain gate above. `auto`: `faint` when at least `auto_faint_fraction` of the run's precursors have that few MS1 points (the choice is stamped as `spx:gate_adaptive`), else the plain gate above for every precursor (`shrinkage`, `colocation` and `short_traces` switched off). `off`: `shrinkage`, `colocation` and `short_traces` apply to every precursor at `delta_rt` and `corr_power` (`faint_delta_rt` and `faint_corr_power` are unused) |
-| `-gate:faint_max_frames` | 4 | most window frames with precursor signal for a faint precursor |
-| `-gate:faint_delta_rt` | 6 s | `gate:delta_rt` for faint precursors |
-| `-gate:faint_corr_power` | 1 | `assembly:corr_power` for faint precursors |
-| `-gate:auto_faint_fraction` | 0.45 | `adaptive auto`: the fraction of precursors with at most `faint_max_frames` MS1 points at which the faint gate switches on |
-| `-gate:shrinkage` | fisher | `fisher`: gate on the posterior mean of the Fisher-z correlation (prior `shrink_prior_r` ± `shrink_prior_sd`, n − 3 effective points) instead of the raw r, so one or two shared points are judged by the prior rather than by their ±1; replaces `min_correlation_points` with `shrink_min_points`; `off` |
-| `-gate:shrink_prior_r` | 0.6 | prior mean correlation: 0.6 shrinks toward moderate co-elution, 0 toward none (and loses most faint fragments) |
-| `-gate:shrink_prior_sd` | 0.3 | prior standard deviation in Fisher-z units; smaller = stronger shrinkage |
-| `-gate:shrink_min_points` | 1 | fewest shared points for a correlation under `shrinkage`; at 1 a one-point overlap is scored almost at the prior, which is why the mode is confined to faint precursors |
-| `-gate:colocation` | ranges | `ranges`: the fragment apex must lie inside the precursor's detected retention-time span and the precursor apex inside the fragment's (one cycle of slack each), and the spans overlap by at least `colocation_overlap` of the shorter; `off` |
-| `-gate:colocation_overlap` | 0.3 | least span overlap as a fraction of the shorter span |
-| `-gate:short_traces` | concentric | `concentric`: a fragment trace too short to correlate passes when its span lies inside the precursor's (one cycle of slack) and its centre is within max(1 cycle, `short_center_tol` × the precursor's half-width) of the precursor's centre; `off` drops it |
-| `-gate:short_center_tol` | 0.5 | centre tolerance as a fraction of the precursor half-width |
-| `-gate:short_min_points` | 1 | fewest points of a short fragment trace |
-| `-gate:fragment_delta_im` | −1 | 1/K0 window of the gate alone (tracing keeps `delta_im`); −1 = `delta_im` |
-| `-gate:anchor_rescue` | false | `true`: rescue weak fragments of a well-sampled precursor (signal in more than `faint_max_frames` window frames, whatever `adaptive` is set to). When at least `anchor_min_count` fragments pass the gate at a correlation of `anchor_min_corr` or more, their profiles, each scaled to unit maximum, are summed into a consensus; a fragment trace inside the retention-time and 1/K0 windows that the gate rejected only for too few shared points or by `min_correlation`, with at least 2 points, joins when its apex is within one cycle of the consensus apex and its points correlate with the consensus by `anchor_rescue_corr` or more (Pearson over its own points; a 2-point trace needs both points at half the consensus maximum or more, rising or falling with it, and scores `anchor_rescue_corr`). Its emitted intensity and cap key use that score, capped at `anchor_min_corr` (the cap key's shared points are, as for every fragment, the frames it shares with the precursor). Logged as `[anchor]`, stamped `spx:anchor`; `DIASPEXTRACT_GATE_DUMP` rows carry the fate `rescued`. **Changes output** |
-| `-gate:anchor_min_count` | 3 | fewest anchors a precursor needs for `anchor_rescue` |
-| `-gate:anchor_min_corr` | 0.8 | least gate correlation of an anchor; also the cap on a rescued fragment's score |
-| `-gate:anchor_rescue_corr` | 0.7 | least correlation of a rejected fragment's points with the anchor consensus |
-| `-gate:anchor_max_rescued` | 50 | most rescued fragments per spectrum, best score first (ties by m/z) |
-
-**Assembly (`assembly:`)**
-
-| option | default | meaning |
-|---|---|---|
-| `-assembly:min_fragments` | 3 | emit a spectrum only if at least this many fragments remain after the gate, the foreign-envelope removal, the same-bin merge and the fragment fusion (checked before the cap below) |
-| `-assembly:foreign_precursor_weight` | 0 (remove; 1 = off) | multiply the fragments on the residual isotope envelope of ANOTHER precursor isolated with this one by this weight (0 removes them) before the same-bin merge and `max_fragments`; the cap key follows the attenuated intensity. A foreign precursor is one of the run's isotope-supported precursors whose monoisotope lies in the same window (a precursor whose monoisotope sits just outside it is not considered, even when its heavier isotopes fall inside), apex within the gate's retention-time window of this one's, 1/K0 within `-assembly:foreign_precursor_dim` (0.015), neither a twin (mono within 0.01) nor this ion called again (either mono on the other's isotope grid within the larger of `foreign_precursor_ppm` and 30 ppm); its envelope counts when at least `-assembly:foreign_precursor_min_iso` (2) of mono + k × 1.00335/z, k = 0…3, carry a fragment within `-assembly:foreign_precursor_ppm` (10). Fragments within that larger tolerance of the precursor's own mono…M+3 are never touched. Logged as `[foreign]`, stamped `spx:foreign`. The default since 1.6.0; **changes output** |
-| `-assembly:foreign_precursor_ppm` | 10 | the m/z tolerance between a foreign envelope position and a fragment; the own-ion tests take the larger of this and 30 ppm. Residual precursor peaks scatter widely around the MS1 mono grid: on a 10 ng HeLa run about half of them lie beyond 10 ppm and three quarters within 20 ppm |
-| `-assembly:foreign_precursor_dim` | 0.015 | the largest 1/K0 distance between this precursor and a foreign one |
-| `-assembly:foreign_precursor_min_iso` | 2 | how many of a foreign envelope's four positions (mono…M+3) must carry a fragment before its fragments are attenuated (1–4) |
-| `-assembly:merge_same_bin` | true | merge a spectrum's fragments of one flight-time bin (one exact m/z with the OpenMS detector) into one peak before `max_fragments`: members overlapping the strongest in retention time are summed, retention-time-disjoint pieces dropped. Two peaks at one m/z stall the fragment matching of OpenMS-based search engines. **Changes output** |
-| `-assembly:fragment_fuse_ppm` | 25 (0 = off) | fuse a spectrum's fragments within this many ppm (at most 50) into one peak, after the same-bin merge and before `min_fragments` and `max_fragments`. The mobility picker keeps 1–2 flight-time bins of a fragment ion that spans 4–7, so one ion becomes several peaks 5–20 ppm apart, each with its own apex intensity. A fused peak takes the sum of its members' emitted intensities (whatever their retention-time overlap, unlike the same-bin merge), their intensity-weighted m/z and a `cap_rank` key computed like an unfused fragment's from the sum of their 1/K0-weighted apex intensities, with the score (and, under `evidence`, the shared points) of the best-keyed piece, so a fused ion ranks as one ion of its total intensity, never below its best piece (non-negative keys, up to rounding); it takes one cap slot and the freed slots refill; a spectrum that fuses below `min_fragments` is not written. A `[fuse]` log line counts the fragments in, the peaks out, the groups fused and their mean size; stamped `spx:fragment_fuse`. 25 ppm `anchored` is the default since 1.6.0; **changes output** |
-| `-assembly:fragment_fuse_mode` | anchored | how `fragment_fuse_ppm` groups: `anchored` takes the fragments strongest first (ties: lower m/z), and each one not yet fused takes every unfused fragment within the tolerance of its own m/z; `linkage` walks them in m/z order and joins a fragment to the previous one's group when it lies within the tolerance of it and within twice the tolerance of the group's first member (single linkage with a capped span) |
-| `-assembly:max_fragments` | 500 | keep at most this many, top-ranked; keep it at or above `min_fragments`. Applied before the twin fold below, so a folded spectrum can hold more (unless `post_fusion_cap`) |
-| `-assembly:cap_rank` | evidence | which fragments survive `max_fragments`: `evidence` ranks by max(r, 0) × ln(1 + I) × (1 + shared points), so long correlated support outranks an intense one-frame coincidence; `corr_inten` by gate score × intensity (the 1.4 key); `umpire` by max(r, 0)² × ln(1 + I). r is the raw co-elution score before shrinkage (Pearson, or the `logoverlap` score) |
-| `-assembly:corr_power` | 2 | multiply each emitted fragment's intensity by its correlation to this power; 0 = off. The cap key does not use it, but `fragment_fuse_ppm` (anchored) groups the strongest fragments first, so it can change which pieces fuse and with them which peaks survive the cap. 2 gives +8–10 % Sage peptides over 0 on three files, and +4 % MSFragger peptides on the one file measured with it |
-| `-assembly:im_weight_sigma` | 0.005 (0 = off) | additionally weight fragments by their 1/K0 distance to the precursor (Gaussian, this sigma); this also changes which fragments survive the cut. The default since 1.6.0: together with `foreign_precursor_weight 0`, +5.8 % Sage and +4.2 % MSFragger peptides over 1.5.0 on 43 public runs at unchanged entrapment FDR. **Changes output** |
-| `-assembly:frag_intensity` | apex | the base amplitude of an emitted fragment, before the 1/K0 weight and `corr_power`: `apex` the trace's maximum in one frame; `core` the trace summed over the `frag_core_frames` window frames centred on the precursor's apex frame (the same frames for every fragment of the precursor); `sum` the trace summed over the precursor's span, from its first to its last frame with signal (gaps included). A fragment with no point there takes its point nearest the precursor's apex. Fragments rescued by `gate:anchor_rescue` take the same amplitude. The gate and the `cap_rank` key (still the apex) are unchanged; the steps that weigh by intensity follow the new values (the same-bin merge keeps the strongest member's m/z, `fragment_fuse_ppm` groups the strongest first and sums the members, the twin fold fuses at the intensity-weighted m/z), so peaks can move, fuse differently and change which survive the cap. Measured before fragment fusion became the default: on HeLa 10 ng 99.9 % of the peaks lay within 10 ppm of the `apex` run's. Experimental; **changes output** when not `apex` |
-| `-assembly:frag_core_frames` | 3 | `frag_intensity core`: the number of window frames (odd, 1–15) |
-| `-assembly:require_isotope_support` | true | drop precursor hypotheses without an isotope partner; `false` doubles the spectra, runs about 7× slower and identifies fewer peptides |
-| `-assembly:default_charge` | 2 | charge given to a precursor left without a charge call (only matters when guessed precursors are kept) |
-| `-assembly:twin_im_tolerance` | 0.005 | fold spectra that claim one precursor twice — same MS1 frame (or nearby frames, next row), same charge, precursor m/z within 20 ppm, 1/K0 within this tolerance — into one, which takes the union of the cluster's fragments, peaks within 10 ppm fused (so it can exceed `max_fragments`); −1 = off, the spectra of 1.3 (0 still folds twins of identical 1/K0). On a 2-hour HeLa run (PXD029836): 24 % fewer spectra for 0.2 % of the peptides on both engines, entrapment FDR 0.98 % with the fold against 0.98 % without |
-| `-assembly:twin_rt_frames`, `-assembly:twin_rt_match` | 0 (auto), ext | let the twin fold also join two spectra of one monoisotope from nearby MS1 frames. The v2 check's extension can move a monoisotope onto another precursor's monoisotope trace at another frame, and the same-frame fold leaves both spectra. A pair folds across frames with the same charge, 1/K0 within `twin_im_tolerance`, apexes at most n MS1 cycles apart (\|ΔRT\| ≤ (n + 0.5) × the cycle), in one retention-time cell (a pair across a cell edge stays two spectra), precursor m/z in one flight-time bin (within 0.05 ppm) and, with `ext`, the monoisotope of at least one of the two placed by the extension (nothing folds across frames without v2). `bin` folds any one-bin pair across frames, `ppm` any pair within the fold's 20 ppm; both cost peptides in a screen. Across frames, pairs of one charge and 1/K0 lie either within 0.01 ppm (one bin) or 0.3 ppm and more apart (distinct traces). The survivor rule and the fusion are the fold's. 0 = auto: the run's median MS1 peak width (FWHM of the precursors' seed traces with at least 3 points) in MS1 cycles, rounded, at least 1; −1 = the same frame only (the fold before 1.6.0). A `[twins]` log line counts the pairs joined at one frame and across frames, the pairs left apart at a cell edge and the spectra folded only through a cross-frame link; the relation is stamped in `spx:twin_merge`. **Changes output** |
-| `-assembly:post_fusion_cap` | false | re-apply `max_fragments` after the twin fold: every peak carries its `cap_rank` key (a 32-bit float) through the same-bin merge and the fold, where a fused peak keeps its members' best key, and a spectrum over the cap keeps its top-ranked peaks (ties: higher intensity, then lower m/z). A `[recap]` log line counts the spectra cut and the peaks removed; stamped `spx:post_fusion_cap`. Experimental. **Changes output** |
-
-**MS1 denoising (`dnoise:`)** — a port of dnoise v0.1.0's MS1 path (Garrett, Diedrich & Yates III,
-bioRxiv 2026.08.27.747603; MIT, `LICENSES/dnoise-MIT.txt`), applied to the raw points of every MS1 frame of a Bruker
-`.d` before peak picking. Other inputs pass through, logged and stamped. It is bit-identical to dnoise for frames up to
-100 ms `AccumulationTime`; above that the reader's intensities no longer identify one raw count, and the nearest is taken.
-
-| option | default | meaning |
-|---|---|---|
-| `-dnoise:ms1` | true | on or off. **Changes output** (a few percent of the peptides, in either direction depending on the file) and lowers peak memory |
-| `-dnoise:mz_half_width`, `-dnoise:min_feature_length`, `-dnoise:max_internal_gap`, `-dnoise:iterations`, `-dnoise:min_window_intensity`, `-dnoise:min_feature_intensity` | 3, 5, 2, 2, 0, 0 | the streak filter: a point survives when its TOF bin (± half width) is occupied in a run of scans of this length, bridging this many gaps, repeated this many times; the two intensity floors (0 = off) require a scan's window sum, and a run's total, to reach the value before it counts |
-| `-dnoise:halo`, `-dnoise:halo_peak_fraction`, `-dnoise:halo_mz_idx_half_width`, `-dnoise:halo_scan_half_width` | true, 0.15, 80, 2 | the halo filter: keep a point at ≥ this fraction of the most intense streak survivor in its box, its own TOF bin excluded |
-| `-dnoise:dia_ms1_window`, `-dnoise:dia_ms1_mz_pad`, `-dnoise:dia_ms1_im_pad` | true, 5, 0.05 | keep only MS1 points inside a padded diaPASEF isolation window |
-
-**Diagnostics (`diag:`)**: `-diag:dump_ms1_tsv <prefix>` writes the MS1 traces and inferred precursors as TSV so a
-lost precursor can be attributed to a stage.
-
-### Reading the output
-
-Every emitted spectrum is MS2 with a synthetic precursor: `selected ion m/z` (the apex m/z of the monoisotopic
-trace), `charge state`, the precursor's retention time and 1/K0, and the isolation window it was taken from. The run
-header carries `spx:` userParams that make any file attributable to the configuration that produced it, twenty-nine
-at the defaults. Twenty-four are always written: the detector and calibration (`spx:detector`, `spx:mz_calibration`,
-`spx:require_isotope_support`, `spx:corr_power`, `spx:pearson_G` (the correlation support, always `frames`),
-`spx:im_weight_sigma`), the twin fold (`spx:twin_merge`: its relation and tolerance, or `off`), the co-elution gate
-(`spx:gate_adaptive`, `spx:gate_faint`, `spx:gate_shrinkage`, `spx:gate_colocation`, `spx:gate_short_traces`), the
-cap ranking (`spx:cap_rank`), the same-bin merges (`spx:same_bin_merge`), MS1 denoising (`spx:dnoise_ms1`,
-`spx:dnoise_ms1_params`, `spx:dnoise_ms1_points`), the cell grid and tiling (`spx:tile_rt_sec`,
-`spx:tile_cells_per_tile`, `spx:tiles`, `spx:tile_boundaries`, `spx:tile_source`), the band edges (`spx:band_edges`)
-and the frozen frame table (`spx:frame_table`). The others are written when their option is on, five of them at the
-defaults: `spx:monocheck` with `-charge:mono_profile_check true` or `v2` (its settings and how many monoisotopes
-moved), `spx:foreign` when `-assembly:foreign_precursor_weight` is below 1, `spx:fragment_fuse` when
-`-assembly:fragment_fuse_ppm` is above 0, `spx:ms1_min_length` when `-trace:min_length_sec` is auto (the minimum it
-chose and the peak width it came from), `spx:iso_im_tolerance` when `-charge:iso_im_tolerance` is 0 (auto: the
-measured value) or `-charge:iso_partner` is `closest`; and, off by default, `spx:anchor` (`-gate:anchor_rescue true`),
-`spx:fragint` (`-assembly:frag_intensity` not `apex`) and `spx:post_fusion_cap` (`-assembly:post_fusion_cap true`).
-`spx:mz_calibration` starts with `tdf_table_modeltype1` (mzPeak input appends how the table was recovered), or is
-`bruker_sdk`, `legacy_chord_APPROXIMATE`, `mzpeak_two_point_transform` (an mzPeak archive read through its approximate
-transform, on request) or `unset` (an mzML input, which carries its m/z as is).
+[CONTRIBUTING.md](CONTRIBUTING.md#reporting-a-bug) has the details; report security issues as
+[SECURITY.md](SECURITY.md) describes.
 
 ## Layout
 
 ```
-src/        the tool (one translation unit) plus four headers: the calibration model, the tdf reader,
-            the MS1 denoiser and the mzPeak streaming loader
-patches/    the five OpenMS patches, the pinned OpenMS commit (openms.lock) and the mzPeak build helpers
-scripts/    the OpenMS patch application, the mzPeak library build, the option-token check, analysis scripts
-test/       the end-to-end suite
-tests/      the C++ unit tests, the calibration golden values, the calibration and entrapment Python checks
-bench/      benchmark drivers, search configurations and the semantic digest
-docs/       design notes and measurement records
-assets/     the logo and the diagrams above
+src/        the tool and its headers: m/z calibration, .d metadata reader, MS1 denoiser, mzPeak loader
+patches/    the five OpenMS patches, the pinned OpenMS commit (openms.lock) and mzPeak build helpers
+scripts/    OpenMS patch application, mzPeak library build, option-name check
+test/       the end-to-end tests
+tests/      the unit tests and calibration checks
+bench/      tools to compare outputs and check FDR, and a Sage configuration
+docs/       the option reference
+assets/     the logo
+LICENSES/   third-party licenses
 ```
 
 ## Documentation
 
-- [CHANGELOG.md](CHANGELOG.md): what changed in each release, with the earlier tool names and option names
-- [CONTRIBUTING.md](CONTRIBUTING.md): building against OpenMS, running the tests, and the rule for changing a default
+- [docs/options.md](docs/options.md): every option, and the environment variables a user may set
+- [CHANGELOG.md](CHANGELOG.md): what changed in each release, with the earlier tool and option names
+- [CONTRIBUTING.md](CONTRIBUTING.md): building, testing, reporting a bug, and the rule for changing a default
+- [bench/README.md](bench/README.md): the benchmark tools
 - [SECURITY.md](SECURITY.md)
-- `docs/`: design notes and measurement records for developers, starting with [docs/BASELINE.md](docs/BASELINE.md)
 
 ## Citing
 

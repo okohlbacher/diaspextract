@@ -1,11 +1,6 @@
 #!/bin/bash
-# Apply DIAspeXtract's OpenMS patches to an OpenMS source tree and install the shared calibration header.
-#
-# WITHOUT the calibration, MassTrace and TOPP-external patches the tool does not build; without the EPD patch it builds and runs, but the Bruker .d reader falls back to a two-point
-# linear-in-sqrt TOF->m/z chord that is -5..-11 ppm biased on the files we measured -- which costs
-# ~6-11% of closed-search peptide identifications (docs/BENCHMARK-MATRIX-2026-09-01.md). The build is
-# silent about it; only the run log says which calibration was used, and every emitted mzML carries
-# the answer in the spx:mz_calibration userParam.
+# Install the shared calibration header into an OpenMS source tree and apply patches/*.patch (idempotent).
+# README.md says what each patch does and which ones the build needs.
 #
 # Usage: scripts/apply_openms_patches.sh /path/to/OpenMS
 #

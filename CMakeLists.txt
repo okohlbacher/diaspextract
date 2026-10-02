@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(DIAspeXtract VERSION 1.6.1 LANGUAGES CXX)
+project(DIAspeXtract VERSION 1.7.0 LANGUAGES CXX)
 
 # DIAspeXtract is a STANDALONE application that links against an existing OpenMS
 # installation. It is deliberately not part of the OpenMS source tree: OpenMS is a
@@ -15,7 +15,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # src/DnoiseMs1.h reproduces dnoise's MS1 window gate bit for bit only without floating-point
-# contraction: an FMA flips 3 of IH2's 24 boxes, and Apple clang on arm64 contracts by default.
+# contraction: an FMA flips 3 of the 24 gate boxes of a real run, and Apple clang on arm64 contracts by default.
 # The header guards its own arithmetic; the flag keeps the translation units around it honest too, and
 # matches the cluster's in-tree build, where OpenMS compiles with it but does not export it.
 add_compile_options($<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffp-contract=off>)
@@ -27,16 +27,6 @@ add_compile_options($<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffp-contract=off>
 # it can be compiled and tested anywhere -- which is what CI does on every platform. So is the
 # dnoise MS1 port (src/DnoiseMs1.h).
 option(DIASPEXTRACT_TESTS_ONLY "Build only the OpenMS-independent tests (portability CI)" OFF)
-# The option was SPEXTRACTOR_TESTS_ONLY (SpeXtractor) and then DIASPEXTRACTOR_TESTS_ONLY (DIAspeXtractor). CMake would
-# ignore an old name and take the full build, which then fails far from the cause in find_package(OpenMS), so either old
-# name stops the configure here.
-foreach(_old SPEXTRACTOR_TESTS_ONLY DIASPEXTRACTOR_TESTS_ONLY)
-  if(DEFINED ${_old})
-    message(FATAL_ERROR "${_old} is now DIASPEXTRACT_TESTS_ONLY (the tool was renamed DIAspeXtract): "
-      "configure with -DDIASPEXTRACT_TESTS_ONLY=ON, and drop the old entry from an existing build directory with "
-      "-U ${_old}.")
-  endif()
-endforeach()
 # The dnoise port ships inside the tool, so both builds compile and register its unit test (it needs no OpenMS).
 enable_testing()
 add_executable(test_dnoise_ms1 tests/test_dnoise_ms1.cpp)
@@ -78,10 +68,10 @@ endif()
 install(TARGETS diaspextract RUNTIME DESTINATION bin)
 
 # Optional streaming .mzpeak input through the mzPeak C++ library (github.com/OpenMS/mzpeak).
-# -DMZPEAK_ROOT=<checkout with include/ and a built libmzpeak in build*/>. Without it the tool
+# -DMZPEAK_ROOT=<checkout with include/ and a built libmzpeak in build/>. Without it the tool
 # still builds and reads .mzpeak only through OpenMS' non-streaming MzPeakFile.
 if(MZPEAK_ROOT)
-  find_library(MZPEAK_LIB NAMES mzpeak PATHS ${MZPEAK_ROOT} PATH_SUFFIXES build build-release buildfix REQUIRED)
+  find_library(MZPEAK_LIB NAMES mzpeak PATHS ${MZPEAK_ROOT} PATH_SUFFIXES build REQUIRED)
   find_package(Arrow REQUIRED)
   find_package(Parquet REQUIRED)
   target_compile_definitions(diaspextract PRIVATE DIASPEXTRACT_WITH_MZPEAK)

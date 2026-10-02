@@ -17,7 +17,7 @@ namespace diaspextract
 {
 // ---------------------------------------------------------------------------------------------
 // sqlite3 directly, not SQLiteCpp: SQLiteCpp is an OpenMS in-tree extern absent from an installed OpenMS,
-// and a missing SQLite must be a compile error, never a silent detector switch (docs/BASELINE.md).
+// and a missing SQLite must be a compile error, never a silent detector switch.
 // Every read is whole or refused with sqlite3_errmsg: each prepare is checked and each row loop must end in
 // SQLITE_DONE (an error merely ends a loop, so a partial read would look complete). Optional tables and
 // columns are read from the schema, never inferred from a failed query.
@@ -63,7 +63,7 @@ inline bool loadTdfAxisBounds(const std::string& tdf, TdfAxisBounds& out, std::s
   if (!ok) return false;
   if (!(have_lo && have_hi && have_n)) { why = "GlobalMetadata lacks MzAcqRangeLower/MzAcqRangeUpper/DigitizerNumSamples (" + std::to_string(have_lo + have_hi + have_n) + " of 3)"; return false; }
   // plausibility: a TIMS acquisition ends far below 1e5 m/z; a corrupt but finite value beyond
-  // that would drive the flight-time conversion past the axis (review 3a, round 2), and 1e5 is the m/z
+  // that would drive the flight-time conversion past the axis, and 1e5 is the m/z
   // range a negative C2 is verified over
   if (!(out.mz_lo > 0.0) || !(out.mz_hi > out.mz_lo) || !(out.mz_hi <= TdfMzCalibration::kDomainMaxMz))
   { why = "GlobalMetadata bounds are not usable: MzAcqRange " + std::to_string(out.mz_lo) + "-" + std::to_string(out.mz_hi) + ", DigitizerNumSamples " + std::to_string(out.n_bins); return false; }
@@ -82,34 +82,24 @@ inline bool loadTdfCalibration(const std::string& tdf, TdfMzCalibration& cal,
   sqlite3_stmt* st = nullptr;
   auto fail = [&](const std::string& w) { why = w; sqlite3_finalize(st); sqlite3_close(db); return false; };
   auto sqlfail = [&](const std::string& what) { return fail(what + ": " + sqlite3_errmsg(db)); };   // errmsg is read before fail() finalizes
+  auto prep = [&](const char* q) { sqlite3_finalize(st); st = nullptr; return sqlite3_prepare_v2(db, q, -1, &st, nullptr) == SQLITE_OK; };
   int rc = SQLITE_OK;
   bool frames_have_cal = false;   // PRAGMA table_xinfo: one row per column, generated ones too (table_info skips them), the name in column 1, matched ASCII case-insensitively as sqlite resolves it
-  if (sqlite3_prepare_v2(db, "PRAGMA table_xinfo(Frames)", -1, &st, nullptr) != SQLITE_OK) return sqlfail("cannot read the Frames schema");
+  if (!prep("PRAGMA table_xinfo(Frames)")) return sqlfail("cannot read the Frames schema");
   while ((rc = sqlite3_step(st)) == SQLITE_ROW)
   { const unsigned char* c = sqlite3_column_text(st, 1); frames_have_cal = frames_have_cal || (c && sqlite3_stricmp(reinterpret_cast<const char*>(c), "MzCalibration") == 0); }
   if (rc != SQLITE_DONE) return sqlfail("reading the Frames schema");
-  sqlite3_finalize(st); st = nullptr;
+  // Frames has no MzCalibration column (a minimal or very old tdf): fall back to the single-row
+  // rule rather than refusing -- the reference is then unambiguous only if there IS one row.
   long long cal_id = -1; int ncal = 0;
-  if (frames_have_cal)
-  {
-    if (sqlite3_prepare_v2(db, "SELECT DISTINCT MzCalibration FROM Frames", -1, &st, nullptr) != SQLITE_OK) return sqlfail("cannot read Frames.MzCalibration");
-    while ((rc = sqlite3_step(st)) == SQLITE_ROW) { cal_id = sqlite3_column_int64(st, 0); ++ncal; }
-    if (rc != SQLITE_DONE) return sqlfail("reading Frames.MzCalibration");
-    sqlite3_finalize(st); st = nullptr;
-    if (ncal != 1) return fail("frames reference " + std::to_string(ncal) + " distinct MzCalibration rows");
-  }
-  else
-  {
-    // Frames has no MzCalibration column (a minimal or very old tdf): fall back to the single-row
-    // rule rather than refusing -- the reference is then unambiguous only if there IS one row.
-    if (sqlite3_prepare_v2(db, "SELECT Id FROM MzCalibration", -1, &st, nullptr) != SQLITE_OK) return sqlfail("Frames has no MzCalibration column, and MzCalibration cannot be read");
-    while ((rc = sqlite3_step(st)) == SQLITE_ROW) { cal_id = sqlite3_column_int64(st, 0); ++ncal; }
-    if (rc != SQLITE_DONE) return sqlfail("reading MzCalibration");
-    sqlite3_finalize(st); st = nullptr;
-    if (ncal != 1) return fail("Frames has no MzCalibration column and MzCalibration has " + std::to_string(ncal) + " rows (need exactly 1)");
-  }
-  if (sqlite3_prepare_v2(db, "SELECT ModelType, DigitizerTimebase, DigitizerDelay, C0, C1, C2, T1, dC1, dC2, C3, C4 "
-                             "FROM MzCalibration WHERE Id = ?", -1, &st, nullptr) != SQLITE_OK)
+  if (!prep(frames_have_cal ? "SELECT DISTINCT MzCalibration FROM Frames" : "SELECT Id FROM MzCalibration"))
+    return sqlfail(frames_have_cal ? "cannot read Frames.MzCalibration" : "Frames has no MzCalibration column, and MzCalibration cannot be read");
+  while ((rc = sqlite3_step(st)) == SQLITE_ROW) { cal_id = sqlite3_column_int64(st, 0); ++ncal; }
+  if (rc != SQLITE_DONE) return sqlfail(frames_have_cal ? "reading Frames.MzCalibration" : "reading MzCalibration");
+  if (ncal != 1)
+    return fail(frames_have_cal ? "frames reference " + std::to_string(ncal) + " distinct MzCalibration rows"
+                                : "Frames has no MzCalibration column and MzCalibration has " + std::to_string(ncal) + " rows (need exactly 1)");
+  if (!prep("SELECT ModelType, DigitizerTimebase, DigitizerDelay, C0, C1, C2, T1, dC1, dC2, C3, C4 FROM MzCalibration WHERE Id = ?"))
     return sqlfail("cannot read MzCalibration");
   rc = sqlite3_bind_int64(st, 1, cal_id);
   if (rc == SQLITE_OK) rc = sqlite3_step(st);
@@ -122,10 +112,9 @@ inline bool loadTdfCalibration(const std::string& tdf, TdfMzCalibration& cal,
   cal.C2 = sqlite3_column_double(st, 5);
   cal.T1_ref = sqlite3_column_double(st, 6); cal.dC1 = sqlite3_column_double(st, 7); cal.dC2 = sqlite3_column_double(st, 8);
   cal.C3 = sqlite3_column_double(st, 9); cal.C4 = sqlite3_column_double(st, 10);
-  sqlite3_finalize(st); st = nullptr;
-  if (!cal.isSupported()) return fail(cal.unsupportedReason());
+  if (std::string r = cal.unsupportedReason(); !r.empty()) return fail(r);
   t1_by_frame.clear();
-  if (sqlite3_prepare_v2(db, "SELECT Id, T1 FROM Frames", -1, &st, nullptr) != SQLITE_OK) return sqlfail("cannot read Frames.T1");
+  if (!prep("SELECT Id, T1 FROM Frames")) return sqlfail("cannot read Frames.T1");
   while ((rc = sqlite3_step(st)) == SQLITE_ROW)
   {
     const long long id = sqlite3_column_int64(st, 0);
@@ -147,9 +136,8 @@ inline bool loadTdfCalibration(const std::string& tdf, TdfMzCalibration& cal,
 //  * what the Bruker loader made of each raw point, so the tool can invert it: per frame MsMsType, NumScans, NumPeaks,
 //    opentims' intensity correction (recover::opentimsCorrection of sqlite's text of AccumulationTime) and the
 //    TimsCalibration row of the rational 1/K0 model. That text is the loader's only where both share one SQLite, as
-//    in-tree; a standalone build links its own, and SQLite versions render a REAL that 15 digits do not round-trip
-//    differently. In a brute force over every raw count below 2^24 the few-ulp corr change refused points but never
-//    recovered a wrong count, and every AccumulationTime seen (49 .d files) round-trips at 15 digits.
+//    in-tree. A standalone build links its own SQLite, whose text of a REAL can differ from the loader's by a few ulp;
+//    recovery then refuses points, never recovers a wrong count.
 // Integers are type- and range-checked before narrowing: sqlite3_column_int64 converts TEXT/REAL silently, a cast wraps.
 // Refuses wherever tryCreateRationalConverter would NOT install that model: the loader's 1/K0 is then linear.
 // ---------------------------------------------------------------------------------------------
@@ -172,6 +160,7 @@ inline bool loadTdfDnoise(const std::string& tdf, TdfDnoiseInputs& out, std::str
   sqlite3_stmt* st = nullptr;
   auto fail = [&](const std::string& w) { why = w; sqlite3_finalize(st); sqlite3_close(db); return false; };
   auto sqlfail = [&](const std::string& what, const char* tail = "") { return fail(what + ": " + sqlite3_errmsg(db) + tail); };   // errmsg is read before fail() finalizes
+  auto prep = [&](const char* q) { sqlite3_finalize(st); st = nullptr; return sqlite3_prepare_v2(db, q, -1, &st, nullptr) == SQLITE_OK; };
   auto int_in = [&](int col, long long lo, long long hi, long long& v) {   // a stored INTEGER in [lo, hi]
     if (sqlite3_column_type(st, col) != SQLITE_INTEGER) return false;
     v = sqlite3_column_int64(st, col);
@@ -184,7 +173,7 @@ inline bool loadTdfDnoise(const std::string& tdf, TdfDnoiseInputs& out, std::str
     return type == SQLITE_INTEGER || type == SQLITE_FLOAT ? s : "'" + s + "'"; };
   const char* const linear = " (the loader converts 1/K0 with the linear GlobalMetadata model)";
   int rc = SQLITE_OK;
-  if (sqlite3_prepare_v2(db, "SELECT Key, Value FROM GlobalMetadata", -1, &st, nullptr) != SQLITE_OK) return sqlfail("cannot read GlobalMetadata");
+  if (!prep("SELECT Key, Value FROM GlobalMetadata")) return sqlfail("cannot read GlobalMetadata");
   while ((rc = sqlite3_step(st)) == SQLITE_ROW)
   {
     const unsigned char* k = sqlite3_column_text(st, 0);
@@ -199,25 +188,21 @@ inline bool loadTdfDnoise(const std::string& tdf, TdfDnoiseInputs& out, std::str
     if (slot && v) *slot = std::string(reinterpret_cast<const char*>(v), (size_t)sqlite3_column_bytes(st, 1));
   }
   if (rc != SQLITE_DONE) return sqlfail("reading GlobalMetadata");
-  sqlite3_finalize(st); st = nullptr;
-  if (sqlite3_prepare_v2(db, "SELECT MAX(NumScans) FROM Frames", -1, &st, nullptr) != SQLITE_OK) return sqlfail("cannot read Frames.NumScans");
+  if (!prep("SELECT MAX(NumScans) FROM Frames")) return sqlfail("cannot read Frames.NumScans");
   if ((rc = sqlite3_step(st)) != SQLITE_ROW) return sqlfail("reading MAX(Frames.NumScans)");
   { long long v = 0;   // NULL: an empty Frames table, refused below. A TEXT cell anywhere is the MAX: it sorts above INTEGER.
     if (sqlite3_column_type(st, 0) != SQLITE_NULL && !int_in(0, 0, 1000000, v))
       return fail("MAX(Frames.NumScans) " + cell(0) + " is not an INTEGER in [0, 1000000]");
     out.meta.max_num_scans = (std::uint32_t)v; }
-  sqlite3_finalize(st); st = nullptr;
   // DiaFrameMsMsWindows is optional (no table: dnoise has no gate). Table names resolve case-insensitively.
-  if (sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = 'DiaFrameMsMsWindows' COLLATE NOCASE", -1, &st, nullptr) != SQLITE_OK)
+  if (!prep("SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = 'DiaFrameMsMsWindows' COLLATE NOCASE"))
     return sqlfail("cannot read the schema");
   rc = sqlite3_step(st);
   if (rc != SQLITE_ROW && rc != SQLITE_DONE) return sqlfail("reading the schema");
-  const bool have_windows = rc == SQLITE_ROW;
-  sqlite3_finalize(st); st = nullptr;
-  if (have_windows)
+  if (rc == SQLITE_ROW)   // the table exists
   {
-    if (sqlite3_prepare_v2(db, "SELECT DISTINCT ScanNumBegin, ScanNumEnd, IsolationMz, IsolationWidth FROM DiaFrameMsMsWindows "
-                               "WHERE IsolationMz IS NOT NULL AND IsolationWidth IS NOT NULL", -1, &st, nullptr) != SQLITE_OK)
+    if (!prep("SELECT DISTINCT ScanNumBegin, ScanNumEnd, IsolationMz, IsolationWidth FROM DiaFrameMsMsWindows "
+              "WHERE IsolationMz IS NOT NULL AND IsolationWidth IS NOT NULL"))
       return sqlfail("cannot read DiaFrameMsMsWindows");
     while ((rc = sqlite3_step(st)) == SQLITE_ROW)
     {
@@ -226,10 +211,9 @@ inline bool loadTdfDnoise(const std::string& tdf, TdfDnoiseInputs& out, std::str
       out.windows.push_back({sqlite3_column_int64(st, 0), sqlite3_column_int64(st, 1), sqlite3_column_double(st, 2), sqlite3_column_double(st, 3)});
     }
     if (rc != SQLITE_DONE) return sqlfail("reading DiaFrameMsMsWindows");
-    sqlite3_finalize(st); st = nullptr;
   }
   std::vector<std::uint32_t> cal_id;
-  if (sqlite3_prepare_v2(db, "SELECT Id, ModelType, C0, C1, C2, C3, C4, C5, C6, C7, C8, C9 FROM TimsCalibration", -1, &st, nullptr) != SQLITE_OK)
+  if (!prep("SELECT Id, ModelType, C0, C1, C2, C3, C4, C5, C6, C7, C8, C9 FROM TimsCalibration"))
     return sqlfail("cannot read TimsCalibration", linear);
   while ((rc = sqlite3_step(st)) == SQLITE_ROW)
   {
@@ -241,10 +225,9 @@ inline bool loadTdfDnoise(const std::string& tdf, TdfDnoiseInputs& out, std::str
     cal_id.push_back((std::uint32_t)id); out.tims_cal.push_back(c);
   }
   if (rc != SQLITE_DONE) return sqlfail("reading TimsCalibration");
-  sqlite3_finalize(st); st = nullptr;
   if (out.tims_cal.empty()) return fail(std::string("TimsCalibration is empty") + linear);
   out.ms1_max_scans.assign(out.tims_cal.size(), 0);
-  if (sqlite3_prepare_v2(db, "SELECT Id, MsMsType, NumScans, NumPeaks, AccumulationTime, TimsCalibration FROM Frames", -1, &st, nullptr) != SQLITE_OK)
+  if (!prep("SELECT Id, MsMsType, NumScans, NumPeaks, AccumulationTime, TimsCalibration FROM Frames"))
     return sqlfail("cannot read Frames (Id, MsMsType, NumScans, NumPeaks, AccumulationTime, TimsCalibration)",
                    " (without a TimsCalibration column the loader converts 1/K0 with the linear GlobalMetadata model)");
   while ((rc = sqlite3_step(st)) == SQLITE_ROW)

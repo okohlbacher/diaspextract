@@ -33,16 +33,24 @@ anyone can reproduce every number. Do not add, stage or cite unpublished data.
 ## Running the tests
 
 ```bash
-python3 test/test_diaspextract.py /path/to/diaspextract     # 29 end-to-end checks (30 where the build writes mzPeak), synthetic input
+python3 bench/slice_d.py /path/to/run.d /tmp/slice.d 3000 3060   # once: one minute of a public run as a real .d
+DIASPEXTRACT_TEST_D=/tmp/slice.d python3 test/test_diaspextract.py /path/to/diaspextract
 cmake -B build -DDIASPEXTRACT_TESTS_ONLY=ON && cmake --build build && ctest --test-dir build
 ```
 
-The second command needs no OpenMS. CI runs it on Linux, macOS and Windows for every pull request. The
+The end-to-end suite has 32 checks (33 where the build writes mzPeak). All but one run on small synthetic inputs; the
+last runs a real diaPASEF `.d` through the default path, and is skipped without `DIASPEXTRACT_TEST_D`. CI gives it the
+5.6-minute HeLa test run that OpenMS publishes. The `ctest` line needs no OpenMS. CI runs it on Linux, macOS and Windows for every pull request. The
 end-to-end checks need OpenMS, so CI runs them only in the full build (`build.yml`: weekly, on release tags and on
 demand). Run them yourself before you open a pull request.
 
-Run the end-to-end checks from a shell with no `DIASPEXTRACT_*` variable set. The suite passes your
-environment to the tool, so a stray variable changes every check.
+`DIASPEXTRACT_TEST_D_DIGEST` pins that run's spectra digest: when set, the last check compares the output with it
+(the check prints the digest when it is unset). CI takes it from the repository variable of the same name, set from
+the first green full build's log; a change that alters the spectra updates it together with its CHANGELOG entry.
+
+Run the end-to-end checks from a shell with no `DIASPEXTRACT_*` variable set other than `DIASPEXTRACT_TEST_D` and
+`DIASPEXTRACT_TEST_D_DIGEST`. The
+suite passes your environment to the tool, so a stray variable changes every check.
 
 ## Pull requests
 

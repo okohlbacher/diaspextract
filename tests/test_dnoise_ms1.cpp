@@ -191,6 +191,14 @@ static void testGate()
   bad.max_num_scans = 0;
   const dn::GateBuild z = dn::buildMs1WindowGate(bad, kRowsRef, dn::Params{});
   CHECK(!z.gate && z.error.empty(), "no scans: no gate");
+  // a corrupt table (here 60,000 full-range windows over 1,000 scans: 6e7 window-scan pairs) is refused before the gate
+  // allocates one interval per pair
+  std::vector<dn::WindowRow> many(60000, dn::WindowRow{0, 999, 500.0, 25.0});
+  for (std::size_t i = 0; i < many.size(); ++i) many[i].isolation_mz = 400.0 + 0.01 * (double)i;
+  bad = metaRef();
+  bad.max_num_scans = 1000;
+  const dn::GateBuild h = dn::buildMs1WindowGate(bad, many, dn::Params{});
+  CHECK(!h.gate && h.error.find("window-scan pairs") != std::string::npos, "a gate of 6e7 window-scan pairs is refused (%s)", h.error.c_str());
 }
 
 static void testParse()

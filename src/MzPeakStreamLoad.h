@@ -70,14 +70,28 @@ namespace spx
     {
       zip_int64_t idx = zip_name_locate(z, name, 0);
       if (idx < 0) throw std::runtime_error(std::string("mzpeak: member missing: ") + name);
-      zip_stat_t st; zip_stat_index(z, (zip_uint64_t)idx, 0, &st);
-      if (from < 0) from += (zip_int64_t)st.size;
-      if (len < 0) len = (zip_int64_t)st.size - from;
+      zip_stat_t st;
+      if (zip_stat_index(z, (zip_uint64_t)idx, 0, &st) != 0 || !(st.valid & ZIP_STAT_SIZE))
+        throw std::runtime_error(std::string("mzpeak: cannot stat member ") + name);
+      const zip_int64_t size = (zip_int64_t)st.size;
+      if (from < 0) from += size;
+      if (len < 0) len = size - from;
+      if (from < 0 || len < 0 || from > size || len > size - from)   // sizes from the archive: never allocate past the member
+        throw std::runtime_error(std::string("mzpeak: a read beyond the member ") + name + " (corrupt archive?)");
       zip_file_t* f = zip_fopen_index(z, (zip_uint64_t)idx, 0);
       if (!f) throw std::runtime_error(std::string("mzpeak: cannot open member ") + name);
       if (from > 0 && zip_fseek(f, from, SEEK_SET) != 0) { zip_fclose(f); throw std::runtime_error(std::string("mzpeak: cannot seek in ") + name + " (member not stored?)"); }
-      std::vector<char> buf((size_t)len); zip_int64_t got = 0;
-      while (got < len) { zip_int64_t n = zip_fread(f, buf.data() + got, (zip_uint64_t)(len - got)); if (n <= 0) break; got += n; }
+      // the advertised size is not trusted for the allocation: the buffer grows only as data actually arrive (64 MiB at a
+      // time), so a member claiming more than the archive holds ends in a short read, not in a huge allocation
+      constexpr zip_int64_t kChunk = zip_int64_t(1) << 26;
+      std::vector<char> buf; zip_int64_t got = 0;
+      while (got < len)
+      {
+        buf.resize((size_t)std::min(len, got + kChunk));
+        zip_int64_t n = zip_fread(f, buf.data() + got, (zip_uint64_t)((zip_int64_t)buf.size() - got));
+        if (n <= 0) break;
+        got += n;
+      }
       zip_fclose(f);
       if (got != len) throw std::runtime_error(std::string("mzpeak: short read of ") + name);
       return buf;
@@ -93,6 +107,7 @@ namespace spx
         std::vector<char> tail = readMember_(z, "spectra_peaks.parquet", -8, 8);
         uint32_t flen; std::memcpy(&flen, tail.data(), 4);
         if (std::string(tail.data() + 4, 4) != "PAR1") throw std::runtime_error("mzpeak: peaks member is not parquet");
+        // readMember_ refuses a footer length beyond the member, before allocating it
         std::vector<char> footer = readMember_(z, "spectra_peaks.parquet", -8 - (zip_int64_t)flen, flen);
         uint32_t flen2 = flen;
         std::shared_ptr<parquet::FileMetaData> md = parquet::FileMetaData::Make(footer.data(), &flen2);
@@ -101,37 +116,51 @@ namespace spx
         PARQUET_THROW_NOT_OK(parquet::arrow::FromParquetSchema(md->schema(), props, md->key_value_metadata(), &schema));
         auto point = schema->GetFieldByName("point");
         if (!point) throw std::runtime_error("mzpeak: no 'point' column");
-        auto tof = std::dynamic_pointer_cast<arrow::StructType>(point->type())->GetFieldByName("tof");
+        const auto point_t = std::dynamic_pointer_cast<arrow::StructType>(point->type());
+        if (!point_t) throw std::runtime_error("mzpeak: the 'point' column is not a struct");
+        auto tof = point_t->GetFieldByName("tof");
         if (!tof || !tof->metadata()) throw std::runtime_error("mzpeak: no tof column / metadata (not an ims-compact archive?)");
         auto tp = tof->metadata()->Get("mzpeak:transform_params");
         if (!tp.ok()) throw std::runtime_error("mzpeak: tof column has no mzpeak:transform_params");
         if (std::sscanf(tp->c_str(), "%lf,%lf", &c0, &c1) != 2 || !(c1 > 0)) throw std::runtime_error("mzpeak: bad transform_params " + *tp);
 
         // (2) the vendor tdf: gunzip vendor/analysis.tdf.gz to a temp file, read MzCalibration + Frames.T1
-        // --no-vendor archives have no embedded tdf: accept a sidecar via DIASPEXTRACT_MZPEAK_TDF=<analysis.tdf.gz>
+        // --no-vendor archives have no embedded tdf: accept a sidecar via DIASPEXTRACT_MZPEAK_TDF, an analysis.tdf.gz or
+        // the plain analysis.tdf (an SQLite file is read in place)
         std::vector<char> gz;
-        if (const char* side = std::getenv("DIASPEXTRACT_MZPEAK_TDF"))
+        std::string tdf_path;
+        const char* side = std::getenv("DIASPEXTRACT_MZPEAK_TDF");
+        if (side)
         {
           FILE* sf = std::fopen(side, "rb"); if (!sf) throw std::runtime_error(std::string("mzpeak: cannot read DIASPEXTRACT_MZPEAK_TDF ") + side);
           char b[1 << 16]; size_t n; while ((n = std::fread(b, 1, sizeof b, sf)) > 0) gz.insert(gz.end(), b, b + n); std::fclose(sf);
+          if (gz.size() >= 16 && std::memcmp(gz.data(), "SQLite format 3", 16) == 0) { tdf_path = side; std::vector<char>().swap(gz); }
         }
         else gz = readMember_(z, "vendor/analysis.tdf.gz");
         char tmpl[] = "/tmp/spx_mzpeak_tdf_XXXXXX"; int fd = mkstemp(tmpl); if (fd < 0) throw std::runtime_error("mzpeak: mkstemp");
         close(fd);
         struct Rm { const char* p; ~Rm() { std::remove(p); } } rm{tmpl};   // the uncompressed tdf goes on every way out
+        if (tdf_path.empty())
         { z_stream zs{}; FILE* out = std::fopen(tmpl, "wb");
           if (!out) throw std::runtime_error(std::string("mzpeak: cannot write ") + tmpl);
           if (inflateInit2(&zs, 16 + MAX_WBITS) != Z_OK) { std::fclose(out); throw std::runtime_error("mzpeak: gunzip of analysis.tdf.gz failed"); }
+          // a real analysis.tdf is well below 1 GB; a hostile gzip must not fill the temp directory
+          const unsigned long long kMaxTdf = 1ull << 32;
           zs.next_in = (Bytef*)gz.data(); zs.avail_in = (uInt)gz.size(); std::vector<char> ob(1 << 20); int rc;
           do { zs.next_out = (Bytef*)ob.data(); zs.avail_out = (uInt)ob.size(); rc = inflate(&zs, Z_NO_FLUSH);
-               if (rc != Z_OK && rc != Z_STREAM_END) { std::fclose(out); inflateEnd(&zs); throw std::runtime_error("mzpeak: gunzip of analysis.tdf.gz failed"); }
-               std::fwrite(ob.data(), 1, ob.size() - zs.avail_out, out); } while (rc != Z_STREAM_END);
-          inflateEnd(&zs); std::fclose(out); }
+               const size_t got = ob.size() - zs.avail_out;
+               if ((rc != Z_OK && rc != Z_STREAM_END) || zs.total_out > kMaxTdf || std::fwrite(ob.data(), 1, got, out) != got)
+               { std::fclose(out); inflateEnd(&zs);
+                 throw std::runtime_error(zs.total_out > kMaxTdf ? "mzpeak: analysis.tdf.gz expands beyond 4 GiB" : "mzpeak: gunzip of analysis.tdf.gz failed"); }
+             } while (rc != Z_STREAM_END);
+          inflateEnd(&zs);
+          if (std::fclose(out) != 0) throw std::runtime_error(std::string("mzpeak: cannot write ") + tmpl);
+          tdf_path = tmpl; }
         { std::string why;
-          if (!diaspextract::loadTdfCalibration(std::string(tmpl), cal, t1_by_frame, why))
+          if (!diaspextract::loadTdfCalibration(tdf_path, cal, t1_by_frame, why))
             throw std::runtime_error("mzpeak: " + why);
           std::string w2; diaspextract::TdfAxisBounds bd;
-          if (diaspextract::loadTdfAxisBounds(std::string(tmpl), bd, w2)) { acq_lo = bd.mz_lo; acq_hi = bd.mz_hi; n_bins = bd.n_bins; } else bounds_why = w2; }
+          if (diaspextract::loadTdfAxisBounds(tdf_path, bd, w2)) { acq_lo = bd.mz_lo; acq_hi = bd.mz_hi; n_bins = bd.n_bins; } else bounds_why = w2; }
       }
       catch (...) { zip_close(z); throw; }
       zip_close(z);
@@ -143,7 +172,7 @@ namespace spx
       // Fail rather than fall back to the reference T1: substituting it for an unknown frame stamps
       // masses calibrated at the wrong temperature as "exact", which is silent wrongness the
       // provenance record would then vouch for.
-      if (frame_id < 0 || (size_t)frame_id >= t1_by_frame.size())
+      if (frame_id < 0 || (size_t)frame_id >= t1_by_frame.size() || std::isnan(t1_by_frame[(size_t)frame_id]))   // NaN: a gap in the table
         throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
               "mzPeak exact calibration: no tdf T1 for frame", std::to_string(frame_id));
       const double b = cal.frameFactor(t1_by_frame[(size_t)frame_id]);
@@ -294,7 +323,7 @@ namespace spx
       // as NULL and the band as NAME-ONLY CV params; the reader then attaches every ion of the
       // frame to the FIRST precursor. So: flatten all ions of the spectrum and match each window
       // to the ion whose selected_ion_mz is its isolation target.
-      struct Ion { double mz, lo, hi; };
+      struct Ion { double mz, lo, hi; bool used = false; };
       std::vector<Ion> ions;
       for (const auto& p : md.precursors)
         for (const auto& si : p.selected_ions)
@@ -314,11 +343,14 @@ namespace spx
         if (!p.isolation_window.target_mz) continue;
         const double c = *p.isolation_window.target_mz;
         const double lo = c - p.isolation_window.lower_offset.value_or(0.f), hi = c + p.isolation_window.upper_offset.value_or(0.f);
-        const Ion* best = nullptr;
-        for (const Ion& ion : ions) if (!best || std::fabs(ion.mz - c) < std::fabs(best->mz - c)) best = &ion;
+        // the nearest ion not taken by an earlier window: two windows with one centre (and different widths or
+        // mobility bands) get their own ions, in the order the archive lists them
+        Ion* best = nullptr;
+        for (Ion& ion : ions) if (!ion.used && (!best || std::fabs(ion.mz - c) < std::fabs(best->mz - c))) best = &ion;
         if (!best || std::fabs(best->mz - c) > 0.05 || best->lo < -1e8 || best->hi > 1e8)
           throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
                                                 "mzPeak MS2 window without a matching ion-mobility band (spectrum " + std::to_string(i) + ")", std::to_string(c));
+        best->used = true;
         wins[i].push_back(MzPeakWin{lo, hi, best->lo, best->hi});
       }
       if (!wins[i].empty()) ms2.push_back(i);

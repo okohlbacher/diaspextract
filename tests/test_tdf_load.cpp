@@ -5,6 +5,7 @@
 // over a page header.
 #include "TdfLoad.h"
 #include <chrono>
+#include <cmath>
 #include <clocale>
 #include <cstdint>
 #include <cstdio>
@@ -287,6 +288,15 @@ static void testCalibrationAndBounds()
   const std::string ok = makeTdf("cal_ok.tdf", refShaped());
   CHECK(diaspextract::loadTdfCalibration(ok, cal, t1, why) && t1.size() == 11 && cal.digitizer_timebase == 0.125 && cal.T1_ref == 25.693668980735552,
         "loadTdfCalibration: %s", why.c_str());
+  // a frame id missing inside the table is a gap (NaN, uncalibrated), not a frame at the reference temperature
+  CHECK(diaspextract::loadTdfCalibration(makeTdf("cal_gap.tdf", refShaped() + "DELETE FROM Frames WHERE Id = 4;"), cal, t1, why) && t1.size() == 11 &&
+          std::isnan(t1[4]) && !std::isnan(t1[3]) && !std::isnan(t1[5]), "calibration gap: %s", why.c_str());
+  CHECK(!diaspextract::loadTdfCalibration(makeTdf("cal_c4null.tdf", refShaped() + "UPDATE MzCalibration SET C4 = NULL;"), cal, t1, why) && has(why, "C4 is NULL"),
+        "a NULL C4 (read as 0.0) is refused: %s", why.c_str());
+  CHECK(!diaspextract::loadTdfCalibration(makeTdf("cal_c0text.tdf", refShaped() + "UPDATE MzCalibration SET C0 = 'oops';"), cal, t1, why) && has(why, "C0 is not a number"),
+        "a TEXT C0 is refused: %s", why.c_str());
+  CHECK(!diaspextract::loadTdfCalibration(makeTdf("cal_t1text.tdf", refShaped() + "UPDATE Frames SET T1 = 'oops' WHERE Id = 4;"), cal, t1, why) && has(why, "frame 4: Frames.T1 is not a number"),
+        "a TEXT Frames.T1 (read as 0 C) is refused: %s", why.c_str());
   CHECK(diaspextract::loadTdfCalibration(makeTdf("cal_nocol.tdf", refShaped() + keepColumns("Frames", "Id, MsMsType, NumScans, NumPeaks, AccumulationTime, TimsCalibration, T1")), cal, t1, why),
         "no Frames.MzCalibration column and one MzCalibration row: %s", why.c_str());
   CHECK(!diaspextract::loadTdfCalibration(makeTdf("cal_nocol2.tdf", refShaped() + keepColumns("Frames", "Id, MsMsType, NumScans, NumPeaks, AccumulationTime, TimsCalibration, T1") +
@@ -340,6 +350,48 @@ static void testCalibrationAndBounds()
         "a positive C2 reads frame 7 at 1100 C as before: %s", why.c_str());
 }
 
+/// [preflight] tdfNotDiaReason and tdfBinTruncationReason: a ddaPASEF run (MsMsType 8, empty DIA tables, as PXD036463)
+/// and an analysis.tdf_bin cut short (as PXD076863) are refused before the loader, naming the cause.
+static void testPreflight()
+{
+  bool dda = true;
+  CHECK(diaspextract::tdfNotDiaReason(makeTdf("pre_dia.tdf", refShaped()), dda).empty() && !dda, "a diaPASEF run is refused");
+  const std::string w = diaspextract::tdfNotDiaReason(makeTdf("pre_dda.tdf", refShaped() + "UPDATE Frames SET MsMsType = 8 WHERE MsMsType = 9; DELETE FROM DiaFrameMsMsWindows;"), dda);
+  CHECK(dda && has(w, "ddaPASEF") && has(w, "8: 8"), "ddaPASEF: %s", w.c_str());
+  CHECK(!diaspextract::tdfNotDiaReason(makeTdf("pre_ms1.tdf", refShaped() + "DELETE FROM Frames WHERE MsMsType = 9;"), dda).empty() && !dda, "an MS1-only run is not refused");
+  // a .d of 3 frames, blocks of 100, 200 and 300 bytes at 0, 100, 300; TimsCompressionType 2 (the length is the block's first 4 bytes)
+  const std::filesystem::path d = g_dir / "pre.d";
+  std::filesystem::create_directories(d);
+  makeTdf("pre.d/analysis.tdf", "CREATE TABLE GlobalMetadata (Key TEXT PRIMARY KEY, Value TEXT); INSERT INTO GlobalMetadata VALUES ('TimsCompressionType', '2');"
+                                "CREATE TABLE Frames (Id INTEGER PRIMARY KEY, TimsId INTEGER, NumPeaks INTEGER); INSERT INTO Frames VALUES (1, 0, 50), (2, 100, 60), (3, 300, 70);");
+  auto bin = [&](long long size) {
+    std::string b((size_t)size, '\0');
+    for (auto [off, len] : {std::pair<size_t, std::uint32_t>{0, 100}, {100, 200}, {300, 300}})
+      for (int k = 0; k < 4 && off + k < b.size(); ++k) b[off + k] = (char)((len >> (8 * k)) & 0xff);
+    std::ofstream((d / "analysis.tdf_bin").string(), std::ios::binary | std::ios::trunc).write(b.data(), (std::streamsize)b.size());
+    return diaspextract::tdfBinTruncationReason(d.string()); };
+  CHECK(bin(600).empty(), "whole: %s", bin(600).c_str());
+  CHECK(has(bin(562), "frame 3 ends 38 bytes past") && has(bin(562), "1 of 3 frames"), "cut 38 bytes short: %s", bin(562).c_str());
+  CHECK(has(bin(250), "frame 2 ends 50 bytes past") && has(bin(250), "2 of 3 frames"), "cut into frame 2: %s", bin(250).c_str());
+  CHECK(has(bin(300), "frame 3 starts at byte 300") && has(bin(300), "1 of 3 frames"), "cut at frame 3's start: %s", bin(300).c_str());
+  makeTdf("pre.d/analysis.tdf", "CREATE TABLE GlobalMetadata (Key TEXT PRIMARY KEY, Value TEXT); INSERT INTO GlobalMetadata VALUES ('TimsCompressionType', '2');"
+                                "CREATE TABLE Frames (Id INTEGER PRIMARY KEY, TimsId INTEGER, NumPeaks INTEGER); INSERT INTO Frames VALUES (1, 0, 50), (2, 100, 4294967295), (3, 300, 70);");
+  CHECK(has(bin(600), "frame 2 claims 4294967295 points"), "a NumPeaks no file of 600 bytes can hold: %s", bin(600).c_str());
+  // per frame: 6401 points (51208 bytes) cannot come out of frame 2's 200-byte block, though the whole file could hold them
+  makeTdf("pre.d/analysis.tdf", "CREATE TABLE GlobalMetadata (Key TEXT PRIMARY KEY, Value TEXT); INSERT INTO GlobalMetadata VALUES ('TimsCompressionType', '2');"
+                                "CREATE TABLE Frames (Id INTEGER PRIMARY KEY, TimsId INTEGER, NumPeaks INTEGER); INSERT INTO Frames VALUES (1, 0, 50), (2, 100, 6401), (3, 300, 70);");
+  CHECK(has(bin(600), "frame 2 claims 6401 points") && has(bin(600), "200-byte block"), "a NumPeaks beyond the frame's block: %s", bin(600).c_str());
+  makeTdf("pre.d/analysis.tdf", "CREATE TABLE GlobalMetadata (Key TEXT PRIMARY KEY, Value TEXT); INSERT INTO GlobalMetadata VALUES ('TimsCompressionType', '2');"
+                                "CREATE TABLE Frames (Id INTEGER PRIMARY KEY, TimsId INTEGER, NumPeaks INTEGER); INSERT INTO Frames VALUES (1, 0, 50), (2, 100, 6400), (3, 300, 70);");
+  CHECK(bin(600).empty(), "6400 points, exactly 256 x the 200-byte block: %s", bin(600).c_str());
+  // per scan: no more points than scans x digitizer bins
+  makeTdf("pre.d/analysis.tdf", "CREATE TABLE GlobalMetadata (Key TEXT PRIMARY KEY, Value TEXT); INSERT INTO GlobalMetadata VALUES ('TimsCompressionType', '2'), ('DigitizerNumSamples', '10');"
+                                "CREATE TABLE Frames (Id INTEGER PRIMARY KEY, TimsId INTEGER, NumPeaks INTEGER, NumScans INTEGER); INSERT INTO Frames VALUES (1, 0, 50, 5), (2, 100, 60, 5), (3, 300, 70, 7);");
+  CHECK(has(bin(600), "frame 2 claims 60 points") && has(bin(600), "5 scans of 10"), "more points than scans x bins: %s", bin(600).c_str());
+  std::filesystem::remove(d / "analysis.tdf_bin");
+  CHECK(has(diaspextract::tdfBinTruncationReason(d.string()), "cannot open"), "no analysis.tdf_bin");
+}
+
 int main()
 {
   g_dir = std::filesystem::temp_directory_path() /
@@ -358,6 +410,9 @@ int main()
   before = g_fail;
   testCalibrationAndBounds();
   if (g_fail == before) std::printf("OK  loadTdfCalibration and loadTdfAxisBounds: whole reads, schema-decided fallback; a negative C2 inside its domain, frame T1 span\n");
+  before = g_fail;
+  testPreflight();
+  if (g_fail == before) std::printf("OK  preflight: ddaPASEF and MS1-only runs refused, a cut analysis.tdf_bin names its first frame past the end\n");
   std::error_code ec;
   std::filesystem::remove_all(g_dir, ec);
   if (g_fail) std::fprintf(stderr, "%d check(s) failed\n", g_fail);

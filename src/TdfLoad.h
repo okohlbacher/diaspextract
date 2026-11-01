@@ -8,7 +8,9 @@
 #include <array>
 #include <climits>
 #include <cmath>
+#include <limits>
 #include <cstdint>
+#include <fstream>
 #include <optional>
 #include <string>
 #include <vector>
@@ -71,7 +73,8 @@ inline bool loadTdfAxisBounds(const std::string& tdf, TdfAxisBounds& out, std::s
 }
 
 /// The MzCalibration row the FRAMES reference (Frames.MzCalibration; PXD017703 files carry two rows), refused
-/// when frames reference more than one. t1_by_frame[id] = Frames.T1 (T1_ref when NULL); index 0 is never a frame.
+/// when frames reference more than one. t1_by_frame[id] = Frames.T1 (T1_ref when NULL); NaN for an id the table lacks (a gap), which the callers treat as
+/// uncalibrated; index 0 is never a frame.
 /// A frame whose T1 lies outside the span a negative C2 was checked over is refused (TdfMzCalibration::frameReason).
 inline bool loadTdfCalibration(const std::string& tdf, TdfMzCalibration& cal,
                                std::vector<double>& t1_by_frame, std::string& why)
@@ -105,7 +108,14 @@ inline bool loadTdfCalibration(const std::string& tdf, TdfMzCalibration& cal,
   if (rc == SQLITE_OK) rc = sqlite3_step(st);
   if (rc == SQLITE_DONE) return fail("no MzCalibration row with Id " + std::to_string(cal_id));
   if (rc != SQLITE_ROW) return sqlfail("reading MzCalibration row " + std::to_string(cal_id));
-  if (sqlite3_column_type(st, 5) == SQLITE_NULL) return fail("MzCalibration C2 is NULL (missing, not zero)");
+  // every value a number: sqlite3_column_double reads NULL and TEXT as 0.0, which would pass as a real calibration
+  { static const char* const col[] = {"ModelType", "DigitizerTimebase", "DigitizerDelay", "C0", "C1", "C2", "T1", "dC1", "dC2", "C3", "C4"};
+    for (int c = 0; c < 11; ++c)
+    {
+      const int t = sqlite3_column_type(st, c);
+      if (t != SQLITE_INTEGER && t != SQLITE_FLOAT)
+        return fail(std::string("MzCalibration ") + col[c] + " is " + (t == SQLITE_NULL ? "NULL (missing, not zero)" : "not a number"));
+    } }
   cal.model_type = sqlite3_column_int(st, 0);
   cal.digitizer_timebase = sqlite3_column_double(st, 1); cal.digitizer_delay = sqlite3_column_double(st, 2);
   cal.C0 = sqlite3_column_double(st, 3); cal.C1 = sqlite3_column_double(st, 4);
@@ -119,8 +129,10 @@ inline bool loadTdfCalibration(const std::string& tdf, TdfMzCalibration& cal,
   {
     const long long id = sqlite3_column_int64(st, 0);
     if (id < 0 || id > 10000000) return fail("implausible Frames.Id");
-    if ((size_t)id >= t1_by_frame.size()) t1_by_frame.resize((size_t)id + 1, cal.T1_ref);
-    t1_by_frame[(size_t)id] = (sqlite3_column_type(st, 1) == SQLITE_NULL) ? cal.T1_ref : sqlite3_column_double(st, 1);
+    if ((size_t)id >= t1_by_frame.size()) t1_by_frame.resize((size_t)id + 1, std::numeric_limits<double>::quiet_NaN());   // gaps: absent
+    const int t1_type = sqlite3_column_type(st, 1);
+    if (t1_type != SQLITE_NULL && t1_type != SQLITE_INTEGER && t1_type != SQLITE_FLOAT) return fail("frame " + std::to_string(id) + ": Frames.T1 is not a number");
+    t1_by_frame[(size_t)id] = (t1_type == SQLITE_NULL) ? cal.T1_ref : sqlite3_column_double(st, 1);
     if (std::string w = cal.frameReason(t1_by_frame[(size_t)id]); !w.empty()) return fail("frame " + std::to_string(id) + ": " + w);
   }
   if (rc != SQLITE_DONE) return sqlfail("reading Frames.T1");
@@ -265,5 +277,129 @@ inline bool loadTdfDnoise(const std::string& tdf, TdfDnoiseInputs& out, std::str
   sqlite3_finalize(st); sqlite3_close(db);
   if (out.frames.size() < 2) { why = "no Frames rows"; return false; }
   return true;
+}
+
+// ---------------------------------------------------------------------------------------------
+// [preflight] What the .d loader does not report. A ddaPASEF run reaches its old-format DIA window query ("no such
+// column: ScanNumBegin"), a cut analysis.tdf_bin reaches zstd ("Data corruption detected"); both escape as non-OpenMS
+// exceptions and abort the process. These checks run before the load and name the cause.
+// ---------------------------------------------------------------------------------------------
+/// Why the run is not diaPASEF (no MsMsType 9 frame), or empty. @p dda: its MS/MS frames are ddaPASEF (MsMsType 8).
+inline std::string tdfNotDiaReason(const std::string& tdf, bool& dda)
+{
+  dda = false;
+  sqlite3* db = nullptr;
+  if (sqlite3_open_v2(tdf.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK)
+  { std::string w = std::string("cannot open ") + tdf + ": " + (db ? sqlite3_errmsg(db) : "out of memory"); sqlite3_close(db); return w; }
+  sqlite3_stmt* st = nullptr;
+  long long n_dia = 0, n_dda = 0;
+  std::string counts;
+  int rc = sqlite3_prepare_v2(db, "SELECT MsMsType, COUNT(*) FROM Frames GROUP BY MsMsType ORDER BY MsMsType", -1, &st, nullptr);
+  if (rc == SQLITE_OK)
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW)
+    {
+      const long long type = sqlite3_column_int64(st, 0), n = sqlite3_column_int64(st, 1);
+      if (type == 9) n_dia = n;
+      if (type == 8) n_dda = n;
+      counts += (counts.empty() ? "" : ", ") + std::to_string(type) + ": " + std::to_string(n);
+    }
+  std::string why;
+  if (rc != SQLITE_DONE) why = std::string("cannot read Frames.MsMsType: ") + sqlite3_errmsg(db);
+  sqlite3_finalize(st); sqlite3_close(db);
+  if (!why.empty() || n_dia > 0) return why;
+  dda = n_dda > 0;
+  return (dda ? "is ddaPASEF, not diaPASEF" : "holds no diaPASEF frames") + std::string(" (frames by MsMsType: ")
+         + (counts.empty() ? "none" : counts) + "; diaPASEF is 9, ddaPASEF 8)";
+}
+
+/// A refusal reason of loadTdfCalibration or loadTdfDnoise that names a value no instrument writes (NULL or text where a
+/// number belongs, NaN, an implausible id, a malformed database page): the file is corrupt, not merely unsupported
+/// (another model type, several calibrations), and the tool exits with INPUT_FILE_CORRUPT as the preflight does.
+inline bool tdfReasonIsCorrupt(const std::string& why)
+{
+  for (const char* k : {"is NULL", "is not a number", "not a finite number", "contains NaN", "implausible", "malformed",
+                        "is not an INTEGER", "references an unknown", "has no AccumulationTime", "appears twice"})
+    if (why.find(k) != std::string::npos) return true;
+  return false;
+}
+
+/// Why analysis.tdf_bin cannot hold every frame, or empty. A frame's block starts at Frames.TimsId; with
+/// TimsCompressionType 2 its first 4 bytes (little-endian) are the block length. A cut file loses its tail, so the frames
+/// that start past the end are counted without a read, and only the last block that starts inside the file is read: one
+/// 4-byte read (a read per frame costs a minute on a cold network file system). Other compression types: starts only.
+inline std::string tdfBinTruncationReason(const std::string& d)
+{
+  const std::string tdf = d + "/analysis.tdf", bin = d + "/analysis.tdf_bin";
+  std::ifstream fb(bin, std::ios::binary | std::ios::ate);   // 64-bit offsets on every platform (runs exceed 4 GB)
+  if (!fb) return "cannot open " + bin;
+  const long long size = (long long)fb.tellg();
+  sqlite3* db = nullptr;
+  if (sqlite3_open_v2(tdf.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK)
+  { std::string w = std::string("cannot open ") + tdf + ": " + (db ? sqlite3_errmsg(db) : "out of memory"); sqlite3_close(db); return w; }
+  sqlite3_stmt* st = nullptr;
+  bool has_len = false;
+  if (sqlite3_prepare_v2(db, "SELECT Value FROM GlobalMetadata WHERE Key = 'TimsCompressionType'", -1, &st, nullptr) == SQLITE_OK
+      && sqlite3_step(st) == SQLITE_ROW)
+    has_len = sqlite3_column_int(st, 0) == 2;
+  sqlite3_finalize(st); st = nullptr;
+  long long n_bins = 0;   // DigitizerNumSamples: a scan holds at most one point per flight-time bin
+  if (sqlite3_prepare_v2(db, "SELECT Value FROM GlobalMetadata WHERE Key = 'DigitizerNumSamples'", -1, &st, nullptr) == SQLITE_OK
+      && sqlite3_step(st) == SQLITE_ROW && sqlite3_column_type(st, 0) != SQLITE_NULL)
+    n_bins = sqlite3_column_int64(st, 0);
+  sqlite3_finalize(st); st = nullptr;
+  struct Row { long long id, off, peaks, scans; };
+  std::vector<Row> rows;
+  long long n = 0, n_out = 0, out_id = -1, out_off = 0, last_id = -1, last_off = -1;
+  std::string why;
+  int rc = sqlite3_prepare_v2(db, "SELECT Id, TimsId, NumPeaks, NumScans FROM Frames ORDER BY TimsId", -1, &st, nullptr);
+  const bool have_scans = rc == SQLITE_OK;
+  if (!have_scans) { sqlite3_finalize(st); st = nullptr; rc = sqlite3_prepare_v2(db, "SELECT Id, TimsId, NumPeaks FROM Frames ORDER BY TimsId", -1, &st, nullptr); }
+  if (rc == SQLITE_OK)
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW)
+    {
+      ++n;
+      const long long id = sqlite3_column_int64(st, 0), off = sqlite3_column_int64(st, 1), peaks = sqlite3_column_int64(st, 2);
+      const long long scans = have_scans ? std::max(0LL, (long long)sqlite3_column_int64(st, 3)) : 0;
+      if (off >= 0 && off < size) { last_id = id; last_off = off; rows.push_back({id, off, peaks, scans}); }
+      else if (n_out++ == 0) { out_id = id; out_off = off; }
+    }
+  if (rc != SQLITE_DONE) why = std::string("cannot read Frames.TimsId: ") + sqlite3_errmsg(db);
+  sqlite3_finalize(st); sqlite3_close(db);
+  if (!why.empty()) return why;
+  long long end = last_off;   // the end of the last block that starts inside the file
+  if (has_len && last_off >= 0)
+  {
+    unsigned char h[4];
+    end = last_off + 4;
+    if (fb.seekg(last_off) && fb.read(reinterpret_cast<char*>(h), 4))
+      end = last_off + (long long)((std::uint32_t)h[0] | (std::uint32_t)h[1] << 8 | (std::uint32_t)h[2] << 16 | (std::uint32_t)h[3] << 24);
+  }
+  const bool cut = end > size;
+  if (!cut && n_out == 0)
+  {
+    // The loader sizes its arrays from Frames.NumPeaks before it reads a byte (8 bytes per point and more). Per frame: its
+    // block runs to the next frame's start (or the end of the file), and its points (8 bytes each, decoded) cannot exceed
+    // 256 times that block however well they compress (the per-scan counts, mostly zeros in a sparse frame, can, so they
+    // are left out); nor can a scan hold more points than the digitizer has bins. The blocks come from the frame table
+    // alone, no read per frame.
+    for (size_t i = 0, j = 0; i < rows.size(); ++i)
+    {
+      while (j < rows.size() && rows[j].off <= rows[i].off) ++j;   // the next block that starts later (ties share one end)
+      const long long block = (j < rows.size() ? rows[j].off : size) - rows[i].off;
+      const Row& r = rows[i];
+      if (r.peaks <= 0) continue;
+      if ((double)r.peaks * 8.0 > 256.0 * (double)block)
+        return "frame " + std::to_string(r.id) + " claims " + std::to_string(r.peaks) + " points (Frames.NumPeaks), more than its "
+               + std::to_string(block) + "-byte block of analysis.tdf_bin can hold: the file is corrupt";
+      if (have_scans && n_bins > 0 && (double)r.peaks > (double)r.scans * (double)n_bins)
+        return "frame " + std::to_string(r.id) + " claims " + std::to_string(r.peaks) + " points (Frames.NumPeaks), more than its "
+               + std::to_string(r.scans) + " scans of " + std::to_string(n_bins) + " flight-time bins can hold: the file is corrupt";
+    }
+    return std::string();
+  }
+  const std::string first = cut ? "frame " + std::to_string(last_id) + " ends " + std::to_string(end - size) + " bytes past the end of analysis.tdf_bin"
+                                : "frame " + std::to_string(out_id) + " starts at byte " + std::to_string(out_off) + ", outside analysis.tdf_bin";
+  return first + " (" + std::to_string(size) + " bytes): the file is truncated (" + std::to_string(n_out + (cut ? 1 : 0)) + " of "
+         + std::to_string(n) + " frames affected)";
 }
 } // namespace diaspextract

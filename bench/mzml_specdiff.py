@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Per-spectrum diff of two DIAspeXtract mzML outputs, aligned by (RT, precursor m/z, charge).
+"""Per-spectrum diff of two DIAspeXtract mzML outputs, aligned by (RT, precursor m/z, charge), and within such a
+group (two isolation windows or two mobilities can give one key) by 1/K0 and the isolation offsets.
 
     mzml_specdiff.py A.mzML B.mzML [--tile SEC]
 
@@ -15,6 +16,9 @@ import base64, re, struct, sys, zlib
 RT = re.compile(rb'accession="MS:1000016"[^>]*value="([^"]+)"')
 PMZ = re.compile(rb'accession="MS:1000744"[^>]*value="([^"]+)"')
 CHG = re.compile(rb'accession="MS:1000041"[^>]*value="([^"]+)"')
+IM = re.compile(rb'accession="MS:1002815"[^>]*value="([^"]+)"')
+ISO_LO = re.compile(rb'accession="MS:1000828"[^>]*value="([^"]+)"')
+ISO_HI = re.compile(rb'accession="MS:1000829"[^>]*value="([^"]+)"')
 NPK = re.compile(rb'defaultArrayLength="(\d+)"')
 BIN = re.compile(rb'<binary>([^<]*)</binary>')
 COMP = re.compile(rb'accession="MS:1000574"')   # zlib compression
@@ -36,7 +40,35 @@ def spectra(path):
                 m = CHG.search(data); z = int(m.group(1)) if m else 0
                 n = int(NPK.search(data).group(1))
                 bins = BIN.findall(data)
-                yield (rt, pmz, z), n, bins, bool(COMP.search(data))
+                sub = tuple(float(r.search(data).group(1)) if r.search(data) else 0.0 for r in (IM, ISO_LO, ISO_HI))
+                yield (rt, pmz, z), n, bins, bool(COMP.search(data)), sub
+
+def groups(path):
+    """The spectra in runs of one (RT, m/z, charge), each run paired up inside by (1/K0, offsets) and file order."""
+    run, key = [], None
+    for sp in spectra(path):
+        if run and sp[0] != key:
+            yield key, run; run = []
+        key = sp[0]; run.append(sp)
+    if run: yield key, run
+
+def pair_group(ra, rb):
+    """Pairs of one group: same (1/K0, offsets); among spectra that share that key too, identical spectra (same
+    peaks) pair first, whatever their file order, and only the rest pair in file order. The unpaired ones of either
+    side are returned too."""
+    pool = {}
+    for sp in rb: pool.setdefault(sp[4], []).append(sp)
+    pairs, only_a, rest_a = [], [], []
+    for sp in ra:
+        lst = pool.get(sp[4], [])
+        k = next((i for i, o in enumerate(lst) if o[1:4] == sp[1:4]), None)
+        if k is not None: pairs.append((sp, lst.pop(k)))
+        else: rest_a.append(sp)
+    for sp in rest_a:
+        lst = pool.get(sp[4])
+        if lst: pairs.append((sp, lst.pop(0)))
+        else: only_a.append(sp)
+    return pairs, only_a, [sp for lst in pool.values() for sp in lst]
 
 def decode(b64, comp, fmt):
     raw = base64.b64decode(b64)
@@ -62,8 +94,7 @@ def match_ppm(mz1, i1, mz2, i2, ppm=PPM):
     return m, ao + (len(mz1) - i), bo + (len(mz2) - j), same
 
 def main(a, b, tile):
-    ga, gb = spectra(a), spectra(b)
-    na = nb = 0
+    ga, gb = groups(a), groups(b)
     ka = next(ga, None); kb = next(gb, None)
     stats = {"identical": 0, "intensity_only": 0, "mz_differs": 0, "count_differs": 0, "only_A": 0, "only_B": 0}
     frag = {"common": 0, "a_only": 0, "b_only": 0}   # fragment-level, exact m/z, over spectra present in both
@@ -76,13 +107,8 @@ def main(a, b, tile):
             r = rt % tile; x = min(r, tile - r)
             k = "<=30s" if x <= 30 else "<=63s" if x <= 63 else "<=123s" if x <= 123 else ">123s"
             d[k] += 1
-    while ka or kb:
-        if kb is None or (ka is not None and ka[0] < kb[0]):
-            stats["only_A"] += 1; bin_dist(ka[0][0], dist); bin_dist(ka[0][0], dist_all); ka = next(ga, None); continue
-        if ka is None or kb[0] < ka[0]:
-            stats["only_B"] += 1; bin_dist(kb[0][0], dist); bin_dist(kb[0][0], dist_all); kb = next(gb, None); continue
-        # same key
-        (key, n1, b1, c1), (_, n2, b2, c2) = ka, kb
+    def compare(sa, sb):
+        (key, n1, b1, c1, _), (_, n2, b2, c2, _) = sa, sb
         bin_dist(key[0], dist_all)
         if b1 == b2 and c1 == c2 and n1 == n2:
             stats["identical"] += 1; frag["common"] += n1; tol["matched"] += n1; tol["int_same"] += n1
@@ -100,6 +126,17 @@ def main(a, b, tile):
             stats["intensity_only"] += 1; bin_dist(key[0], dist); frag["common"] += len(i1); tol["matched"] += len(i1)
             tol["int_same"] += sum(1 for x, y in zip(i1, i2) if abs(x - y) <= 1e-3 * max(abs(x), 1e-30))
             relbins["<=1e-6" if mx <= 1e-6 else "<=1e-4" if mx <= 1e-4 else "<=1e-2" if mx <= 1e-2 else ">1e-2"] += 1
+    def only(side, sps):
+        for sp in sps:
+            stats[side] += 1; bin_dist(sp[0][0], dist); bin_dist(sp[0][0], dist_all)
+    while ka or kb:
+        if kb is None or (ka is not None and ka[0] < kb[0]):
+            only("only_A", ka[1]); ka = next(ga, None); continue
+        if ka is None or kb[0] < ka[0]:
+            only("only_B", kb[1]); kb = next(gb, None); continue
+        pairs, oa, ob = pair_group(ka[1], kb[1])
+        for sa, sb in pairs: compare(sa, sb)
+        only("only_A", oa); only("only_B", ob)
         ka = next(ga, None); kb = next(gb, None)
     tot = sum(stats.values())
     print(f"spectra compared: {tot}")

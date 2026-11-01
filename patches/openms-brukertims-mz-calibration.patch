@@ -80,7 +80,7 @@
  #include <opentims++/scan2inv_ion_mobility_converter.h>
  #include <OpenMS/FORMAT/RationalScan2ImConverter.h>
  #include <SQLiteCpp/SQLiteCpp.h>
-@@ -921,6 +929,114 @@
+@@ -921,6 +929,124 @@
      }
    }
  
@@ -118,14 +118,22 @@
 +    // have two, of which every frame references Id 1 -- so "expected exactly 1" refused valid
 +    // data. Refuse only when the frames reference more than one row, which would need a
 +    // per-frame calibration this converter does not implement.
++    // A Frames table without the MzCalibration column (a minimal or very old tdf) falls back to the single-row rule, as
++    // the tool's own reader does: unambiguous only if MzCalibration has exactly one row.
 +    sqlite3_stmt* st = nullptr;
++    bool frames_have_cal = false;
++    if (sqlite3_prepare_v2(db, "PRAGMA table_xinfo(Frames)", -1, &st, nullptr) == SQLITE_OK)
++      while (sqlite3_step(st) == SQLITE_ROW)
++      { const unsigned char* c = sqlite3_column_text(st, 1); frames_have_cal = frames_have_cal || (c && sqlite3_stricmp(reinterpret_cast<const char*>(c), "MzCalibration") == 0); }
++    sqlite3_finalize(st); st = nullptr;
 +    long long cal_id = -1; int ncal = 0;
-+    if (sqlite3_prepare_v2(db, "SELECT DISTINCT MzCalibration FROM Frames", -1, &st, nullptr) == SQLITE_OK)
++    if (sqlite3_prepare_v2(db, frames_have_cal ? "SELECT DISTINCT MzCalibration FROM Frames" : "SELECT Id FROM MzCalibration", -1, &st, nullptr) == SQLITE_OK)
 +      while (sqlite3_step(st) == SQLITE_ROW) { cal_id = sqlite3_column_int64(st, 0); ++ncal; }
 +    sqlite3_finalize(st); st = nullptr;
 +    if (ncal != 1)
-+    { sqlite3_close(db); throw std::runtime_error("TdfMzCalibration: frames reference " + std::to_string(ncal)
-+        + " distinct MzCalibration rows, expected exactly 1 (per-frame recalibration is not supported)"); }
++    { sqlite3_close(db); throw std::runtime_error(frames_have_cal
++        ? "TdfMzCalibration: frames reference " + std::to_string(ncal) + " distinct MzCalibration rows, expected exactly 1 (per-frame recalibration is not supported)"
++        : "TdfMzCalibration: Frames has no MzCalibration column and MzCalibration has " + std::to_string(ncal) + " rows (need exactly 1)"); }
 +    if (sqlite3_prepare_v2(db,
 +          "SELECT ModelType, DigitizerTimebase, DigitizerDelay, C0, C1, C2, T1, dC1, dC2, C3, C4 "
 +          "FROM MzCalibration WHERE Id = ?", -1, &st, nullptr) == SQLITE_OK
@@ -164,8 +172,10 @@
 +        // A NULL T1 reads as 0.0 through sqlite3_column_double, which would silently apply the FULL
 +        // dC1*T1_ref temperature correction (~250 ppm) instead of none. Fall back to the reference
 +        // temperature (= no correction) rather than inventing one.
-+        frame_t1_[id] = (sqlite3_column_type(st, 1) == SQLITE_NULL)
-+                          ? cal_.T1_ref : sqlite3_column_double(st, 1);
++        const int t1_type = sqlite3_column_type(st, 1);
++        if (t1_type != SQLITE_NULL && t1_type != SQLITE_INTEGER && t1_type != SQLITE_FLOAT)   // TEXT would read as 0 C
++        { sqlite3_finalize(st); sqlite3_close(db); throw std::runtime_error("TdfMzCalibration: frame " + std::to_string(id) + ": Frames.T1 is not a number"); }
++        frame_t1_[id] = (t1_type == SQLITE_NULL) ? cal_.T1_ref : sqlite3_column_double(st, 1);
 +      }
 +      if (rc != SQLITE_DONE)   // a partial read would silently leave frames at T1_ref
 +      { sqlite3_finalize(st); sqlite3_close(db);

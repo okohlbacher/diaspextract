@@ -2,7 +2,7 @@
 # Install the shared calibration header into an OpenMS source tree and apply patches/*.patch (idempotent).
 # README.md says what each patch does and which ones the build needs.
 #
-# Usage: scripts/apply_openms_patches.sh /path/to/OpenMS
+# Usage: scripts/apply_openms_patches.sh /path/to/OpenMS [--other-commit]
 #
 # The patches are cut against the exact public OpenMS commit named in patches/openms.lock. Check
 # that commit out first; against anything else they may fail, or worse, apply with fuzz.
@@ -12,15 +12,22 @@ TREE=${1:?usage: apply_openms_patches.sh /path/to/OpenMS-source-tree}
 [ -f "$TREE/src/openms/source/FORMAT/BrukerTimsFile.cpp" ] || {
   echo "not an OpenMS source tree (no src/openms/source/FORMAT/BrukerTimsFile.cpp): $TREE" >&2; exit 1; }
 
-# the calibration model is header-only and lives in THIS repo; the patch includes it
-install -m 0644 src/TdfMzCalibration.h "$TREE/src/openms/include/OpenMS/FORMAT/TdfMzCalibration.h"
-echo "installed src/TdfMzCalibration.h -> $TREE/src/openms/include/OpenMS/FORMAT/"
-
 PIN=$(sed -n 's/^OPENMS_BASE=//p' patches/openms.lock)
 HEAD_SHA=$(git -C "$TREE" rev-parse HEAD 2>/dev/null || echo unknown)
-if [ -n "$PIN" ] && [ "$HEAD_SHA" != unknown ] && [ "$HEAD_SHA" != "$PIN" ]; then
-  echo "WARNING: $TREE is at $HEAD_SHA, not the pinned $PIN. The patches may apply with fuzz." >&2
+if [ "$HEAD_SHA" = unknown ]; then
+  echo "WARNING: $TREE is not a git checkout; cannot check it is the pinned $PIN." >&2
+elif [ -n "$PIN" ] && [ "$HEAD_SHA" != "$PIN" ]; then
+  if [ "${2:-}" != --other-commit ]; then
+    echo "REFUSED: $TREE is at $HEAD_SHA, not the pinned $PIN. Check out the pinned commit, or pass --other-commit" \
+         "to apply the patches anyway (they may then apply with fuzz or change the spectra)." >&2
+    exit 1
+  fi
+  echo "WARNING: $TREE is at $HEAD_SHA, not the pinned $PIN (--other-commit)." >&2
 fi
+
+# the calibration model (installed only once the commit check passed) is header-only and lives in THIS repo; the patch includes it
+install -m 0644 src/TdfMzCalibration.h "$TREE/src/openms/include/OpenMS/FORMAT/TdfMzCalibration.h"
+echo "installed src/TdfMzCalibration.h -> $TREE/src/openms/include/OpenMS/FORMAT/"
 
 for p in patches/*.patch; do
   if patch -p1 -N --dry-run -d "$TREE" < "$p" >/dev/null 2>&1; then

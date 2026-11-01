@@ -52,6 +52,11 @@ def tof_to_mz(tof, p, t1_frame, use_c2=True, use_temp=True):
 def ppm(a, b):
     return abs(a - b) / b * 1e6
 
+def worst_of(a, b):
+    """The larger error; a NaN is +inf, so a model that returns NaN fails every bound (max() would keep a)."""
+    return math.inf if math.isnan(b) else max(a, b)
+
+
 def check_c4_offset():
     """C4 != 0 is an additive mass offset on the quadratic root (2019 timsTOF Pro, firmware 6.0.110,
     PXD017703 highsens files: C4 = -0.0905). Pinned against the vendor library on the first and the
@@ -65,8 +70,8 @@ def check_c4_offset():
     no_c4 = dict(p, C4=0.0); worst, worst_no_c4 = 0.0, 0.0
     for t1, probes in vendor.items():
         for tof, mz in probes:
-            worst = max(worst, ppm(tof_to_mz(tof, p, t1), mz))
-            worst_no_c4 = max(worst_no_c4, ppm(tof_to_mz(tof, no_c4, t1), mz))
+            worst = worst_of(worst, ppm(tof_to_mz(tof, p, t1), mz))
+            worst_no_c4 = worst_of(worst_no_c4, ppm(tof_to_mz(tof, no_c4, t1), mz))
     assert worst < TOL_PPM, f"C4 case: {worst:.6f} ppm from the vendor library"
     assert worst_no_c4 > 50.0, f"C4 ablation only {worst_no_c4:.3f} ppm -- the case cannot catch a dropped C4"
     print(f"OK  C4 offset case: {worst:.6f} ppm vs vendor (10 probes, 2 frames); without C4 {worst_no_c4:.1f} ppm")
@@ -104,7 +109,7 @@ def main():
             assert e < TOL_PPM, (
                 f"{f['file']} frame {case['frame']} tof {case['tof']:.0f}: "
                 f"model {got:.6f} vs vendor {case['mz']:.6f} = {e:.5f} ppm > {TOL_PPM}")
-            f_worst = max(f_worst, e)
+            f_worst = worst_of(f_worst, e)
             f_noc2 = max(f_noc2, ppm(tof_to_mz(case["tof"], f, case["t1"], use_c2=False), case["mz"]))
             f_flip = max(f_flip, ppm(tof_to_mz(case["tof"], flipped, case["t1"]), case["mz"]))
             f_notemp = max(f_notemp, ppm(tof_to_mz(case["tof"], f, case["t1"], use_temp=False), case["mz"]))

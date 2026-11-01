@@ -43,15 +43,16 @@ flowchart TD
   and precursors without an isotope partner are dropped. Some tolerances are measured from each run.
 - **Fragments.** In each isolation window, the MS2 peaks are traced over time on the instrument's flight-time bins.
 - **Co-elution gate.** A fragment joins a precursor's spectrum when their apexes lie within 3 s and 0.01 1/K0 and
-  their elution profiles correlate (r ≥ 0.3 over at least 3 shared points). A faint precursor, seen in at most 4
-  frames, gets a looser test.
+  their elution profiles correlate (r ≥ 0.3 over at least 3 shared points; frames without signal count as zero). A
+  faint precursor, seen in at most 4 frames, gets a looser test: apexes within 6 s and overlapping elution spans; at
+  the defaults its fragments are not judged by correlation at all ([docs/options.md](docs/options.md#co-elution-gate)).
 - **Spectrum.** Fragments are weighted by their ion-mobility distance and their correlation. Leftover isotopes of
   other precursors in the window are removed, split peaks of one fragment ion are fused, and the best 500 fragments
   are kept; a spectrum needs at least 3. A precursor found twice gets one spectrum with the fragments of both, so it
   can hold more than 500.
 - **Tiles and memory.** Tiles run in time order, and the next tile is read while the current one runs. On Linux, a
-  window starts only when it fits in 75 % of the free memory; elsewhere windows run one at a time. The output does
-  not depend on the thread count.
+  window starts only when it fits in 75 % of the free memory (under a Slurm or container memory limit, of the room
+  left under it); elsewhere windows run one at a time. The output does not depend on the thread count or the tiling.
 
 ## Requirements
 
@@ -121,6 +122,17 @@ configuration; set its FASTA first):
 ```bash
 sage bench/sage_closed.json -o results pseudo.mzML
 ```
+
+Exit codes, for pipelines:
+
+| code | meaning |
+|---|---|
+| 0 | spectra written (a run that finds none writes a valid mzML with an empty spectrum list) |
+| 3 | the input is corrupt: a truncated `analysis.tdf_bin`, impossible frame metadata, no diaPASEF frames, a calibration value that is missing or not a number (when `-dnoise:ms1` reads it, as at the defaults) |
+| 5 | the output could not be written completely (disk full, quota); only `<out>.part` is left |
+| 6 | an option value is invalid |
+| 11 | the `.d` is ddaPASEF (MsMsType 8), not diaPASEF: search it directly |
+| other | another error; the message says which |
 
 Control the FDR **per precursor charge**. Singly charged precursors are written by default: they are real 1+ ions,
 but they carry a higher FDR than a pooled 1 % cut suggests. If your FDR step cannot separate charges, filter the

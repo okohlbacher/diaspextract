@@ -11,6 +11,9 @@
 #include <string>
 #include <vector>
 
+/// The larger error; a NaN is +inf, so a model that returns NaN fails every bound (std::fmax would drop it).
+static double worstOf(double a, double b) { return std::isnan(b) ? INFINITY : std::fmax(a, b); }
+
 using Cal = diaspextract::TdfMzCalibration;
 
 static bool has(const std::string& s, const char* part) { return s.find(part) != std::string::npos; }
@@ -116,19 +119,19 @@ int main(int argc, char** argv)
                      name.c_str(), frame, tof, got, mz, ppm);
         return 1;
       }
-      f_worst = std::fmax(f_worst, ppm);
+      f_worst = worstOf(f_worst, ppm);
       // round trip must return the same TOF, to the dnoise port's tolerance (recover::kTofTol)
       const double back = cal.mzToTof(got, b);
-      worst_back = std::fmax(worst_back, std::fabs(back - tof));
+      worst_back = worstOf(worst_back, std::fabs(back - tof));
       if (!(std::fabs(back - tof) <= 1e-6))
       { std::fprintf(stderr, "FAIL %s round trip: tof %.4f -> mz -> %.10f\n", name.c_str(), tof, back); return 1; }
       // ablations: dropping C2, flipping its sign or dropping the temperature term must be visible, else the golden
       // set proves nothing
       diaspextract::TdfMzCalibration no_c2 = cal; no_c2.C2 = 0.0;
       diaspextract::TdfMzCalibration flip = cal; flip.C2 = -cal.C2;
-      f_noc2 = std::fmax(f_noc2, std::fabs(no_c2.tofToMz(tof, b) - mz) / mz * 1e6);
-      f_flip = std::fmax(f_flip, std::fabs(flip.tofToMz(tof, b) - mz) / mz * 1e6);
-      f_notemp = std::fmax(f_notemp, std::fabs(cal.tofToMz(tof, cal.frameFactor(cal.T1_ref)) - mz) / mz * 1e6);
+      f_noc2 = worstOf(f_noc2, std::fabs(no_c2.tofToMz(tof, b) - mz) / mz * 1e6);
+      f_flip = worstOf(f_flip, std::fabs(flip.tofToMz(tof, b) - mz) / mz * 1e6);
+      f_notemp = worstOf(f_notemp, std::fabs(cal.tofToMz(tof, cal.frameFactor(cal.T1_ref)) - mz) / mz * 1e6);
       ++n_cases; ++f_cases;
       cp = q;
     }
@@ -137,11 +140,11 @@ int main(int argc, char** argv)
     if (f_cases < 20 || !(f_noc2 >= 5.0) || !(f_flip >= 5.0) || !(f_notemp >= 0.05))
     { std::fprintf(stderr, "FAIL %s: %d cases, C2 ablation %.3f ppm, sign flip %.3f ppm, temperature ablation %.4f ppm\n",
                    name.c_str(), f_cases, f_noc2, f_flip, f_notemp); return 1; }
-    worst_notemp = std::fmax(worst_notemp, f_notemp);
+    worst_notemp = worstOf(worst_notemp, f_notemp);
     std::printf("    %-16s C2 %+.6e  %2d cases  max %.7f ppm  (C2 dropped %.2f, flipped %.2f, temperature dropped %.3f ppm)\n",
                 name.c_str(), cal.C2, f_cases, f_worst, f_noc2, f_flip, f_notemp);
-    worst = std::fmax(worst, f_worst);
-    worst_noc2 = std::fmax(worst_noc2, f_noc2);
+    worst = worstOf(worst, f_worst);
+    worst_noc2 = worstOf(worst_noc2, f_noc2);
     n_negative += cal.C2 < 0.0;
     ++n_files;
     pos = fstart + 10;
@@ -194,8 +197,8 @@ int main(int argc, char** argv)
       for (int i = 0; i < 5; ++i)
       {
         const double b4 = c4.frameFactor(t1[f]), got = c4.tofToMz(tof[i], b4);
-        worst_c4 = std::fmax(worst_c4, std::fabs(got - vendor[f][i]) / vendor[f][i] * 1e6);
-        worst_no_c4 = std::fmax(worst_no_c4, std::fabs(no_c4.tofToMz(tof[i], b4) - vendor[f][i]) / vendor[f][i] * 1e6);
+        worst_c4 = worstOf(worst_c4, std::fabs(got - vendor[f][i]) / vendor[f][i] * 1e6);
+        worst_no_c4 = worstOf(worst_no_c4, std::fabs(no_c4.tofToMz(tof[i], b4) - vendor[f][i]) / vendor[f][i] * 1e6);
         const double back = c4.mzToTof(got, b4);
         if (std::fabs(back - tof[i]) > 1e-6) { std::fprintf(stderr, "C4 round trip: %.4f -> %.4f\n", tof[i], back); return 1; }
       }
@@ -228,7 +231,7 @@ int main(int argc, char** argv)
         // would never reach worst_rt
         const double rt = std::fabs(px.mzToTof(mz, b) - tof);
         if (!(rt <= 1e-6)) { std::fprintf(stderr, "negative C2 round trip: tof %.0f -> m/z %.9g -> %.3g bins off\n", tof, mz, rt); return 1; }
-        worst_rt = std::fmax(worst_rt, rt);
+        worst_rt = worstOf(worst_rt, rt);
         prev = mz;
       }
       for (double mz : {50.0, 1700.0, Cal::kDomainMaxMz})   // the inverse stays on the rising branch up to 1e5

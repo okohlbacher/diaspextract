@@ -321,6 +321,16 @@ inline GateBuild buildMs1WindowGate(const RunMeta& meta, const std::vector<Windo
     b.scan_hi = std::min(detail::asU32(std::fmax(std::ceil(std::fmax(s0, s1)), 0.0)), num_scans - 1);
     boxes.push_back(b);
   }
+  // fromBoxes holds one interval per (box, covered scan) before merging: a real run has a few dozen windows over about a
+  // thousand scans; a corrupt table must not allocate gigabytes here
+  std::uint64_t pairs = 0;
+  for (const GateBox& b : boxes) if (b.tof_hi >= b.tof_lo && b.scan_hi >= b.scan_lo) pairs += (std::uint64_t)b.scan_hi - b.scan_lo + 1;
+  if (pairs > 50000000)
+  {
+    out.error = "DiaFrameMsMsWindows has " + std::to_string(boxes.size()) + " windows over " + std::to_string(num_scans) +
+                " scans, " + std::to_string(pairs) + " window-scan pairs: far beyond any acquisition";
+    return out;
+  }
   out.gate = Ms1WindowGate::fromBoxes(boxes, num_scans);
   return out;
 }

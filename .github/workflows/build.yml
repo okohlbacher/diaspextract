@@ -69,7 +69,8 @@ jobs:
           git -C OpenMS checkout "$REF"
 
       - name: Apply the DIAspeXtract patches to OpenMS
-        run: diaspextract/scripts/apply_openms_patches.sh "$GITHUB_WORKSPACE/OpenMS"
+        # a deliberate openms_ref is another commit than the pin
+        run: diaspextract/scripts/apply_openms_patches.sh "$GITHUB_WORKSPACE/OpenMS" ${{ github.event.inputs.openms_ref && '--other-commit' || '' }}
 
       - name: Build OpenMS
         run: |
@@ -148,10 +149,28 @@ jobs:
                  diaspextract/build/diaspextract -write_ini "$RUNNER_TEMP/ini.xml"
           python3 diaspextract/scripts/check_option_tokens.py --ini "$RUNNER_TEMP/ini.xml"
 
+      # Check 23 runs a REAL diaPASEF .d through the default path (streaming loader, exact calibration, dnoise, tiles).
+      # OpenMS publishes a 5.6-minute HeLa diaPASEF run as test data for its own Bruker reader (ENABLE_OPENTIMS_TESTS).
+      - name: Real diaPASEF test run (OpenMS test data)
+        run: |
+          set -euo pipefail
+          wget -q -O "$RUNNER_TEMP/dia.zip" https://github.com/OpenMS/timsrust_cpp_bridge/releases/download/test-data-v1/DIA_HeLa_50ng_5_6min.d.zip
+          unzip -q "$RUNNER_TEMP/dia.zip" -d "$RUNNER_TEMP/dia"
+          D=$(find "$RUNNER_TEMP/dia" -name analysis.tdf -printf '%h\n' | head -1)
+          [ -n "$D" ] || { echo "::error::no analysis.tdf in the test data"; exit 1; }
+          echo "DIASPEXTRACT_TEST_D=$D" >> "$GITHUB_ENV"
+
+      # The golden spectra digest of that run at the defaults (repository variable DIASPEXTRACT_TEST_D_DIGEST): check 23
+      # compares against it when it is set and prints the digest when it is not; set it from the first green run's log
+      # ("real .d spectra digest ...") and update it only with a CHANGELOG entry that changes the spectra.
       - name: End-to-end suite against the freshly built binary
         env:
           OPENMS_DATA_PATH: ${{ github.workspace }}/OpenMS/share/OpenMS
-        run: python3 diaspextract/test/test_diaspextract.py diaspextract/build/diaspextract
+          DIASPEXTRACT_TEST_D_DIGEST: ${{ vars.DIASPEXTRACT_TEST_D_DIGEST }}
+        run: |
+          set -o pipefail
+          python3 diaspextract/test/test_diaspextract.py diaspextract/build/diaspextract | tee e2e.log
+          grep -q 'PASS  a real diaPASEF .d' e2e.log || { echo "::error::the real .d check did not run"; exit 1; }
 
       # A tool that only builds against a PATCHED development OpenMS has one more way to ship
       # broken: the patches silently not applying. apply_openms_patches.sh is what CI runs above,

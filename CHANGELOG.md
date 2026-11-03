@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.8.2 — 2026-11-03
+
+The program is 1.8.1's; only the release build changed. 1.8.1 was tagged but never published: the macOS x64 disk image
+failed its notarization check twice on a dropped connection to Apple, and the build now retries that check.
+
 ## v1.8.1 — 2026-11-03
 
 **The spectra do not change**: at the defaults the output is 1.8.0's, bit for bit, for diaPASEF and for input without

@@ -112,7 +112,7 @@ cd diaspextract
 # 1. OpenMS at the pinned commit, patched, then built. No released package works.
 git clone https://github.com/OpenMS/OpenMS.git /path/to/OpenMS
 git -C /path/to/OpenMS checkout $(sed -n 's/^OPENMS_BASE=//p' patches/openms.lock)
-scripts/apply_openms_patches.sh /path/to/OpenMS                 # installs two headers, applies eight patches
+scripts/apply_openms_patches.sh /path/to/OpenMS                 # installs two headers, applies nine patches
 cmake -S /path/to/OpenMS -B /path/to/OpenMS/build -DCMAKE_BUILD_TYPE=Release \
       -DWITH_OPENTIMS=ON -DWITH_GUI=OFF -DHAS_XSERVER=OFF \
       -DCMAKE_CXX_FLAGS=-ffp-contract=off   # same spectra on every platform (clang-cl: /clang:-ffp-contract=off)
@@ -128,13 +128,13 @@ The binary is `build/diaspextract`; `cmake --install build` puts it under `<pref
 `.github/workflows/build.yml` runs the same recipe on Linux, macOS and Windows and is the reference. On Windows, build
 OpenMS and the tool with clang-cl, not cl.
 
-`scripts/apply_openms_patches.sh` applies the eight small OpenMS patches in `patches/`. They give the Bruker reader the
+`scripts/apply_openms_patches.sh` applies the nine small OpenMS patches in `patches/`. They give the Bruker reader the
 acquisition's exact m/z calibration, let the tool set the scan time that peak splitting uses, make tracing and mzML
 writing faster on many threads, and let `--help` and the CTD and CWL export work for a tool outside OpenMS, so it can
 be wrapped for KNIME or Galaxy. Two make the spectra the same on every platform: the ion-mobility peak picker orders
 equal intensities by index (its `std::sort` left them to the standard library), and the trace detection and smoothing
 take `exp` and `log` from `src/PortableMath.h` instead of the platform's math library. One makes Biosaur2, the
-precursor finder for input without ion mobility, faster without changing its result. Apply all eight: leaving one out
+precursor finder for input without ion mobility, faster without changing its result, and one lets clang-cl compile OpenMS on Windows. Apply all nine: leaving one out
 stops the build, changes the spectra or slows the run.
 
 A normal run needs no environment variables; the ones a user may set are listed in [docs/options.md](docs/options.md).

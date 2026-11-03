@@ -671,7 +671,7 @@
 +            {
 +              std::vector<OpenMS::Size> byi(current_cluster_indices.begin(), current_cluster_indices.end());
 +              std::partial_sort(byi.begin(), byi.begin() + std::min<size_t>(3, byi.size()), byi.end(),
-+                                [&](OpenMS::Size x, OpenMS::Size y) { return points[x].intensity > points[y].intensity; });
++                                [&](OpenMS::Size x, OpenMS::Size y) { return points[x].intensity > points[y].intensity || (points[x].intensity == points[y].intensity && x < y); });   // ties by index: STL-independent
 +              double s3 = 0, m3 = 0;
 +              for (size_t k = 0; k < std::min<size_t>(3, byi.size()); ++k) { s3 += points[byi[k]].intensity; m3 += points[byi[k]].mz * points[byi[k]].intensity; }
 +              if (s3 > 0) out_mz = m3 / s3;

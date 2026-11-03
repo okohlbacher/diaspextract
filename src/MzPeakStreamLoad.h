@@ -28,7 +28,15 @@
 #include <parquet/arrow/schema.h>
 #include <cstdio>
 #include <cstdlib>
+#ifdef _WIN32
+#include <fcntl.h>      // [win] mkstemp's stand-in: _mktemp_s + an exclusive _sopen_s in %TEMP%
+#include <io.h>
+#include <share.h>
+#include <sys/stat.h>
+#include <filesystem>
+#else
 #include <unistd.h>
+#endif
 
 #include <OpenMS/KERNEL/MSSpectrum.h>
 #include <OpenMS/METADATA/Precursor.h>
@@ -137,8 +145,16 @@ namespace spx
           if (gz.size() >= 16 && std::memcmp(gz.data(), "SQLite format 3", 16) == 0) { tdf_path = side; std::vector<char>().swap(gz); }
         }
         else gz = readMember_(z, "vendor/analysis.tdf.gz");
+#ifdef _WIN32
+        const std::string tmp_s = (std::filesystem::temp_directory_path() / "spx_mzpeak_tdf_XXXXXX").string();
+        std::vector<char> tmp_b(tmp_s.begin(), tmp_s.end()); tmp_b.push_back('\0'); char* tmpl = tmp_b.data(); int fd = -1;
+        if (_mktemp_s(tmpl, tmp_b.size()) == 0) _sopen_s(&fd, tmpl, _O_CREAT | _O_EXCL | _O_WRONLY | _O_BINARY, _SH_DENYNO, _S_IREAD | _S_IWRITE);
+        if (fd < 0) throw std::runtime_error("mzpeak: mkstemp");
+        _close(fd);
+#else
         char tmpl[] = "/tmp/spx_mzpeak_tdf_XXXXXX"; int fd = mkstemp(tmpl); if (fd < 0) throw std::runtime_error("mzpeak: mkstemp");
         close(fd);
+#endif
         struct Rm { const char* p; ~Rm() { std::remove(p); } } rm{tmpl};   // the uncompressed tdf goes on every way out
         if (tdf_path.empty())
         { z_stream zs{}; FILE* out = std::fopen(tmpl, "wb");
@@ -146,12 +162,13 @@ namespace spx
           if (inflateInit2(&zs, 16 + MAX_WBITS) != Z_OK) { std::fclose(out); throw std::runtime_error("mzpeak: gunzip of analysis.tdf.gz failed"); }
           // a real analysis.tdf is well below 1 GB; a hostile gzip must not fill the temp directory
           const unsigned long long kMaxTdf = 1ull << 32;
-          zs.next_in = (Bytef*)gz.data(); zs.avail_in = (uInt)gz.size(); std::vector<char> ob(1 << 20); int rc;
+          // the output is counted here, not read from zs.total_out: that is a uLong, 32 bits on Windows, wrapping below the cap
+          zs.next_in = (Bytef*)gz.data(); zs.avail_in = (uInt)gz.size(); std::vector<char> ob(1 << 20); int rc; unsigned long long total = 0;
           do { zs.next_out = (Bytef*)ob.data(); zs.avail_out = (uInt)ob.size(); rc = inflate(&zs, Z_NO_FLUSH);
-               const size_t got = ob.size() - zs.avail_out;
-               if ((rc != Z_OK && rc != Z_STREAM_END) || zs.total_out > kMaxTdf || std::fwrite(ob.data(), 1, got, out) != got)
+               const size_t got = ob.size() - zs.avail_out; total += got;
+               if ((rc != Z_OK && rc != Z_STREAM_END) || total > kMaxTdf || std::fwrite(ob.data(), 1, got, out) != got)
                { std::fclose(out); inflateEnd(&zs);
-                 throw std::runtime_error(zs.total_out > kMaxTdf ? "mzpeak: analysis.tdf.gz expands beyond 4 GiB" : "mzpeak: gunzip of analysis.tdf.gz failed"); }
+                 throw std::runtime_error(total > kMaxTdf ? "mzpeak: analysis.tdf.gz expands beyond 4 GiB" : "mzpeak: gunzip of analysis.tdf.gz failed"); }
              } while (rc != Z_STREAM_END);
           inflateEnd(&zs);
           if (std::fclose(out) != 0) throw std::runtime_error(std::string("mzpeak: cannot write ") + tmpl);

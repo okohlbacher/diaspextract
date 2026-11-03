@@ -10,7 +10,6 @@
 #include <OpenMS/APPLICATIONS/TOPPBase.h>
 
 #include <OpenMS/FORMAT/FileHandler.h>
-#include <sys/resource.h>
 #include <OpenMS/FORMAT/BrukerTimsFile.h>
 #include <OpenMS/FORMAT/DATAACCESS/SwathFileConsumer.h>
 #include <OpenMS/FORMAT/DATAACCESS/MSDataWritingConsumer.h>
@@ -19,7 +18,9 @@
 #include <OpenMS/FEATUREFINDER/MassTraceDetection.h>
 #include "CgroupMem.h"   // [dyn-mem] cgroup headroom net of page cache
 #include "TdfLoad.h"   // loadTdfCalibration: sqlite3, tool-only
+#include "NoImsPath.h"   // [noims] the separate extraction path for input without ion mobility
 #include "DnoiseMs1.h"   // [dnoise] the dnoise v0.1.0 MS1 port (header-only; tests/test_dnoise_ms1.cpp compiles the same code)
+#include "PortableMath.h"   // [xplat] exp/log/log1p/pow with the same bits on every platform (the libm's differ)
 #include <OpenMS/FEATUREFINDER/ElutionPeakDetection.h>
 #include <OpenMS/PROCESSING/CENTROIDING/PeakPickerIM.h>
 #include <OpenMS/IONMOBILITY/IMTypes.h>
@@ -67,10 +68,27 @@ static_assert(std::is_nothrow_move_constructible_v<OpenMS::MassTrace> && std::is
 #include <iomanip>
 #include <sstream>
 
+// [win] Windows portability: Win32 stand-ins for the POSIX and /proc probes (cpu_seconds_, procKb_, threadCpu_).
+// Included after every other header, so the Win32 macros reach this file only. The Windows compiler is clang-cl (see
+// CMakeLists.txt: cl's OpenMP has no taskloop).
+#ifdef _WIN32
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#define NOGDI
+#include <windows.h>
+#include <psapi.h>     // GetProcessMemoryInfo (kernel32's K32 entry point: no extra library)
+#include <stdlib.h>    // _environ, _putenv_s
+static inline double spxFileTimeSec_(FILETIME a, FILETIME b)   // two FILETIMEs (100 ns ticks) summed, in seconds
+{ return ((double)(((unsigned long long)a.dwHighDateTime << 32) | a.dwLowDateTime)
+        + (double)(((unsigned long long)b.dwHighDateTime << 32) | b.dwLowDateTime)) * 1e-7; }
+#else
+#include <sys/resource.h>
+#endif
+
 // The release version. The standalone CMake build passes it from project(VERSION); the in-tree
 // OpenMS build does not, so the fallback here is the same number.
 #ifndef DIASPEXTRACT_VERSION
-#define DIASPEXTRACT_VERSION "1.7.1"
+#define DIASPEXTRACT_VERSION "1.8.0"
 #endif
 
 using namespace OpenMS;
@@ -358,71 +376,37 @@ namespace
     return 0;
   }
 
-#if defined(__GLIBCXX__) && defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE == 13
-  /// [outer] libstdc++ 13's std::__introsort_loop with the right part of each cut handed to a task: the two parts are
-  /// disjoint and each is processed by the same calls in the same order as in the serial loop, so the array ends
-  /// exactly as std::sort leaves it, equal keys included. Small parts run inline (bounded task count).
-  template <typename It, typename Size, typename Cmp>
-  void introsortLoopPar_(It first, It last, Size depth, Cmp cmp)
-  {
-    while (last - first > 16)   // libstdc++'s _S_threshold
-    {
-      if (depth == 0) { std::__partial_sort(first, last, last, cmp); return; }
-      --depth;
-      It cut = std::__unguarded_partition_pivot(first, last, cmp);
-      if (last - cut >= 16384)
-      {
-        #pragma omp task default(shared) firstprivate(cut, last, depth, cmp)
-        introsortLoopPar_(cut, last, depth, cmp);
-      }
-      else introsortLoopPar_(cut, last, depth, cmp);
-      last = cut;
-    }
-  }
-#endif
-
-  /// [outer] std::sort(v.begin(), v.end(), less), equal keys in std::sort's own order, in parallel where the standard
-  /// library is libstdc++ 13 (the release compiler): its std::__sort is introsort loop + final insertion sort, replayed
-  /// here with tasks (introsortLoopPar_) and the same final pass. Any other library, small inputs or a caller already
-  /// inside a parallel region: std::sort itself.
-  template <typename T, typename Less>
-  void stdSortPar_(std::vector<T>& v, Less less)
-  {
-#if defined(__GLIBCXX__) && defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE == 13
-    if (v.size() >= ((size_t)1 << 15) && omp_get_max_threads() > 1 && !omp_in_parallel())
-    {
-      auto cmp = __gnu_cxx::__ops::__iter_comp_iter(less);
-      const auto first = v.begin(), last = v.end();
-      const auto depth = std::__lg(last - first) * 2;   // as std::__sort
-      #pragma omp parallel
-      #pragma omp single
-      {
-        #pragma omp taskgroup
-        introsortLoopPar_(first, last, depth, cmp);
-      }
-      std::__final_insertion_sort(first, last, cmp);
-      return;
-    }
-#endif
-    std::sort(v.begin(), v.end(), less);
-  }
   inline std::map<std::string, PhaseStat>& phase_stats_()
   { static std::map<std::string, PhaseStat> m; return m; }
   inline std::vector<std::string>& phase_order_()
   { static std::vector<std::string> v; return v; }
   static double cpu_seconds_()
   {
+#ifdef _WIN32
+    FILETIME c, e, k, u;                    // kernel + user over all threads, as RUSAGE_SELF
+    return GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u) ? spxFileTimeSec_(k, u) : 0.0;
+#else
     struct rusage ru;                       // RUSAGE_SELF sums ALL threads -> parallel efficiency
     if (getrusage(RUSAGE_SELF, &ru) != 0) return 0.0;
     return ru.ru_utime.tv_sec + ru.ru_utime.tv_usec * 1e-6
          + ru.ru_stime.tv_sec + ru.ru_stime.tv_usec * 1e-6;
+#endif
   }
-  /// The kB value of `key` in a /proc file; -1 where it is absent (Linux-only: always -1 elsewhere).
+  /// The kB value of `key` in a /proc file; -1 where it is absent (Linux; Windows answers its keys from Win32; else -1).
   static long long procKb_(const char* path, const char* key)
   {
+#ifdef _WIN32
+    // [win] the three keys read here, from Win32: VmRSS/VmHWM = working set and its peak, MemAvailable = free physical
+    (void)path; const std::string k(key);
+    if (k == "MemAvailable:") { MEMORYSTATUSEX m{}; m.dwLength = sizeof m; return GlobalMemoryStatusEx(&m) ? (long long)(m.ullAvailPhys / 1024) : -1; }
+    PROCESS_MEMORY_COUNTERS pm{};
+    if (!GetProcessMemoryInfo(GetCurrentProcess(), &pm, sizeof pm)) return -1;
+    return k == "VmRSS:" ? (long long)(pm.WorkingSetSize / 1024) : k == "VmHWM:" ? (long long)(pm.PeakWorkingSetSize / 1024) : -1;
+#else
     std::ifstream f(path); std::string k;
     while (f >> k) { if (k == key) { long long v = -1; f >> v; return v; } f.ignore(1 << 20, '\n'); }
     return -1;
+#endif
   }
   static long rss_mb_() { return (long)(std::max(0LL, procKb_("/proc/self/status", "VmRSS:")) / 1024); }
   static void phaseAdd_(const std::string& name, double w0, double c0, bool nested)
@@ -494,6 +478,7 @@ namespace
   double anchor_rescue_corr_ = 0.7;  ///< [anchor] gate:anchor_rescue_corr
   int anchor_max_rescued_ = 50;      ///< [anchor] gate:anchor_max_rescued
   bool post_fusion_cap_ = false;     ///< [recap] assembly:post_fusion_cap: carry the cap key per peak, re-cap after the twin fold
+  bool spectrum_meta_ = false;      ///< [diag] diag:spectrum_meta: per-spectrum precursor support userParams
   bool twin_ext_mark_ = false;       ///< [twin-rt] assembly:twin_rt_match ext: mark spectra whose mono v2's extension placed (spx_mono_ext, never written); set only when the cross-frame fold is active
   double foreign_w_ = 0.0;           ///< [foreign] assembly:foreign_precursor_weight (1 = off, 0 removes)
   double foreign_ppm_ = 10.0;        ///< [foreign] assembly:foreign_precursor_ppm
@@ -1453,9 +1438,9 @@ namespace
       c *= (ct / dt); cnt += w * v; den += w;
     };
     auto sdRobust = [](double mz, double w, double mean, double& sd, double& wsum) {   // updateWeightedSDEstimateRobust
-      const double d1 = std::log(wsum) + 2.0 * std::log(sd);
-      const double d2 = std::log(w) + 2.0 * std::log(std::abs(mz - mean));
-      const double denom = std::sqrt(std::exp(d1) + std::exp(d2));
+      const double d1 = pmath::log(wsum) + 2.0 * pmath::log(sd);
+      const double d2 = pmath::log(w) + 2.0 * pmath::log(std::abs(mz - mean));
+      const double denom = std::sqrt(pmath::exp(d1) + pmath::exp(d2));
       const double ws = wsum + w;
       const double t = denom / std::sqrt(ws);
       if (t > std::numeric_limits<double>::epsilon()) sd = t;
@@ -1883,7 +1868,11 @@ namespace
     Counts total;
     spx::dnoise::FrameCoverage seen;          ///< the frame ids add() merged, each once
 
+#ifdef _WIN32
+    static double threadCpu_() { FILETIME c, e, k, u; return GetThreadTimes(GetCurrentThread(), &c, &e, &k, &u) ? spxFileTimeSec_(k, u) : 0.0; }
+#else
     static double threadCpu_() { timespec ts; return clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0 ? (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9 : 0.0; }
+#endif
 
     /// Read the tdf, build the gate and the scan tables. Empty = ready; anything else is why the run is refused.
     std::string setup(const std::string& tdf_path)
@@ -2756,7 +2745,7 @@ protected:
     registerTOPPSubsection_("gate", "Which fragments join a precursor's spectrum");
     registerDoubleOption_("gate:delta_im", "<1/K0>", 0.01, "Largest ion-mobility (1/K0) difference between a precursor and a fragment. It also sets "
                               "the 1/K0 tolerance of peak picking and tracing; to widen only the fragment match, use gate:fragment_delta_im.", false);
-    registerDoubleOption_("gate:delta_rt", "<sec>", 3.0, "Largest apex retention-time difference (seconds) between a precursor and a fragment.", false);
+    registerDoubleOption_("gate:delta_rt", "<sec>", 4.0, "Largest apex retention-time difference (seconds) between a precursor and a fragment.", false);
     registerDoubleOption_("gate:min_correlation", "<-1..1>", 0.3, "Least correlation between the elution profiles of a precursor and a fragment. Raise "
                               "it for cleaner but sparser spectra.", false);
     registerIntOption_("gate:min_correlation_points", "<n>", 3, "Fewest shared points a fragment's correlation needs. Where gate:shrinkage applies, "
@@ -2803,6 +2792,8 @@ protected:
                               "expected peak width (seconds). 0 = off.", false);
     registerFlag_("diag:selftest_twins", "Run the built-in twin-fold self-test and exit.", true);
     registerFlag_("diag:selftest_arena", "Run the built-in MS1 storage self-test and exit.", true);
+    registerFlag_("diag:spectrum_meta", "Write per-spectrum userParams for diagnosis: spx_p_frames (window frames with precursor signal), "
+                  "spx_faint (1: at most gate:faint_max_frames of them), spx_p_apex (precursor apex intensity).", true);
     registerDoubleOption_("trace:ms1_split_valleys", "<chrom_fwhm>", 7.0, "Split precursor traces at chromatographic valleys, so two peptides that "
                               "elute apart at the same m/z stay separate; the value is the expected peak width (seconds). 0 = off.", false);
     registerDoubleOption_("trace:max_span_sec", "<sec>", 120.0, "Trim each trace to at most this many seconds around its apex. 0 = no limit.", false);
@@ -2936,8 +2927,9 @@ protected:
     registerDoubleOption_("charge:im_veto_band", "<sigma>", 2.5, "charge:im_charge_veto: half-width of the 2+ and 3+ mobility bands, in robust "
                               "standard deviations of the fit.", false);
     registerStringOption_("charge:mono_profile_check", "<false/v2>", "v2", "Check each precursor's monoisotope against the summed MS1 intensity at "
-                              "its isotope positions and move it by one isotope when averagine disagrees. 'v2' (default) = on; 'false' = off.", false, false);
-    setValidStrings_("charge:mono_profile_check", {"false", "v2"});
+                              "its isotope positions and move it by one isotope when averagine disagrees. 'v2' (default) = on; 'false' = off; 'v3' (experimental) = "
+                              "the monoisotope position with the best averagine cosine x observed fraction (Dinosaur/Monocle shift test).", false, false);
+    setValidStrings_("charge:mono_profile_check", {"false", "v2", "v3"});
     registerDoubleOption_("charge:mono_position_min_ratio", "<q>", 0.2, "charge:mono_profile_check v2: reject the lightest isotope when its "
                               "averagine-scaled intensity ratio is below this; the monoisotope then moves one isotope heavier.", false, true);
     registerDoubleOption_("charge:mono_position_im_box", "<1/K0>", 0.0, "charge:mono_profile_check v2: 1/K0 half-width of the isotope intensity sums. "
@@ -2965,6 +2957,15 @@ protected:
     regBool("dnoise:dia_ms1_window", "true", "Keep only MS1 points inside one of the run's diaPASEF isolation windows, padded (false = dnoise --no-dia-ms1-window).", true);
     registerDoubleOption_("dnoise:dia_ms1_mz_pad", "<Th>", 5.0, "Isolation-window filter: m/z added on both sides of each window (dnoise --dia-ms1-mz-pad).", false, true);
     registerDoubleOption_("dnoise:dia_ms1_im_pad", "<1/K0>", 0.05, "Isolation-window filter: 1/K0 added on both sides of each window (dnoise --dia-ms1-im-pad).", false, true);
+
+    registerTOPPSubsection_("noims", "Input without ion mobility (Orbitrap, SWATH): a separate extraction path");
+    registerStringOption_("noims:path", "<auto/off>", "auto", "auto: input without ion mobility goes to the separate non-IMS path "
+                          "(prototype); off: refuse such input, as 1.7.x did. Input with ion mobility never uses it.", false, true);
+    setValidStrings_("noims:path", {"auto", "off"});
+    registerDoubleOption_("noims:min_corr", "<r>", 0.3, "Non-IMS path: minimum fragment-precursor profile correlation.", false, true);
+    setMinFloat_("noims:min_corr", 0.0);
+    setMaxFloat_("noims:min_corr", 1.0);
+    registerDoubleOption_("noims:ppm", "<ppm>", 10.0, "Non-IMS path: mass-trace and isotope m/z tolerance.", false, true);
 
     // Bounds, not documentation: without these a negative count wraps through `Size` (min_fragments
     // -1 becomes ~1.8e19 and nothing is ever emitted) and a negative tolerance silently gates
@@ -3307,11 +3308,11 @@ protected:
     return tol;
   }
 
-  /// [outer] The m/z order inferPrecursors_ and monoPositionPass_ share: the indices of @p ms1 by std::sort on m/z alone.
+  /// [outer] The m/z order inferPrecursors_ and monoPositionPass_ share: the indices of @p ms1 by m/z, equal m/z by index.
   /// The MS1 traces arrive content-sorted (m/z is the first key), so unless two of them share an m/z the m/z values
   /// strictly increase in container order, the identity is then the only sorted order, and it is taken without sorting.
-  /// With any equal (or unordered) neighbour (m/z is quantised, so equal values are common) the order of equal m/z is
-  /// std::sort's own, so it is std::sort's sequence, computed by stdSortPar_.
+  /// m/z is quantised, so equal values are common; [xplat] the index breaks those ties -- std::sort's own order of equal
+  /// keys differs between libstdc++, libc++ and the MS STL, and moved Linux's precursors against macOS and Windows.
   static void mzOrder_(const vector<Trace>& ms1, vector<size_t>& by_mz)
   {
     const size_t N = ms1.size();
@@ -3321,7 +3322,7 @@ protected:
     size_t nonincr = 0;
     #pragma omp parallel for schedule(static) reduction(+ : nonincr)
     for (long i = 1; i < (long)N; ++i) if (!(ms1[(size_t)i - 1].mz < ms1[(size_t)i].mz)) ++nonincr;
-    if (nonincr) stdSortPar_(by_mz, [&ms1](size_t a, size_t b) { return ms1[a].mz < ms1[b].mz; });
+    if (nonincr) parallelSortTotal_(by_mz, [&ms1](size_t a, size_t b) { return ms1[a].mz < ms1[b].mz || (ms1[a].mz == ms1[b].mz && a < b); });
   }
 
   /// Isotope/charge inference on MS1 traces: a greedy partner-count walk, brightest seed first, with exact ordered
@@ -3455,7 +3456,7 @@ protected:
       // [monocheck-v2] Record what monoPositionPass_ needs (v2 reads only the immutable arrays and changes only
       // mono_mz, so deciding it after the loop gives the same result as deciding it here, lets an automatic im_box
       // use the run's own isotope scatter, and lets the decision follow the IM charge veto).
-      if (mono_check_ == 2 && best_z > 0)
+      if (mono_check_ >= 2 && best_z > 0)
       {
         R.v2.z = best_z; R.v2.nl = best_nl; R.v2.mono = best_mono;
         for (int i = 0; i < best_nl; ++i) R.v2.left_mz[(size_t)i] = ms1[best_partners[(size_t)i]].mz;
@@ -3498,7 +3499,7 @@ protected:
         bool stale = false;
         for (size_t d : R.deps) if (used[d]) { stale = true; break; }
         if (stale) evalSeed(seed, R);
-        for (const auto& pc : R.emit) { out.push_back(pc); if (mono_check_ == 2) v2in.push_back(R.v2); }
+        for (const auto& pc : R.emit) { out.push_back(pc); if (mono_check_ >= 2) v2in.push_back(R.v2); }
         used[seed] = true;
         for (size_t j : R.claims) used[j] = true;
       }
@@ -3634,6 +3635,43 @@ protected:
         PS(-i, &bt);
         return bt >= 0 ? ms1[(size_t)bt].mz : s.mz - i * kIso / z;
       };
+      if (mono_check_ == 3)
+      {
+        // [monocheck-v3] every position c in [-(nl+1), 0] with intensity (the seed is isotope -c): cosine of PS(c-1 .. c+5)
+        // against [0, A0 .. A5] (Poisson averagine at the mono's mass) x the averagine fraction observed; best c wins
+        double best_s = -1.0, best_mz = v.mono;
+        int best_c = 1;
+        for (int c = -(nl + 1); c <= 0; ++c)
+        {
+          long bt = -1;
+          const double pc0 = c == 0 ? 1.0 : PS(c, &bt);
+          if (pc0 <= 0.0) continue;
+          const double neutral = (s.mz + c * kIso / z) * z - z * PROTON_;
+          const double lam = std::max(0.10, 0.000594 * neutral);
+          double sab = 0, saa = 0, sbb = 0, seen = 0, all = 0, a = pmath::exp(-lam);
+          for (int i = -1; i <= 5; ++i)
+          {
+            const double t = i < 0 ? 0.0 : a, b = PS(c + i, nullptr);
+            if (i >= 0) { all += t; if (b > 0.0) seen += t; a *= lam / (i + 1); }
+            sab += t * b; saa += t * t; sbb += b * b;
+          }
+          const double sc = sbb > 0.0 ? sab / std::sqrt(saa * sbb) * seen / all : 0.0;
+          if (sc > best_s)
+          {
+            best_s = sc; best_c = c;
+            best_mz = c == 0 ? s.mz : (-c <= nl && -c % mul == 0) ? v.left_mz[(size_t)(-c / mul - 1)] : (bt >= 0 ? ms1[(size_t)bt].mz : s.mz + c * kIso / z);
+          }
+        }
+        uint8_t f = (mul > 1 ? 32 : 0) | 1;
+        if (best_c <= 0 && best_mz != v.mono)
+        {
+          if (best_mz > v.mono) { f |= 2; if (best_c == 0) f |= 4; }
+          else { f |= 8 | 16; pc.mono_ext = -best_c > nl; }
+          pc.mono_mz = best_mz;
+        }
+        flag[(size_t)ii] = f;
+        continue;
+      }
       double mono = v.mono;
       uint8_t f = mul > 1 ? 32 : 0, r = 0;
       int acc = nl;
@@ -3682,7 +3720,7 @@ protected:
                     v2_p90, v2_nhit, v2_nb);
       box = String(b);
     }
-    const String cfg = "v2, min_ratio " + String(mono_pos_min_ratio_) + ", im_box " + box + ", extend "
+    const String cfg = mono_check_ == 3 ? String("v3 (averagine cosine x observed fraction, positions -(walk+1) .. 0), im_box ") + box + ", at the final charge" : "v2, min_ratio " + String(mono_pos_min_ratio_) + ", im_box " + box + ", extend "
                        + String(mono_pos_extend_) + (mono_pos_iterate_ ? ", iterate" : ", leftmost step only") + ", at the final charge";
     mono_check_stamp_ = cfg + ": " + String(mc_tot[1]) + " of " + String(mc_tot[0]) + " monos moved right, " + String(mc_tot[4]) + " of " + String(mc_tot[3]) + " moved left";
     writeLogInfo_("[monocheck] " + cfg + ": " + String(mc_tot[0]) + " count walks with a leftward partner tested, " + String(mc_tot[2])
@@ -3847,8 +3885,8 @@ protected:
       ++n;
       if (foreign_w_ <= 0.0) continue;
       frags[i].second *= foreign_w_;
-      const double L = std::log1p(frag_ai[i]);                       // the key is linear in its log
-      frag_scores[i] = L > 0.0 ? frag_scores[i] * std::log1p(frag_ai[i] * foreign_w_) / L : frag_scores[i];
+      const double L = pmath::log1p(frag_ai[i]);                       // the key is linear in its log
+      frag_scores[i] = L > 0.0 ? frag_scores[i] * pmath::log1p(frag_ai[i] * foreign_w_) / L : frag_scores[i];
       frag_ai[i] *= foreign_w_;                                      // [fuse] a fused key sums the attenuated apex
     }
     if (n && foreign_w_ <= 0.0)                                      // remove: compact every parallel array
@@ -3933,7 +3971,7 @@ protected:
       {
         const double mz = g.w > 0.0 ? g.wmz / g.w : frags[g.top].first;
         const char r = resc.empty() ? 0 : resc[g.top];
-        frags[w] = {mz, g.w}; keys[w] = kq[g.best] * std::log1p(g.ai);
+        frags[w] = {mz, g.w}; keys[w] = kq[g.best] * pmath::log1p(g.ai);
         if (!resc.empty()) resc[w] = r;
         ++groups; n_members += g.n;
       }
@@ -3990,7 +4028,7 @@ protected:
     }
     // [recall] assembly:im_weight_sigma: a Gaussian of the fragment's 1/K0 distance @p dim to the precursor
     auto imWeigh = [this](double& x, double dim) {
-      if (im_weight_sigma_ > 0.0) x *= std::exp(-(dim * dim) / (2.0 * im_weight_sigma_ * im_weight_sigma_)); };
+      if (im_weight_sigma_ > 0.0) x *= pmath::exp(-(dim * dim) / (2.0 * im_weight_sigma_ * im_weight_sigma_)); };
     // [fragint] the frames a fragment's amplitude is summed over: core, the K frames centred on the precursor apex
     // (ties to the earlier frame); sum, the precursor's span with its gaps: a faint MS1 trace has missing points and the
     // concentric gate keeps fragments with no point where pdense != 0
@@ -4021,6 +4059,8 @@ protected:
     };
     // [adaptive] with gate:adaptive faint, the relaxed modes apply only to faint precursors (short precursor traces)
     const bool faint = adaptive_ && (int)touched.size() <= faint_frames_, all_p = !adaptive_ || faint;
+    const size_t n_touched = touched.size();                            // [diag] spectrum_meta, after pdense is reset
+    const double p_top = p_apex >= 0 ? (double)pdense[p_apex] : 0.0;
     const bool g_shrink = shrink_ && all_p, g_coloc = coloc_ && all_p, g_conc = short_conc_ && all_p;
     const double g_drt = faint ? faint_drt_ : delta_rt, g_cp = faint ? faint_cp_ : corr_power_;
     const double p_ctr = 0.5 * (p_lo + p_hi), p_half = 0.5 * (p_hi - p_lo);
@@ -4092,9 +4132,9 @@ protected:
           c_raw = c;
           if (g_shrink)                                                  // [shrink] Fisher-z posterior mean
           {
-            const double z = std::atanh(std::max(-0.999, std::min(0.999, c))), s2 = 1.0 / std::max(overlap - 3, 1);
-            const double t2 = shrink_sd_ * shrink_sd_, mu = std::atanh(std::max(-0.999, std::min(0.999, shrink_r0_)));
-            c = std::tanh((z / s2 + mu / t2) / (1.0 / s2 + 1.0 / t2));
+            const double z = pmath::atanh(std::max(-0.999, std::min(0.999, c))), s2 = 1.0 / std::max(overlap - 3, 1);
+            const double t2 = shrink_sd_ * shrink_sd_, mu = pmath::atanh(std::max(-0.999, std::min(0.999, shrink_r0_)));
+            c = pmath::tanh((z / s2 + mu / t2) / (1.0 / s2 + 1.0 / t2));
           }
           if (!(c >= min_corr))                                          // correlation gate (a NaN score is rejected too)
           { if (g_anchor && f.np() >= 2) cands.push_back(fi << 2 | 2u); continue; }
@@ -4105,12 +4145,12 @@ protected:
         imWeigh(inten, dim);
         double emit_inten = inten;
         if (frag_int_ != 0) emit_inten = fintAmp(f, dim);               // [fragint] base amplitude summed over frames; the cap key keeps the apex
-        if (g_cp > 0.0 && c > 0.0) emit_inten *= std::pow(c, g_cp);
+        if (g_cp > 0.0 && c > 0.0) emit_inten *= pmath::pow(c, g_cp);
         frags.emplace_back(exportMz_(f.tof, bOf(wst, f), f.mz), emit_inten);
         frag_bin.push_back(f.tof);
         frag_span.emplace_back(f_lo, f_hi);
         if (fx || fuse_on) frag_ai.push_back(inten);
-        frag_scores.push_back(std::max(c_raw, 0.0) * std::log1p(inten) * (1.0 + overlap));   // [cap] the max_fragments ranking key
+        frag_scores.push_back(std::max(c_raw, 0.0) * pmath::log1p(inten) * (1.0 + overlap));   // [cap] the max_fragments ranking key
         if (fuse_on)                                                   // [fuse] the same key without its intensity term
           frag_kq.push_back(std::max(c_raw, 0.0) * (1.0 + overlap));
         if (g_anchor && c >= anchor_min_corr_) anchors.push_back((uint32_t)fi);   // [anchor] a well-correlated accepted fragment
@@ -4198,12 +4238,12 @@ protected:
             const double dim = frag_im[q.fi] - pc.im;
             imWeigh(inten, dim);
             double emit_inten = frag_int_ != 0 ? fintAmp(f, dim) : inten;  // [fragint] the same amplitude as a gate-passing fragment
-            if (g_cp > 0.0 && c > 0.0) emit_inten *= std::pow(c, g_cp);
+            if (g_cp > 0.0 && c > 0.0) emit_inten *= pmath::pow(c, g_cp);
             frags.emplace_back(q.mz, emit_inten);
             frag_bin.push_back(f.tof);
             frag_span.emplace_back(q.t_lo, q.t_hi);
             if (fx || fuse_on) frag_ai.push_back(inten);                 // [foreign]/[fuse] parallel to frags, as above
-            frag_scores.push_back(c * std::log1p(inten) * (1.0 + q.ov));
+            frag_scores.push_back(c * pmath::log1p(inten) * (1.0 + q.ov));
             if (fuse_on) frag_kq.push_back(c * (1.0 + q.ov));
             resc.push_back(1);
             ++n_why[q.why];
@@ -4349,6 +4389,12 @@ protected:
     out.setMetaValue("spx_guessed", 0);
     out.setMetaValue("spx_n_isotopes", pc.n_isotopes);
     if (twin_ext_mark_ && pc.mono_ext) out.setMetaValue("spx_mono_ext", 1);   // [twin-rt] read and removed by mergeTwins_
+    if (spectrum_meta_)                                                // [diag] diag:spectrum_meta
+    {
+      out.setMetaValue("spx_p_frames", (int)n_touched);
+      out.setMetaValue("spx_faint", (int)n_touched <= faint_frames_ ? 1 : 0);
+      out.setMetaValue("spx_p_apex", p_top);
+    }
   }
 
   /// [arena] Assertions on the SHIPPED compactUnreferenced(): the compaction must survive traces
@@ -4574,6 +4620,76 @@ protected:
     writeLogInfo_("[trim] " + what + ": " + String(r0) + " -> " + String(rss_mb_()) + " MB RSS in " + num_(phase_clock_() - t0) + " s");
   }
 
+  /// The completed <out>.part becomes <out>: the data reach the disk before the name does, so a crash after the rename
+  /// never leaves a short file under <out> (a file system without fsync, EINVAL/ENOTSUP, is not an error);
+  /// std::filesystem::rename also replaces an existing <out> on Windows.
+  void commitOutput_(const String& part, const String& out)
+  {
+#ifndef _WIN32
+    const int fd = ::open(part.c_str(), O_RDONLY);
+    const bool synced = fd >= 0 && (::fsync(fd) == 0 || errno == EINVAL || errno == ENOTSUP);
+    if (fd >= 0) ::close(fd);
+    if (!synced) throw Exception::UnableToCreateFile(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, part, "cannot flush the completed output to disk");
+#endif
+    std::error_code ec;
+    std::filesystem::rename(std::string(part), std::string(out), ec);
+    if (ec)
+      throw Exception::UnableToCreateFile(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, out, "cannot rename the completed " + part + ": " + ec.message());
+  }
+
+  /// [noims] input without ion mobility: the separate path of NoImsPath.h, written to <out>.part and committed like the
+  /// IMS path's output. Centroided input only: profile spectra would make every profile sample a peak.
+  ExitCodes runNoIms_(PeakMap& exp, const String& out, FileTypes::Type out_type)
+  {
+    for (const MSSpectrum& s : exp)
+      if (s.getType(true) == SpectrumSettings::SpectrumType::PROFILE)
+      {
+        writeLogError_("Error: the input has profile spectra (MS level " + String(s.getMSLevel()) + ", " + s.getNativeID()
+                       + "); the non-IMS path needs centroided MS1 and MS2 (centroid them first, e.g. with PeakPickerHiRes).");
+        return INCOMPATIBLE_INPUT_DATA;
+      }
+    writeLogInfo_("[noims] the input has no ion mobility: using the separate non-IMS path (prototype).");
+    // the path walks scans in file order and binary-searches their RTs: put an unordered file in RT order (stable, so
+    // an ordered file is left exactly as it is)
+    auto rt_less = [](const MSSpectrum& a, const MSSpectrum& b) { return a.getRT() < b.getRT(); };
+    if (!std::is_sorted(exp.begin(), exp.end(), rt_less))
+    {
+      std::stable_sort(exp.getSpectra().begin(), exp.getSpectra().end(), rt_less);
+      writeLogInfo_("[noims] the input spectra were not in retention-time order; sorted them.");
+    }
+    spx_noims::Params P;
+    P.min_corr = getDoubleOption_("noims:min_corr");
+    P.ppm = getDoubleOption_("noims:ppm");
+    // ponytail: tuning knobs for the prototype via the environment; options once the values settle
+    if (const char* e = getenv("SPX_NOIMS_MS1_MIN_SCANS")) P.ms1_min_scans = atoi(e);
+    if (const char* e = getenv("SPX_NOIMS_MS1_SPLIT")) P.ms1_split = atoi(e) != 0;
+    if (const char* e = getenv("SPX_NOIMS_MS2_MIN_SCANS")) P.ms2_min_scans = atoi(e);
+    if (const char* e = getenv("SPX_NOIMS_FEW_APEX")) P.few_apex_cycles = atof(e);
+    if (const char* e = getenv("SPX_NOIMS_SINGLES")) P.singles = atoi(e);
+    if (const char* e = getenv("SPX_NOIMS_MAX_PEAKS")) P.max_peaks = atoi(e);
+    if (const char* e = getenv("SPX_NOIMS_WEIGHT_POW")) P.weight_pow = atof(e);
+    if (const char* e = getenv("SPX_NOIMS_MIN_FRAGS")) P.min_frags = atoi(e);
+    if (const char* e = getenv("SPX_NOIMS_MS2_PREC")) P.ms2_prec = atoi(e) != 0;
+    if (const char* e = getenv("SPX_NOIMS_MONO")) P.mono = atoi(e);
+    PeakMap res;
+    spx_noims::run(exp, P, res, [this](const String& m) { writeLogInfo_(m); });
+    exp.clear(true);
+    const String part = out + ".part";
+    FileHandler().storeExperiment(part, res, {out_type}, log_type_);
+    if (out_type == FileTypes::MZML)   // FileHandler does not report a failed write: the file must end in its footer
+    {
+      std::ifstream in(part.c_str(), std::ios::binary | std::ios::ate);
+      const std::streamoff size = in ? (std::streamoff)in.tellg() : (std::streamoff)0;
+      std::string tail(size > 64 ? 64 : (size_t)std::max<std::streamoff>(size, 0), ' ');
+      if (size > 0) { in.seekg(size - (std::streamoff)tail.size()); in.read(&tail[0], (std::streamsize)tail.size()); }
+      if (!in || tail.find("</indexedmzML>") == std::string::npos)
+        throw Exception::UnableToCreateFile(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, part, "writing the mzML failed (disk full or quota?)");
+    }
+    commitOutput_(part, out);
+    writeLogInfo_("Wrote " + String(res.size()) + " pseudo-MS2 spectra to " + out + " (" + String(FileTypes::typeToName(out_type)) + ")");
+    return EXECUTION_OK;
+  }
+
   ExitCodes main_(int argc, const char** argv) override
   {
     phase_clock_();   // [perf-instr] fix the epoch (a first-call static) before loading
@@ -4600,7 +4716,7 @@ protected:
     if (getFlag_("diag:selftest_arena")) return selftestArena_();
     if (getFlag_("diag:selftest_twins")) return selftestTwins_();
     im_weight_sigma_ = getDoubleOption_("assembly:im_weight_sigma");
-    mono_check_ = getStringOption_("charge:mono_profile_check") == "v2" ? 2 : 0;
+    { const String m = getStringOption_("charge:mono_profile_check"); mono_check_ = m == "v3" ? 3 : m == "v2" ? 2 : 0; }
     mono_pos_min_ratio_ = getDoubleOption_("charge:mono_position_min_ratio");
     mono_pos_im_box_ = getDoubleOption_("charge:mono_position_im_box");
     mono_pos_extend_ = getDoubleOption_("charge:mono_position_extend");
@@ -4630,6 +4746,7 @@ protected:
     foreign_min_iso_ = getIntOption_("assembly:foreign_precursor_min_iso");
     fuse_ppm_ = getDoubleOption_("assembly:fragment_fuse_ppm");
     faint_frames_ = getIntOption_("gate:faint_max_frames");
+    spectrum_meta_ = getFlag_("diag:spectrum_meta");
     faint_drt_ = getDoubleOption_("gate:faint_delta_rt");
     faint_cp_ = getDoubleOption_("gate:faint_corr_power");
     anchor_rescue_ = getStringOption_("gate:anchor_rescue") == "true";
@@ -4972,8 +5089,17 @@ protected:
       IMFormat imf = IMTypes::determineIMFormat(exp, 1);
       if (imf == IMFormat::NONE)
       {
-        writeLogError_("Error: the input has no ion mobility at MS1; DIAspeXtract needs diaPASEF (ion-mobility DIA) data.");
-        return ILLEGAL_PARAMETERS;
+        if (getStringOption_("noims:path") == "off")
+        {
+          writeLogError_("Error: the input has no ion mobility at MS1; DIAspeXtract needs diaPASEF (ion-mobility DIA) data.");
+          return ILLEGAL_PARAMETERS;
+        }
+        if (IMTypes::determineIMFormat(exp, 2) != IMFormat::NONE)
+        {
+          writeLogError_("Error: the input has ion mobility at MS2 but not at MS1; neither path reads such a mix.");
+          return INCOMPATIBLE_INPUT_DATA;
+        }
+        return runNoIms_(exp, out, out_type);   // [noims] a separate path; the IMS path below is never entered
       }
       // Pick all IM frames in parallel. firstprivate gives each thread a deep copy (Param is a value type), so the
       // mutable ccs_warning_shown_ flag is not shared.
@@ -5310,7 +5436,13 @@ protected:
       { const double ia = intensityOf(ms1_store, a), ib = intensityOf(ms1_store, b); if (ia != ib) return ia < ib; }
       if (a.npts != b.npts) return a.npts < b.npts;
       if (a.len != b.len) return a.len < b.len;
-      return ms1_store.frame_rt[a.frame0] < ms1_store.frame_rt[b.frame0];
+      if (ms1_store.frame_rt[a.frame0] != ms1_store.frame_rt[b.frame0]) return ms1_store.frame_rt[a.frame0] < ms1_store.frame_rt[b.frame0];
+      // equal summaries: the profile decides, so equivalent traces are identical ones and std::sort's tie order cannot matter
+      if (a.tof != b.tof) return a.tof < b.tof;
+      if (a.apex != b.apex) return a.apex < b.apex;
+      const float* pa = ms1_store.inten.data() + a.off;
+      const float* pb = ms1_store.inten.data() + b.off;
+      return std::lexicographical_compare(pa, pa + a.len, pb, pb + b.len);
     };
     {
       // [outer] in parallel when that is provably std::sort's order (no equal-key neighbours), else std::sort itself
@@ -5324,7 +5456,7 @@ protected:
     double _t_inf = phase_clock_(), _c_inf = cpu_seconds_();   // [perf-instr]
     vector<MonoV2In_> mono_v2in;   // [monocheck-v2] the count walks, parallel to `precursors` until monoPositionPass_
     vector<Precursor_> precursors = inferPrecursors_(ms1_traces, ms1_store, max_charge, delta_rt, iso_im_tol,
-                                                     mass_ppm, mono_check_ == 2 ? &mono_v2in : nullptr);
+                                                     mass_ppm, mono_check_ >= 2 ? &mono_v2in : nullptr);
     if (adaptive_auto_)   // [adaptive] auto: decide the run's gate from its precursor span distribution (MS1 points)
     {
       size_t nf = 0;
@@ -5395,7 +5527,7 @@ protected:
     }
     // [monocheck-v2] At the final charge: after the veto (which reads the walks' own monoisotopes, as without v2),
     // before the charge-less precursors are dropped (the veto edits in place, so the order still matches).
-    if (mono_check_ == 2)
+    if (mono_check_ >= 2)
     {
       monoPositionPass_(ms1_traces, ms1_store, precursors, mono_v2in, delta_rt, iso_im_tol, mass_ppm);
       vector<MonoV2In_>().swap(mono_v2in);
@@ -5444,7 +5576,7 @@ protected:
     String twin_rt_desc;
     // `ext` folds across frames only through v2's extension: without v2 no spectrum carries the mark, so the relation
     // is the same-frame one, and it is logged and stamped as such
-    const bool twin_rt_inert = twin_rt_mode == 2 && mono_check_ != 2;
+    const bool twin_rt_inert = twin_rt_mode == 2 && mono_check_ < 2;
     if (twin_im >= 0.0 && twin_rt_frames >= 0 && cycle > 0.0 && twin_rt_inert)
       writeLogInfo_("[twins] assembly:twin_rt_frames: the same MS1 frame only (twin_rt_match ext needs charge:mono_profile_check v2)");
     if (twin_im >= 0.0 && twin_rt_frames >= 0 && cycle > 0.0 && !twin_rt_inert)
@@ -6534,20 +6666,7 @@ protected:
     if (writer)
     {
       { Phase _ph("WRITE(mzML)"); writer->finish(); writer.reset(); }   // the count patched, the index and footer written; throws on a failed write
-#ifndef _WIN32
-      // the data reach the disk before the name does: a crash after the rename never leaves a short file under <out>
-      // (a file system without fsync, EINVAL/ENOTSUP, is not an error)
-      {
-        const int fd = ::open(out_part.c_str(), O_RDONLY);
-        const bool synced = fd >= 0 && (::fsync(fd) == 0 || errno == EINVAL || errno == ENOTSUP);
-        if (fd >= 0) ::close(fd);
-        if (!synced) throw Exception::UnableToCreateFile(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, out_part, "cannot flush the completed mzML to disk");
-      }
-#endif
-      std::error_code rename_ec;
-      std::filesystem::rename(std::string(out_part), std::string(out), rename_ec);
-      if (rename_ec)
-        throw Exception::UnableToCreateFile(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, out, "cannot rename the completed " + out_part + ": " + rename_ec.message());
+      commitOutput_(out_part, out);
     }
     else
     {
@@ -6617,7 +6736,11 @@ protected:
 
 /// @endcond
 
+#ifdef _WIN32
+#define environ _environ
+#else
 extern char** environ;
+#endif
 
 int main(int argc, const char** argv)
 {
@@ -6643,7 +6766,11 @@ int main(int argc, const char** argv)
   // TOPPBase's update check sends this tool's name and version to an OpenMS REST endpoint and, offline, prints Qt
   // QIODevice errors on the stderr the harness parses (build.yml asserts --help stays clean). Always off: the tool makes
   // no network request (SECURITY.md), whatever the environment says.
+#ifdef _WIN32
+  _putenv_s("OPENMS_DISABLE_UPDATE_CHECK", "ON");
+#else
   ::setenv("OPENMS_DISABLE_UPDATE_CHECK", "ON", 1);
+#endif
   TOPPDIAspeXtract tool;
   // TOPPBase catches OpenMS exceptions only; one from a library (SQLite, opentims) would otherwise abort with no exit code
   try { return tool.main(argc, argv); }

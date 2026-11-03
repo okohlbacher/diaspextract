@@ -29,6 +29,8 @@ checks that fail if the things most likely to break do break:
       22. old variables    a set SPEXTRACTOR_* (SpeXtractor) or DIASPEXTRACTOR_* (DIAspeXtractor) variable refuses the run
                            before anything, naming it and its DIASPEXTRACT_ name; DIASPEXTRACT_DET runs and prints its
                            [det] lines
+      24. non-IMS     input without ion mobility: the separate path finds the precursor, is thread-invariant and commits
+                           its output; profile spectra, IM at MS2 only and a negative noims:min_corr are refused
       23. real .d          DIASPEXTRACT_TEST_D set: a real diaPASEF run at the defaults is streamed, dnoise-filtered and
                            traced by the integer detector, writes spectra, and is thread-, tile- and tile-pipeline-invariant
                            (skipped without it); with DIASPEXTRACT_TEST_D_DIGEST set, its spectra digest must equal it
@@ -55,11 +57,10 @@ def b64f(vals, double=True):
     return base64.b64encode(struct.pack(fmt, *vals)).decode()
 
 
-def spectrum(idx, ms_level, rt, peaks, im, prec=None, group=0):
-    """One mzML spectrum. `peaks` is [(mz, intensity)], `im` one 1/K0 per peak."""
+def spectrum(idx, ms_level, rt, peaks, im, prec=None, group=0, kind="centroid"):
+    """One mzML spectrum. `peaks` is [(mz, intensity)], `im` one 1/K0 per peak (None: no ion-mobility array)."""
     mz = b64f([p[0] for p in peaks])
     inten = b64f([p[1] for p in peaks], double=False)
-    imarr = b64f(im)
     pre = ""
     if prec:
         target, lo, hi = prec
@@ -70,17 +71,20 @@ def spectrum(idx, ms_level, rt, peaks, im, prec=None, group=0):
 </isolationWindow><activation><cvParam cvRef="MS" accession="MS:1000044" name="dissociation method"/></activation></precursor></precursorList>"""
     # "frame=<N>" is the vendor key frameIdOf() parses; without it every frame is unmappable and
     # the integer detector falls back, which is how all 8 checks silently ran on the OTHER detector.
+    imxml = "" if im is None else f"""
+<binaryDataArray arrayLength="{len(im)}" encodedLength="{len(b64f(im))}"><cvParam cvRef="MS" accession="MS:1002816" name="mean inverse reduced ion mobility array" unitAccession="MS:1002814" unitName="volt-second per square centimeter" unitCvRef="MS"/><cvParam cvRef="MS" accession="MS:1000523" name="64-bit float"/><cvParam cvRef="MS" accession="MS:1000576" name="no compression"/><binary>{b64f(im)}</binary></binaryDataArray>"""
+    kind_cv = '<cvParam cvRef="MS" accession="MS:1000127" name="centroid spectrum"/>' if kind == "centroid" else \
+              '<cvParam cvRef="MS" accession="MS:1000128" name="profile spectrum"/>'
     return f"""<spectrum id="frame={idx + 1} windowGroup={group} scan=0" index="{idx}" defaultArrayLength="{len(peaks)}">
-<cvParam cvRef="MS" accession="MS:1000127" name="centroid spectrum"/>
+{kind_cv}
 <cvParam cvRef="MS" accession="MS:1000511" name="ms level" value="{ms_level}"/>
 <cvParam cvRef="MS" accession="MS:1000294" name="mass spectrum"/>
 <scanList count="1"><cvParam cvRef="MS" accession="MS:1000795" name="no combination"/>
 <scan><cvParam cvRef="MS" accession="MS:1000016" name="scan start time" value="{rt}" unitAccession="UO:0000010" unitName="second" unitCvRef="UO"/></scan></scanList>
 {pre}
-<binaryDataArrayList count="3">
+<binaryDataArrayList count="{2 if im is None else 3}">
 <binaryDataArray encodedLength="{len(mz)}"><cvParam cvRef="MS" accession="MS:1000514" name="m/z array" unitAccession="MS:1000040" unitName="m/z" unitCvRef="MS"/><cvParam cvRef="MS" accession="MS:1000523" name="64-bit float"/><cvParam cvRef="MS" accession="MS:1000576" name="no compression"/><binary>{mz}</binary></binaryDataArray>
-<binaryDataArray encodedLength="{len(inten)}"><cvParam cvRef="MS" accession="MS:1000515" name="intensity array" unitAccession="MS:1000131" unitName="number of counts" unitCvRef="MS"/><cvParam cvRef="MS" accession="MS:1000521" name="32-bit float"/><cvParam cvRef="MS" accession="MS:1000576" name="no compression"/><binary>{inten}</binary></binaryDataArray>
-<binaryDataArray arrayLength="{len(im)}" encodedLength="{len(imarr)}"><cvParam cvRef="MS" accession="MS:1002816" name="mean inverse reduced ion mobility array" unitAccession="MS:1002814" unitName="volt-second per square centimeter" unitCvRef="MS"/><cvParam cvRef="MS" accession="MS:1000523" name="64-bit float"/><cvParam cvRef="MS" accession="MS:1000576" name="no compression"/><binary>{imarr}</binary></binaryDataArray>
+<binaryDataArray encodedLength="{len(inten)}"><cvParam cvRef="MS" accession="MS:1000515" name="intensity array" unitAccession="MS:1000131" unitName="number of counts" unitCvRef="MS"/><cvParam cvRef="MS" accession="MS:1000521" name="32-bit float"/><cvParam cvRef="MS" accession="MS:1000576" name="no compression"/><binary>{inten}</binary></binaryDataArray>{imxml}
 </binaryDataArrayList></spectrum>"""
 
 
@@ -140,6 +144,11 @@ def synth(path, n_cycles=14, cycle_s=1.4, gap_cycles=(), groups=None, z1_shift=0
         order = sorted(range(len(ms2)), key=lambda i: ms2[i][0])
         specs.append(spectrum(idx, 2, rt, [ms2[i] for i in order], [ms2_im[i] for i in order],
                               prec=win, group=groups[c % 2] if groups else 0)); idx += 1
+    write_mzml(path, specs)
+    return z2_mono, z1_mono
+
+
+def write_mzml(path, specs):
     body = "\n".join(specs)
     open(path, "w").write(f"""<?xml version="1.0" encoding="ISO-8859-1"?>
 <indexedmzML xmlns="http://psi.hupo.org/ms/mzml"><mzML version="1.1.0" id="diaspextract_test">
@@ -153,7 +162,23 @@ def synth(path, n_cycles=14, cycle_s=1.4, gap_cycles=(), groups=None, z1_shift=0
 {body}
 </spectrumList></run></mzML></indexedmzML>
 """)
-    return z2_mono, z1_mono
+
+
+def synth_noims(path, kind="centroid", ms2_im=False):
+    """Orbitrap-like DIA without ion mobility: one z=2 precursor (four averagine-shaped isotopes) eluting over 24 MS1
+    scans, three fragments with the same elution in its 590-620 isolation window. `kind`: the spectra's representation;
+    `ms2_im`: the MS2 spectra carry an ion-mobility array (the MS1 do not)."""
+    mono, specs, idx = 601.3, [], 0
+    for c in range(24):
+        rt, amp = 10.0 + 2.0 * c, max(1.0 - abs(c - 12) / 9.0, 0.02)
+        ms1 = [(mono + k * ISO / 2.0, 8.0e5 * amp * rel) for k, rel in enumerate((1.0, 0.66, 0.27, 0.08))]
+        ms1 += [(450.2 + 37.1 * j, 3.0e3 * (1 + (c * 7 + j) % 5)) for j in range(6)]   # unrelated background
+        ms1.sort()
+        specs.append(spectrum(idx, 1, rt, ms1, None, kind=kind)); idx += 1
+        ms2 = [(mz, 2.0e5 * amp * rel) for mz, rel in ((233.11, 0.7), (348.19, 1.0), (461.27, 0.55))]
+        specs.append(spectrum(idx, 2, rt + 1.0, ms2, [0.9] * 3 if ms2_im else None, prec=(605.0, 590.0, 620.0), kind=kind)); idx += 1
+    write_mzml(path, specs)
+    return mono
 
 
 def mzcal_table(db):
@@ -511,7 +536,8 @@ def main():
             env = dict(os.environ, DIASPEXTRACT_TASK_THROW=site)
             r = run(binary, inp, os.path.join(work, f"task_{site}.mzML"), threads=4, expect_fail=True, env=env)
             log = r.stdout + r.stderr
-            assert r.returncode > 0, f"{site}: the run was killed by a signal ({r.returncode}) instead of failing cleanly"
+            # Windows reports a crash as an NTSTATUS (0xC0000005, 0xC0000409, ...), a positive code, not a signal
+            assert 0 < r.returncode < 0xC0000000, f"{site}: the run was killed by a signal ({r.returncode}) instead of failing cleanly"
             assert f"injected failure in task {site}" in log, f"{site}: the task's exception did not reach the log:\n" + log[-800:]
     check("an exception inside an OpenMP task ends the run with its message, not an abort", c12e)
 
@@ -942,6 +968,23 @@ def main():
         r = run(binary, inp, os.path.join(work, "new_env.mzML"), env=dict(env, DIASPEXTRACT_DET="1"))
         assert "[det] " in r.stdout + r.stderr, "DIASPEXTRACT_DET=1 ran but printed no [det] line:\n" + (r.stdout + r.stderr)[-800:]
     check("a leftover SPEXTRACTOR_* or DIASPEXTRACTOR_* variable refuses the run; its DIASPEXTRACT_ name works", c22)
+
+    # 24: input without ion mobility takes the separate non-IMS path: it finds the precursor, is thread-invariant and
+    #     commits its output like the IMS path; profile spectra, IM at MS2 only and a negative noims:min_corr are refused
+    def c24():
+        ni = os.path.join(work, "noims.mzML"); mono = synth_noims(ni)
+        o1, o4 = os.path.join(work, "noims1.mzML"), os.path.join(work, "noims4.mzML")
+        run(binary, ni, o1, threads=1); run(binary, ni, o4, threads=4)
+        ps = precursors(o1)
+        assert any(abs(mz - mono) < 0.01 and z == 2 for mz, z in ps), "the z=2 precursor is missing: %s" % ps
+        assert digest(o1) == digest(o4), "the non-IMS spectra differ between 1 and 4 threads"
+        assert not os.path.exists(o1 + ".part"), "the .part was left behind"
+        for label, kw in (("profile spectra", dict(kind="profile")), ("IM at MS2 only", dict(ms2_im=True))):
+            bad = os.path.join(work, "noims_bad.mzML"); synth_noims(bad, **kw)
+            r = run(binary, bad, os.path.join(work, "noims_bad.out.mzML"), expect_fail=True)
+            assert "profile" in r.stdout + r.stderr or "MS2" in r.stdout + r.stderr, label + ": no reason given\n" + (r.stdout + r.stderr)[-600:]
+        run(binary, ni, os.path.join(work, "noims_neg.mzML"), extra=["-noims:min_corr", "-0.5"], expect_fail=True)
+    check("input without ion mobility: the non-IMS path, thread-invariant; profile, MS2-only IM and negative min_corr refused", c24)
 
     # 23: a REAL diaPASEF .d end to end (DIASPEXTRACT_TEST_D; CI uses OpenMS's public 5.6-min HeLa test run, and
     #     bench/slice_d.py cuts one from any run). Everything above reads synthetic mzML; this is the shipped default

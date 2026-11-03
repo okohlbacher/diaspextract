@@ -1,6 +1,6 @@
 # DIAspeXtract options
 
-This page lists every option of DIAspeXtract 1.7.1 with its default. The defaults are the recommended settings, so a
+This page lists every option of DIAspeXtract 1.8.0 with its default. The defaults are the recommended settings, so a
 normal run needs only `-in` and `-out`:
 
 ```bash
@@ -49,7 +49,7 @@ These options trade run time against memory. They do not change the spectra, exc
 | `-perf:ms1_trace_bands` | 48 | Trace MS1 in this many m/z bands in parallel. 1 turns it off; 0 counts as 1. At least 0. **Changes the output** slightly. |
 | `-perf:ms1_prune` | `true` | Drop MS1 peaks at or below `-trace:noise_threshold_int` while loading, which saves memory. `false` keeps every peak. Values: `true`, `false`. |
 | `-perf:trace_bands` | 12 | Trace each isolation window's fragments in this many m/z bands in parallel. 1 turns it off. 0 picks the count automatically, which makes the output depend on the thread count; the integer detector refuses 0 when `-tile:rt_sec` is above 0 or a `.d` is streamed, as at the defaults. At least 0. **Changes the output.** |
-| `-perf:mem_fraction` | 0.75 | Share of the free memory that the isolation windows may use, checked again before each window starts. Free memory is the kernel's MemAvailable, or the headroom under a cgroup limit (Slurm `--mem`, a container; page cache counts as free) when that is lower. Linux only; on other systems windows run one at a time. One window always runs, however large. 0.05 to 0.95. |
+| `-perf:mem_fraction` | 0.75 | Share of the free memory that the isolation windows may use, checked again before each window starts. Free memory is the kernel's MemAvailable, or the headroom under a cgroup limit (Slurm `--mem`, a container; page cache counts as free) when that is lower. Linux and Windows; on macOS windows run one at a time. One window always runs, however large. 0.05 to 0.95. |
 | `-perf:max_concurrent_windows` | 0 | Most isolation windows processed at once. Fewer use less memory but take longer. 0: no cap (free memory still limits them). |
 
 **Short of memory?** Keep `-tile:cells_per_tile 1`, lower `-perf:max_concurrent_windows` or `-perf:mem_fraction`, set
@@ -90,7 +90,7 @@ isolation windows whose bounds, rounded to 0.01 Th, contain its monoisotopic m/z
 | `-charge:min_charge` | 1 | Lowest precursor charge written. Singly charged precursors are real 1+ ions but carry a higher false discovery rate, so control the FDR per charge after the search. 2 writes only 2+ and higher; the 2+ and higher spectra are the same as at 1 (lower charges are still assembled, for the foreign-isotope removal of the others). |
 | `-charge:im_charge_veto` | `true` | Use ion mobility to correct charge calls. A 1+ call on the run's 2+ mobility trend becomes 2+; one on the 3+ trend is dropped. Genuine 1+ ions keep their charge. Values: `true`, `false`. |
 | `-charge:im_veto_band` | 2.5 | For `-charge:im_charge_veto`: half-width of the 2+ and 3+ mobility bands, in robust standard deviations of the fit. |
-| `-charge:mono_profile_check` | `v2` | Check each precursor's monoisotopic peak against the summed MS1 intensity at its isotope positions, and move it by one isotope when the expected isotope pattern disagrees. Values: `v2` (on), `false` (off, as in 1.5.0). |
+| `-charge:mono_profile_check` | `v2` | Check each precursor's monoisotopic peak against the summed MS1 intensity at its isotope positions, and move it by one isotope when the expected isotope pattern disagrees. Values: `v2` (on), `v3` (opt-in: every candidate monoisotope position of the isotope walk is scored by its cosine with the averagine pattern times the share of that pattern observed; on four diaPASEF runs 0.5–2 % more peptides with Sage and 0.6–1.8 % with MSFragger, spectra change), `false` (off, as in 1.5.0). |
 | `-charge:mono_position_min_ratio` | 0.2 | For `v2`: drop the lightest isotope when its intensity, relative to the expected pattern, is below this ratio; the monoisotopic peak then moves one isotope heavier. At least 0. |
 | `-charge:mono_position_im_box` | 0 | For `v2`: 1/K0 half-width of the isotope intensity sums. 0: set per run (0.01 to 0.03). At least 0. |
 | `-charge:mono_position_extend` | 0.6 | For `v2`: when nothing was dropped, move the monoisotopic peak one isotope lighter if that position's ratio is at least this. 0: off. At least 0. |
@@ -105,7 +105,7 @@ ion mobility.
 | option | default | what it does |
 |---|---|---|
 | `-gate:delta_im` | 0.01 | Largest 1/K0 difference between a precursor and a fragment. It also sets the 1/K0 tolerance of peak picking and tracing, so it changes detection too. To widen only the fragment match, use `-gate:fragment_delta_im`. At least 0. |
-| `-gate:delta_rt` | 3 | Largest difference (seconds) between the apex times of a precursor and a fragment. At least 0. |
+| `-gate:delta_rt` | 4 | Largest difference (seconds) between the apex times of a precursor and a fragment. At least 0. 3 before 1.8.0. |
 | `-gate:min_correlation` | 0.3 | Least correlation between the elution profiles of a precursor and a fragment. Raise it for cleaner but sparser spectra. -1 to 1. The correlation is a Pearson correlation over every frame of the isolation window in the run, frames without signal counting as zero; for two short elution peaks it is close to the cosine similarity of their profiles. |
 | `-gate:min_correlation_points` | 3 | Fewest shared points a correlation needs. Where `-gate:shrinkage` applies, `-gate:shrink_min_points` is used instead. |
 
@@ -173,7 +173,7 @@ the fragments of both.
 |---|---|---|
 | `-assembly:twin_im_tolerance` | 0.005 | Fold two spectra with the same charge, precursor m/z within 20 ppm and 1/K0 within this tolerance. Negative: off. 0 folds only twins with identical 1/K0. At least -1. Twins are joined pair by pair, so one cluster can be a chain whose ends lie further apart than 20 ppm; on real runs such chains are one ion called at drifting m/z. |
 | `-assembly:twin_rt_frames` | 0 | Also fold twins whose apexes lie up to n + 0.5 MS1 cycles apart and in the same retention-time cell (a pair across a cell edge stays apart), as `-assembly:twin_rt_match` allows. 0: set per run from the MS1 peak width. -1: the same MS1 frame only (as before 1.6.0). At least -1. |
-| `-assembly:twin_rt_match` | `ext` | Which twins from different MS1 frames fold. `ext`: precursor m/z within 0.05 ppm (one flight-time bin), and the monoisotope check (`-charge:mono_profile_check v2`) moved one of the two monoisotopic peaks one isotope lighter (see `-charge:mono_position_extend`). `bin`: any pair within 0.05 ppm. `ppm`: any pair within 20 ppm. `bin` and `ppm` fold more and are not recommended. Values: `ext`, `bin`, `ppm`. |
+| `-assembly:twin_rt_match` | `ext` | Which twins from different MS1 frames fold. `ext`: precursor m/z within 0.05 ppm (one flight-time bin), and the monoisotope check (`-charge:mono_profile_check v2` or `v3`) moved one of the two monoisotopic peaks one isotope lighter (see `-charge:mono_position_extend`). `bin`: any pair within 0.05 ppm. `ppm`: any pair within 20 ppm. `bin` and `ppm` fold more and are not recommended. Values: `ext`, `bin`, `ppm`. |
 
 **Experimental, off by default.**
 
@@ -216,6 +216,24 @@ The detail options match the dnoise command-line flags named in brackets. Leave 
 | `-dnoise:dia_ms1_mz_pad` | 5 | Isolation-window filter: m/z added on both sides of each window (`--dia-ms1-mz-pad`). At least 0. |
 | `-dnoise:dia_ms1_im_pad` | 0.05 | Isolation-window filter: 1/K0 added on both sides of each window (`--dia-ms1-im-pad`). At least 0. |
 
+## Input without ion mobility
+
+Orbitrap or SWATH DIA in mzML, centroided, without ion mobility goes to a separate path (precursors: Biosaur2
+isotope-pattern features of the MS1 scans; fragments: the mass traces of each isolation window that correlate with the
+precursor's elution profile, weighted by r²⁴, at most 200 per spectrum). The options of the sections above do not apply
+to it. Profile spectra, and ion mobility at MS2 without it at MS1, are refused.
+
+| Option | Default | What it does |
+|---|---|---|
+| `-noims:path` | `auto` | `auto`: input without ion mobility at MS1 takes this path. `off`: such input is refused. Values: `auto`, `off`. |
+| `-noims:min_corr` | 0.3 | Smallest Pearson correlation between a fragment's and the precursor's profile on the window's scan grid. 0 to 1. |
+| `-noims:ppm` | 10 | m/z tolerance of the mass traces and isotope patterns (ppm). |
+
+The environment variables `SPX_NOIMS_MONO` (precursors: `2` Biosaur2, the default; `1` an averagine shift test; `0`
+greedy isotope envelopes), `SPX_NOIMS_WEIGHT_POW`, `SPX_NOIMS_MAX_PEAKS`, `SPX_NOIMS_MIN_FRAGS`, `SPX_NOIMS_MS2_MIN_SCANS`,
+`SPX_NOIMS_MS2_PREC`, `SPX_NOIMS_FEW_APEX`, `SPX_NOIMS_SINGLES`, `SPX_NOIMS_MS1_MIN_SCANS` and `SPX_NOIMS_MS1_SPLIT` set
+the path's internal parameters for benchmarks. They are not options and may change without notice.
+
 ## Diagnostics
 
 | option | default | what it does |
@@ -223,6 +241,7 @@ The detail options match the dnoise command-line flags named in brackets. Leave 
 | `-diag:dump_ms1_tsv` | (empty) | Write the MS1 traces and the precursors found in them to `<prefix>.traces.tsv` and `<prefix>.precursors.tsv`, to see where a precursor was lost. Empty: off. |
 | `-diag:selftest_twins` | off (flag) | Run the built-in twin-fold self-test and exit. |
 | `-diag:selftest_arena` | off (flag) | Run the built-in MS1 storage self-test and exit. |
+| `-diag:spectrum_meta` | off (flag) | Write three userParams per spectrum: `spx_p_frames` (frames with precursor signal), `spx_faint` (1 when that is at most `-gate:faint_max_frames`), `spx_p_apex` (the precursor's apex intensity). The spectra do not change. |
 
 ## Environment variables
 
@@ -250,14 +269,17 @@ changes the output or ends the run; a run with one set warns and records it as t
 
 ## Reproducing 1.5.0 spectra
 
-Version 1.6.0 changed seven defaults. These six options set them back and give the spectra of 1.5.0 (see the v1.6.0
-entry in [CHANGELOG.md](../CHANGELOG.md)):
+Version 1.6.0 changed seven defaults and 1.8.0 one more. These seven options set them back (see the v1.6.0 and
+v1.8.0 entries in [CHANGELOG.md](../CHANGELOG.md)):
 
 ```bash
 diaspextract -in sample.d -out pseudo.mzML \
   -assembly:im_weight_sigma 0 -assembly:foreign_precursor_weight 1 -assembly:fragment_fuse_ppm 0 \
-  -charge:mono_profile_check false -charge:iso_im_tolerance 0.05 -trace:min_length_sec 3
+  -charge:mono_profile_check false -charge:iso_im_tolerance 0.05 -trace:min_length_sec 3 -gate:delta_rt 3
 ```
+
+They restore 1.5.0's settings, not its exact bytes: 1.8.0's platform-independent math and tie-breaking change the
+spectra slightly. Exact 1.5.0 output needs the 1.5.0 binary.
 
 The seventh default, `-assembly:twin_rt_frames`, needs no reset: with `-charge:mono_profile_check false` and the
 default `-assembly:twin_rt_match ext`, no twins fold across MS1 frames.

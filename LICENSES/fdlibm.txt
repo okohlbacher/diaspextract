@@ -1,0 +1,11 @@
+src/PortableMath.h ports exp (e_exp.c) and log (e_log.c), and follows the formulations of
+atanh (e_atanh.c) and tanh (s_tanh.c), from fdlibm 5.3 (netlib.org/fdlibm), which carry this notice:
+
+ ====================================================
+ Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+
+ Developed at SunPro, a Sun Microsystems, Inc. business.
+ Permission to use, copy, modify, and distribute this
+ software is freely granted, provided that this notice
+ is preserved.
+ ====================================================

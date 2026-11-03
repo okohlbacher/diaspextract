@@ -28,6 +28,9 @@ fi
 # the calibration model (installed only once the commit check passed) is header-only and lives in THIS repo; the patch includes it
 install -m 0644 src/TdfMzCalibration.h "$TREE/src/openms/include/OpenMS/FORMAT/TdfMzCalibration.h"
 echo "installed src/TdfMzCalibration.h -> $TREE/src/openms/include/OpenMS/FORMAT/"
+# [xplat] the platform-independent exp/log the trace detection and the Gaussian smoothing use (openms-portable-math.patch)
+install -m 0644 src/PortableMath.h "$TREE/src/openms/include/OpenMS/MATH/PortableMath.h"
+echo "installed src/PortableMath.h -> $TREE/src/openms/include/OpenMS/MATH/"
 
 for p in patches/*.patch; do
   if patch -p1 -N --dry-run -d "$TREE" < "$p" >/dev/null 2>&1; then

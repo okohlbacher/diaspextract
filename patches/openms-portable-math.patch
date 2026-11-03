@@ -1,0 +1,61 @@
+--- a/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp
++++ b/src/openms/source/FEATUREFINDER/MassTraceDetection.cpp
+@@ -7,6 +7,7 @@
+ // --------------------------------------------------------------------------
+ 
+ #include <OpenMS/FEATUREFINDER/MassTraceDetection.h>
++#include <OpenMS/MATH/PortableMath.h>   // [DIAspeXtract xplat] the same exp/log bits on every platform
+ 
+ #include <OpenMS/MATH/StatisticFunctions.h>
+ 
+@@ -177,9 +178,9 @@
+ 
+     void updateWeightedSDEstimateRobust(const PeakType& p, const double& mean_t1, double& sd_t, double& last_weights_sum)
+     {
+-      double denom1 = std::log(last_weights_sum) + 2 * std::log(sd_t);
+-      double denom2 = std::log(p.getIntensity()) + 2 * std::log(std::abs(p.getMZ() - mean_t1));
+-      double denom = std::sqrt(std::exp(denom1) + std::exp(denom2));
++      double denom1 = pmath::log(last_weights_sum) + 2 * pmath::log(sd_t);   // [DIAspeXtract xplat]
++      double denom2 = pmath::log(p.getIntensity()) + 2 * pmath::log(std::abs(p.getMZ() - mean_t1));
++      double denom = std::sqrt(pmath::exp(denom1) + pmath::exp(denom2));
+       double weights_sum = last_weights_sum + p.getIntensity();
+       double tmp_sd = denom / std::sqrt(weights_sum);
+ 
+--- a/src/openms/source/KERNEL/MassTrace.cpp
++++ b/src/openms/source/KERNEL/MassTrace.cpp
+@@ -7,6 +7,7 @@
+ // --------------------------------------------------------------------------
+ 
+ #include <OpenMS/KERNEL/MassTrace.h>
++#include <OpenMS/MATH/PortableMath.h>   // [DIAspeXtract xplat] the same exp/log bits on every platform
+ 
+ #include <boost/dynamic_bitset.hpp>
+ 
+@@ -654,7 +655,7 @@
+       {
+         double w_i = l_it.getIntensity();
+         total_weight += w_i;
+-        weighted_sum += w_i * std::exp(2 * std::log(std::abs(l_it.getMZ() - centroid_mz_)));
++        weighted_sum += w_i * pmath::exp(2 * pmath::log(std::abs(l_it.getMZ() - centroid_mz_)));   // [DIAspeXtract xplat]
+       }
+ 
+       if (total_weight < std::numeric_limits<double>::epsilon())
+--- a/src/openms/source/PROCESSING/SMOOTHING/GaussFilterAlgorithm.cpp
++++ b/src/openms/source/PROCESSING/SMOOTHING/GaussFilterAlgorithm.cpp
+@@ -7,6 +7,7 @@
+ // --------------------------------------------------------------------------
+ 
+ #include <OpenMS/PROCESSING/SMOOTHING/GaussFilterAlgorithm.h>
++#include <OpenMS/MATH/PortableMath.h>   // [DIAspeXtract xplat] the same exp/log bits on every platform
+ 
+ namespace OpenMS
+ {
+@@ -35,7 +36,7 @@
+ 
+     for (Size i = 1; i < number_of_points_right; i++)
+     {
+-      coeffs_[i] = 1.0 / (sigma_ * sqrt(2.0 * Constants::PI)) * exp(-((i * spacing_) * (i * spacing_)) / (2 * sigma_ * sigma_));
++      coeffs_[i] = 1.0 / (sigma_ * sqrt(2.0 * Constants::PI)) * pmath::exp(-((i * spacing_) * (i * spacing_)) / (2 * sigma_ * sigma_));   // [DIAspeXtract xplat]
+     }
+ #ifdef DEBUG_FILTERING
+     std::cout << "Coeffs: " << std::endl;

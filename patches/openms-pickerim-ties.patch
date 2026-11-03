@@ -1,0 +1,45 @@
+--- a/src/openms/source/PROCESSING/CENTROIDING/PeakPickerIM.cpp
++++ b/src/openms/source/PROCESSING/CENTROIDING/PeakPickerIM.cpp
+@@ -124,7 +124,7 @@
+ 
+       for (const auto& [diff, count] : freq_map)
+       {
+-        if (count > max_count)
++        if (count > max_count || (count == max_count && diff < mode_sampling_rate))   // [DIAspeXtract ties] unordered_map order is STL-specific
+         {
+           mode_sampling_rate = diff;
+           max_count = count;
+@@ -534,8 +534,8 @@
+             
+             // Sort indices based on m/z values
+             std::sort(indices.begin(), indices.end(),
+-                    [&mz_values](size_t i1, size_t i2) {
+-                      return mz_values[i1] < mz_values[i2];
++                    [&mz_values](size_t i1, size_t i2) {   // [DIAspeXtract ties] index breaks ties: STL-independent
++                      return mz_values[i1] < mz_values[i2] || (mz_values[i1] == mz_values[i2] && i1 < i2);
+                     });
+             
+             // Reuse sorted vectors
+@@ -1041,8 +1041,8 @@
+       std::vector<OpenMS::Size> mz_sorted_indices(points.size());
+       std::iota(mz_sorted_indices.begin(), mz_sorted_indices.end(), 0);
+       std::sort(mz_sorted_indices.begin(), mz_sorted_indices.end(),
+-                [&](OpenMS::Size a, OpenMS::Size b) {
+-                  return points[a].mz < points[b].mz;
++                [&](OpenMS::Size a, OpenMS::Size b) {   // [DIAspeXtract ties] index breaks ties: STL-independent
++                  return points[a].mz < points[b].mz || (points[a].mz == points[b].mz && a < b);
+                 });
+ 
+       // Create reverse lookup: original_index -> mz_sorted_position (needed for cluster expansion)
+@@ -1056,8 +1056,9 @@
+       std::iota(intensity_sorted_indices.begin(), intensity_sorted_indices.end(), 0);
+       std::sort(intensity_sorted_indices.begin(), intensity_sorted_indices.end(),
+                 [&](OpenMS::Size a, OpenMS::Size b) {
+-                  // Sort DESCENDING by intensity
+-                  return points[a].intensity > points[b].intensity;
++                  // Sort DESCENDING by intensity; [DIAspeXtract ties] equal counts (integer TOF) in index order, so the
++                  // greedy seed order -- and so the clusters -- no longer depend on the standard library's std::sort
++                  return points[a].intensity > points[b].intensity || (points[a].intensity == points[b].intensity && a < b);
+                 });
+ 
+       // 3. Keep track of used points

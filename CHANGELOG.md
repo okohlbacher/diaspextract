@@ -1,5 +1,58 @@
 # Changelog
 
+## v1.8.0 — 2026-11-03
+
+**The spectra change on every platform** (for diaPASEF input all three now write the same file; 1.7.1's Linux output,
+the benchmark reference, is not kept). On a 60-s HeLa diaPASEF slice 1.7.1 wrote 11,164 (macOS), 11,219 (Windows) and 11,678
+(Linux) spectra; now 11,133 on all three, bit-identical (`spectrumList` digest `86f9eb62…`).
+
+### Changed
+
+- **`-gate:delta_rt` defaults to 4 s** (was 3 s). Faint precursors keep `-gate:faint_delta_rt` (6 s). On the four PXD017703
+  HeLa runs (three at 10 ng) Sage finds 3.5–8.5 % and MSFragger 3.0–5.3 % more peptides at 1 % FDR, with about 5 % more
+  spectra; the entrapment FDR estimate stays within the 3 s interval. `-gate:delta_rt 3` restores 1.7.x's gate; the
+  spectra still differ from 1.7.x because of the platform fixes below.
+
+### Added
+
+- **DIA input without ion mobility** (centroided Orbitrap or SWATH mzML) goes to a separate path; it never enters the
+  diaPASEF processing. Precursors are Biosaur2 isotope-pattern features of the MS1 scans; fragments are the mass
+  traces of each isolation window, kept when their elution profile correlates with the precursor's (Pearson r ≥ 0.3,
+  `-noims:min_corr`, 0 to 1) and weighted by r²⁴, at most 200 per spectrum. Profile spectra, and ion mobility at MS2
+  without it at MS1, are refused (exit code 11); `-noims:path off` refuses all such input. The output is written to
+  `<out>.part`, checked and renamed like the diaPASEF output, in the `-out_type` format. On three public sets
+  (PXD021394, PXD032263, PXD063917; full human database, 1 % FDR) Sage finds 3.9 %, 8.7 % and 6.4 % more peptides than
+  DIA-Umpire SE 2.2.8, MSFragger 14.2 %, 2.4 % and 5.2 % fewer; the entrapment FDR estimate stays at or below 0.90 %
+  with both engines. Extraction takes 27–43 s at 32 threads (BinAC2, EPYC 7543), DIA-Umpire 143–345 s.
+  A new OpenMS patch (`openms-biosaur2-speed.patch`) makes Biosaur2 faster and OpenMP-parallel without changing its
+  features: on PXD032263 73 s become 8.0 s on one thread and 2.7 s on 16 (BinAC2).
+- **`-charge:mono_profile_check v3`** (opt-in; the default stays `v2`): every candidate monoisotope position of the
+  isotope walk is scored by its cosine with the averagine pattern times the share of the pattern observed. On four
+  public diaPASEF runs 0.5–2 % more peptides with Sage and 0.6–1.8 % with MSFragger, fewer isotope errors and
+  0.6–2.2 % fewer spectra; the entrapment FDR estimates stay within their intervals.
+- **`-diag:spectrum_meta`** writes the precursor's support per spectrum (`spx_p_frames`, `spx_faint`, `spx_p_apex`), to
+  join search results to faint precursors. Off by default; the spectra do not change.
+
+### Fixed
+
+- **macOS, Linux and Windows wrote different spectra from one input.** Three causes, all removed:
+  - ties in sorts: OpenMS PeakPickerIM's clustering and the tool's m/z order of MS1 traces sorted equal keys (integer
+    TOF intensities, quantised m/z) in whatever order the standard library's `std::sort` left them, which differs
+    between libstdc++, libc++ and the MS STL. The index now breaks every tie (new patch `openms-pickerim-ties.patch`;
+    the top-3 calibration sort in `openms-brukertims-mz-calibration.patch`).
+  - libm rounding: exp, log, log1p, pow, atanh and tanh differ in the last bit between Apple's libm, glibc and the
+    UCRT, enough to move fragment m/z and trace windows. The tool and the OpenMS trace detection and Gaussian smoothing
+    (new patch `openms-portable-math.patch`) now use `src/PortableMath.h`, ports of fdlibm (exp, log; Sun 1993, see
+    `LICENSES/fdlibm.txt`) and formulations built on them; `test_portable_math` pins their bits.
+  - FMA contraction: already off for the tool (`-ffp-contract=off`); the new math also switches it off inside each
+    function. Build OpenMS with the flag too (README).
+  - MS1 traces with equal summary keys are now ordered by their profile, so `std::sort`'s tie order cannot matter.
+
+  The identity is shown on diaPASEF input, not proven: OpenMS's Savitzky-Golay coefficients (valley splitting) still
+  come from `std::pow` and an Eigen SVD. The path for input without ion mobility orders everything by content too, but
+  Biosaur2's isotope-pattern check computes averagine probabilities with the platform's math library (through Boost),
+  so a feature at its acceptance threshold can differ between platforms.
+
 ## v1.7.1 — 2026-11-01
 
 **The spectra do not change**: at the defaults and for every option the output is 1.7.0's (spectra digest identical on

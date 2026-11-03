@@ -23,6 +23,10 @@ Ported code, used under its own licence (full text in LICENSES/):
   (Apache-2.0) two-point calibration formulas dnoise builds that gate with --
   LICENSES/timsrust-Apache-2.0.txt.
 
+  fdlibm 5.3 (Sun Microsystems, 1993) -- LICENSES/fdlibm.txt
+  src/PortableMath.h ports its exp and log and follows its atanh and tanh, so these give the
+  same bits on every platform (the platform math libraries do not).
+
 Algorithmic ideas were reviewed against, but no code was taken from:
 
   the reference implementation (Nesvizhskii Lab)     -- pseudo-MS/MS extraction from diaPASEF

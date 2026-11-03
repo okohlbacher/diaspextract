@@ -1075,6 +1075,7 @@ jobs:
           PIN: ${{ vars.DIASPEXTRACT_TEST_D_DIGEST }}
         run: |
           set -euo pipefail
+          sed -i 's/\r$//' digests/*.txt   # Windows writes CRLF; the digests themselves are compared
           for f in digests/*.txt; do printf '%-14s %s\n' "$(basename "$f" .txt)" "$(cat "$f")"; done | tee -a "$GITHUB_STEP_SUMMARY"
           n=$(cat digests/*.txt | sort -u | wc -l)
           [ "$(find digests -name '*.txt' | wc -l)" = 5 ] || { echo "::error::expected five digests"; exit 1; }

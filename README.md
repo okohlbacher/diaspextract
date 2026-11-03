@@ -62,7 +62,7 @@ flowchart TD
 | | |
 |---|---|
 | OpenMS | the development commit pinned in `patches/openms.lock`, patched by `scripts/apply_openms_patches.sh` and built `WITH_OPENTIMS` to read Bruker `.d`. A released OpenMS package does not work |
-| Compiler | C++20 and OpenMP. CI builds the tool with GCC on Ubuntu |
+| Compiler | C++20 and OpenMP. CI builds with GCC on Linux, Apple clang with Homebrew's libomp on macOS and clang-cl on Windows |
 | CMake | 3.21+ for OpenMS (the tool itself needs 3.16) |
 | Platform | Linux or Windows. On macOS the tool cannot read the free memory and runs one isolation window at a time |
 | Memory | about 5–20 GB for the HeLa runs of PXD017703 and 25–32 GB for the 130-minute tissue runs of PXD047793 (1.6.0 at the defaults with 100 threads, 43 public runs; see [CHANGELOG.md](CHANGELOG.md)) |
@@ -74,8 +74,36 @@ process the whole run at once and need several times as much.
 
 ## Install
 
-There are no prebuilt binaries; build from source as below. OpenMS needs its build dependencies, including Arrow
-and Parquet; `.github/workflows/build.yml` lists the Ubuntu packages.
+### Prebuilt binaries
+
+Each [release](https://github.com/okohlbacher/diaspextract/releases/latest) carries a self-contained build for five
+platforms and a `SHA256SUMS` file:
+
+| platform | asset | needs |
+|---|---|---|
+| Linux x86-64 | `DIAspeXtract-linux-x64.tar.gz` | glibc 2.39 or newer (Ubuntu 24.04, Debian 13, RHEL 10) |
+| Linux arm64 | `DIAspeXtract-linux-arm64.tar.gz` | the same |
+| macOS, Apple silicon | `DIAspeXtract-macos-arm64.dmg` or `.tar.gz` | macOS 14 or newer |
+| macOS, Intel | `DIAspeXtract-macos-x64.dmg` or `.tar.gz` | macOS 15 or newer |
+| Windows x64 | `DIAspeXtract-windows-x64.zip` | Windows 10 or newer |
+
+Unpack it anywhere and run `bin/diaspextract` (`bin\diaspextract.exe` on Windows). The archive carries the patched
+OpenMS libraries and their `share/OpenMS` data, so it needs no OpenMS installation and no environment variable.
+
+With Homebrew, on macOS or Linux:
+
+```bash
+brew install okohlbacher/diaspextract/diaspextract
+```
+
+**Signing.** The macOS binaries are signed with a Developer ID and notarized by Apple. The disk image carries its
+notarization ticket and opens offline; the tarball is checked online the first time it runs. The Windows executable is
+not signed yet (signing through SignPath Foundation is prepared), so SmartScreen warns the first time it runs.
+
+### Build from source
+
+OpenMS needs its build dependencies, including Arrow and Parquet; `.github/workflows/build.yml` lists them for Ubuntu,
+macOS (Homebrew) and Windows.
 
 ```bash
 git clone https://github.com/okohlbacher/diaspextract.git
@@ -97,7 +125,8 @@ export OPENMS_DATA_PATH=/path/to/OpenMS/share/OpenMS   # a source-built OpenMS h
 ```
 
 The binary is `build/diaspextract`; `cmake --install build` puts it under `<prefix>/bin`. The GitHub workflow
-`.github/workflows/build.yml` runs the same recipe on Ubuntu and is the reference.
+`.github/workflows/build.yml` runs the same recipe on Linux, macOS and Windows and is the reference. On Windows, build
+OpenMS and the tool with clang-cl, not cl.
 
 `scripts/apply_openms_patches.sh` applies the eight small OpenMS patches in `patches/`. They give the Bruker reader the
 acquisition's exact m/z calibration, let the tool set the scan time that peak splitting uses, make tracing and mzML
@@ -195,6 +224,7 @@ test/       the end-to-end tests
 tests/      the unit tests and calibration checks
 bench/      tools to compare outputs and check FDR, and a Sage configuration
 docs/       the option reference
+packaging/  the Homebrew formula and the tap's update workflow
 assets/     the logo
 LICENSES/   third-party licenses
 ```

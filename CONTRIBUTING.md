@@ -40,13 +40,28 @@ cmake -B build -DDIASPEXTRACT_TESTS_ONLY=ON && cmake --build build && ctest --te
 
 The end-to-end suite has 32 checks (33 where the build writes mzPeak). All but one run on small synthetic inputs; the
 last runs a real diaPASEF `.d` through the default path, and is skipped without `DIASPEXTRACT_TEST_D`. CI gives it the
-5.6-minute HeLa test run that OpenMS publishes. The `ctest` line needs no OpenMS. CI runs it on Linux, macOS and Windows for every pull request. The
-end-to-end checks need OpenMS, so CI runs them only in the full build (`build.yml`: weekly, on release tags and on
-demand). Run them yourself before you open a pull request.
+5.6-minute HeLa test run that OpenMS publishes. The `ctest` line needs no OpenMS. CI runs it on Linux, macOS and Windows for every pull request.
+
+The end-to-end checks need OpenMS. `build.yml` builds the patched OpenMS and the tool on Linux (x64, arm64), macOS
+(arm64, x64) and Windows, runs `ctest` and the end-to-end suite on each, packages the binary with its libraries and
+runs the package with nothing from the build. It runs on the public repository for every push to main and every pull
+request, weekly, on release tags and on demand. Its first run after a change to the OpenMS pin, the patches or a
+dependency rebuilds OpenMS, one to three hours per platform; later runs take the cached build. Run the checks yourself
+before you open a pull request.
 
 `DIASPEXTRACT_TEST_D_DIGEST` pins that run's spectra digest: when set, the last check compares the output with it
 (the check prints the digest when it is unset). CI takes it from the repository variable of the same name, set from
-the first green full build's log; a change that alters the spectra updates it together with its CHANGELOG entry.
+the first green build's log; all five platforms must give the same digest. A change that alters the spectra updates
+it together with its CHANGELOG entry.
+
+## Releasing
+
+Set `project(VERSION)` in `CMakeLists.txt`, add a `## vX.Y.Z` section to `CHANGELOG.md`, and push the tag `vX.Y.Z`.
+`build.yml` refuses a tag that does not match the version. It signs and notarizes the macOS binaries (it fails without
+the `MACOS_*` secrets), signs the Windows executable through SignPath when `SIGNPATH_API_TOKEN` is set, attaches the
+seven packages and `SHA256SUMS` to the release, creating it from the CHANGELOG section if it does not exist, and asks
+the Homebrew tap to follow. Before a release that changes the packaging, run the workflow by hand with
+`release_dry_run`: it takes the same path and returns the packages as workflow artifacts.
 
 Run the end-to-end checks from a shell with no `DIASPEXTRACT_*` variable set other than `DIASPEXTRACT_TEST_D` and
 `DIASPEXTRACT_TEST_D_DIGEST`. The

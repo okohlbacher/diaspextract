@@ -533,7 +533,7 @@ jobs:
             # /Z7 + /DEBUG: a PDB for the stack trace below; the code is the same.
             Windows) cmake "${ARGS[@]}" -DCMAKE_CXX_COMPILER="$CLANG_CL" -DEigen3_DIR="$EIGEN_DIR" \
                        -DCMAKE_PREFIX_PATH="$QT_DIR;$CONDA_LIB;$WS/contrib-build" -DOpenMP_ROOT="$LLVM_DIR" \
-                       "-DCMAKE_CXX_FLAGS_RELEASE=/O2 /Ob2 /DNDEBUG /Z7" -DCMAKE_EXE_LINKER_FLAGS_RELEASE=/DEBUG ;;
+                       "-DCMAKE_CXX_FLAGS_RELEASE=-O2 -Ob2 -DNDEBUG -Z7" -DCMAKE_EXE_LINKER_FLAGS_RELEASE=-DEBUG ;;   # dashes: Git Bash rewrites /O2 into a path
           esac
           cmake --build diaspextract/build --parallel "$NPROC"
 

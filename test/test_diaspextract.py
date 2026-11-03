@@ -270,7 +270,8 @@ def run(binary, inp, out, extra=(), threads=1, expect_fail=False, env=None):
     if expect_fail:
         assert r.returncode != 0, "expected a non-zero exit, got success:\n" + r.stdout[-800:]
         return r
-    assert r.returncode == 0, "run failed:\n" + (r.stdout + r.stderr)[-2000:]
+    assert r.returncode == 0, f"run failed (exit {r.returncode}, {r.returncode & 0xffffffff:#x}):\n" \
+        + r.stdout[-1500:] + "\n--- stderr:\n" + r.stderr[-1500:]
     return r
 
 

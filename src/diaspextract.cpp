@@ -2577,6 +2577,11 @@ namespace
   /// produced. With the total known up front (setExpectedSize) the count is written exactly and the
   /// bytes from <spectrumList> on are the bulk writer's; without it a zero-padded placeholder is
   /// overwritten at the end -- same width, so the indexedmzML offsets stay valid.
+#ifdef _WIN32
+  static constexpr const char* NULL_DEVICE_ = "NUL";   // the encoders' own files: never written, only opened
+#else
+  static constexpr const char* NULL_DEVICE_ = "/dev/null";
+#endif
   class TileWriter : public PlainMSDataWritingConsumer
   {
   public:
@@ -2636,7 +2641,7 @@ namespace
       const bool in_team = omp_in_parallel();
       const Size CHUNK = 256;
       const Size n_thr = (Size)std::max(1, in_team ? omp_get_num_threads() : omp_get_max_threads());
-      while (enc_.size() < n_thr) { enc_.emplace_back(new TileWriter("/dev/null")); enc_.back()->options_ = options_; }
+      while (enc_.size() < n_thr) { enc_.emplace_back(new TileWriter(NULL_DEVICE_)); enc_.back()->options_ = options_; }
       const Size wave = CHUNK * n_thr;
       for (Size w0 = 0; w0 < block.size(); w0 += wave)
       {

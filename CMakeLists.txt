@@ -74,6 +74,13 @@ find_package(SQLite3 REQUIRED)   # analysis.tdf is read directly; a missing SQLi
 add_executable(diaspextract src/diaspextract.cpp)
 target_link_libraries(diaspextract PRIVATE OpenMS SQLite::SQLite3 OpenMP::OpenMP_CXX)
 target_compile_definitions(diaspextract PRIVATE DIASPEXTRACT_VERSION="${PROJECT_VERSION}")
+# Windows: a version resource with the product name and version. SignPath signs the release .exe only when both are
+# present and match its artifact configuration (.signpath/artifact-configurations/initial.xml).
+if(WIN32)
+  enable_language(RC)
+  configure_file(src/diaspextract.rc.in ${CMAKE_CURRENT_BINARY_DIR}/diaspextract.rc @ONLY)
+  target_sources(diaspextract PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/diaspextract.rc)
+endif()
 # The source carries the same number as a fallback for builds that do not go through this file
 # (the in-tree OpenMS build); refuse to configure if the two have drifted.
 file(STRINGS src/diaspextract.cpp _spx_fallback REGEX "^#define DIASPEXTRACT_VERSION \"")

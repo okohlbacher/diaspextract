@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SignPath artifact configuration for project `diaspextract`, slug `initial`. SignPath reads it from its console, not
+  from here: paste it there (Project diaspextract > Artifact configurations > initial). It is kept in the repository
+  so the console copy can be checked against what build.yml submits.
+
+  A ZIP, because actions/upload-artifact always zips: a bare <pe-file> configuration fails with "file does not
+  correspond to the specified file type". product-name and product-version are required by the SignPath Foundation
+  terms; diaspextract.exe carries both from src/diaspextract.rc.in, and build.yml passes `version`.
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file path="*.exe" product-name="DIAspeXtract" product-version="${version}">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>

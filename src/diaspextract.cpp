@@ -58,8 +58,8 @@
 #include <unistd.h>
 #endif
 
-// The five OpenMS patches in patches/ are build prerequisites. This is the compile-time check for the
-// third: without defaulted moves an rvalue MassTrace binds to the copy constructor (not noexcept), and
+// The eight OpenMS patches in patches/ are build prerequisites. This is the compile-time check for
+// openms-masstrace-move.patch: without defaulted moves an rvalue MassTrace binds to the copy constructor (not noexcept), and
 // every "move" of a trace in the band/split gathering is a deep copy of its points.
 static_assert(std::is_nothrow_move_constructible_v<OpenMS::MassTrace> && std::is_nothrow_move_assignable_v<OpenMS::MassTrace>,
               "OpenMS MassTrace has no noexcept move operations: apply patches/openms-masstrace-move.patch to the OpenMS tree");
@@ -88,7 +88,7 @@ static inline double spxFileTimeSec_(FILETIME a, FILETIME b)   // two FILETIMEs 
 // The release version. The standalone CMake build passes it from project(VERSION); the in-tree
 // OpenMS build does not, so the fallback here is the same number.
 #ifndef DIASPEXTRACT_VERSION
-#define DIASPEXTRACT_VERSION "1.8.0"
+#define DIASPEXTRACT_VERSION "1.8.1"
 #endif
 
 using namespace OpenMS;
@@ -101,18 +101,23 @@ using namespace std;
 /**
   @page TOPP_DIAspeXtract DIAspeXtract
 
-  @brief Extracts pseudo-MS/MS ("pseudo-DDA") spectra from diaPASEF (ion-mobility DIA) data.
+  @brief Builds pseudo-MS/MS ("pseudo-DDA") spectra from DIA data for DDA search engines.
 
-  Reconstructs DDA-like MS2 spectra from ion-mobility DIA (timsTOF / diaPASEF) data by
-  exploiting the fact that, in PASEF, fragments are recorded at the ion-mobility (1/K0)
-  elution coordinate of their precursor. Precursor and fragment mass traces are detected
-  IM-aware (@ref MassTraceDetection with an ion-mobility tolerance), then fragments are
-  assigned to a precursor when they co-localize in ion mobility, retention time, and
-  elution-profile (Pearson) correlation. The result is written as searchable mzML.
+  Reconstructs one DDA-like MS2 spectrum per precursor from data-independent acquisition, so that any DDA search
+  engine, including open and blind searches, can search DIA data without a spectral library. It does not perform the
+  database search, FDR control, library building or quantification.
 
-  This is an OpenMS-native, BSD-3 analogue of the published diaPASEF pseudo-MS/MS extractors. It is
-  a discovery front-end (enables open / semi-tryptic / PTM searches); it does not perform the database
-  search, FDR, library building or quantification.
+  Two kinds of input take two separate paths:
+  - <b>diaPASEF</b> (Bruker timsTOF, ion-mobility DIA; a .d directory, mzML or mzPeak). MS1 frames are denoised and
+    centroided along ion mobility; precursor and fragment mass traces are detected on the instrument's flight-time
+    bins; isotope traces at the same ion mobility form precursors (charge 1-5, checked by ion mobility and by the
+    isotope pattern). A fragment joins a precursor when the two co-localize in ion mobility and retention time and
+    their elution profiles correlate. The run is processed in retention-time tiles, the isolation windows in parallel.
+  - <b>DIA without ion mobility</b> (Orbitrap, SWATH; centroided mzML). Precursors are @ref Biosaur2Algorithm
+    isotope-pattern features of the MS1 scans; fragments are the mass traces of each isolation window whose elution
+    profiles correlate with the precursor's. None of the diaPASEF options apply to this path.
+
+  The output is mzML (or mzPeak in a build with mzPeak support), written as &lt;out&gt;.part and renamed when complete.
 
   <B>The command line parameters of this tool are:</B>
   @verbinclude TOPP_DIAspeXtract.cli
@@ -470,16 +475,8 @@ namespace
   double corr_power_ = 2.0;          ///< assembly:corr_power: emitted fragment intensity *= corr^corr_power
   double im_slice_merge_ = 0.015;   ///< [merge] trace:im_slice_merge, 1/K0 link (group span <= 2x); negative = off
   bool merge_same_bin_ = true;       ///< [merge] assembly:merge_same_bin
-  int frag_int_ = 0;                 ///< [fragint] assembly:frag_intensity: 0 apex, 1 core, 2 sum
-  int frag_core_half_ = 1;           ///< [fragint] (assembly:frag_core_frames - 1) / 2
-  bool anchor_rescue_ = false;       ///< [anchor] gate:anchor_rescue: weak fragments of non-faint precursors judged against an anchor consensus
-  int anchor_min_count_ = 3;         ///< [anchor] gate:anchor_min_count
-  double anchor_min_corr_ = 0.8;     ///< [anchor] gate:anchor_min_corr
-  double anchor_rescue_corr_ = 0.7;  ///< [anchor] gate:anchor_rescue_corr
-  int anchor_max_rescued_ = 50;      ///< [anchor] gate:anchor_max_rescued
-  bool post_fusion_cap_ = false;     ///< [recap] assembly:post_fusion_cap: carry the cap key per peak, re-cap after the twin fold
   bool spectrum_meta_ = false;      ///< [diag] diag:spectrum_meta: per-spectrum precursor support userParams
-  bool twin_ext_mark_ = false;       ///< [twin-rt] assembly:twin_rt_match ext: mark spectra whose mono v2's extension placed (spx_mono_ext, never written); set only when the cross-frame fold is active
+  bool twin_ext_mark_ = false;       ///< [twin-rt] mark spectra whose mono v2's extension placed (spx_mono_ext, never written); set only when the cross-frame fold is active
   double foreign_w_ = 0.0;           ///< [foreign] assembly:foreign_precursor_weight (1 = off, 0 removes)
   double foreign_ppm_ = 10.0;        ///< [foreign] assembly:foreign_precursor_ppm
   double foreign_dim_ = 0.015;       ///< [foreign] assembly:foreign_precursor_dim
@@ -489,14 +486,6 @@ namespace
   /// [merge] [0] picked MS2 peaks merged away in toTof (one frame, one bin, 1/K0 within trace:im_slice_merge);
   /// [1] frames that had such a merge; [2] fragments merged away at assembly (one bin in one spectrum)
   inline std::array<std::atomic<long long>, 3>& mergeCount_() { static std::array<std::atomic<long long>, 3> c{}; return c; }
-  /// [fragint] [0] gate-passing (and gate:anchor_rescue rescued) fragments given the core/sum amplitude; [1] those of
-  /// them with no point there (fallback)
-  inline std::array<std::atomic<long long>, 2>& fragIntCount_() { static std::array<std::atomic<long long>, 2> c{}; return c; }
-  /// [anchor] gate:anchor_rescue: [0] non-faint precursors scored, [1] of them anchored, [2] candidates of the anchored,
-  /// [3] rescued, [4] passed beyond gate:anchor_max_rescued, [5] precursors with a rescue, [6] rescued peaks in written
-  /// spectra (after the same-bin merge and the cap, before the twin fold), [7] written spectra holding one, [8..10] rescued
-  /// fragments the gate had rejected at the point floor, the overlap guard, the correlation cut
-  inline std::array<std::atomic<long long>, 11>& anchorCount_() { static std::array<std::atomic<long long>, 11> c{}; return c; }
   /// [foreign] per assembly (one precursor in one window): [6] assemblies checked (with fragments), [0] of them with a
   /// foreign candidate, [1] foreign envelopes matched, [2] assemblies with a fragment attenuated, [3] fragments
   /// attenuated, [4] candidates skipped as this precursor's own ion, [5] assemblies of [2] with at least
@@ -2356,20 +2345,18 @@ namespace
   /// own. Same frame => same RT cell => same tile under every grouping, so the output stays grouping- and
   /// thread-invariant.
   /// `v` in canonical order; survivors keep their places. Returns the number of spectra removed.
-  /// [recap] `keyed`: every spectrum carries its peaks' cap keys as float data array 0; a fused peak keeps the max key.
   /// [twin-rt] `rt_tol` > 0 widens "same MS1 frame" to |dRT| <= rt_tol (assembly:twin_rt_frames): two calls of one
   /// monoisotope at nearby frames (seeds of one ion whose apexes differ, or v2's extension onto another precursor's
   /// monoisotope) fold like same-frame twins. Such a pair must also lie in one RT cell: the cell that owns a precursor
   /// (`cells`: the cell edges, `cell_drt`: tile_drt; the tile loop's own test, (T - rt) > cell_drt), so a pair never
   /// straddles a tile under any grouping and the output stays grouping- and thread-invariant. rt_tol 0 is the
   /// same-frame relation (|dRT| <= 0 and one frame is one cell), bit for bit. `st` (optional) adds {pairs linked at one
-  /// frame, pairs linked across frames, near pairs refused at a cell edge}. `near_mode`, how a pair from two frames must match: 0 precursor
-  /// m/z within TWIN_PPM, as at one frame; 1 within BIN_PPM (one flight-time bin: one MS1 trace, or one bin at two
-  /// frames, is the monoisotope of both); 2 as 1, and one of the two carries the userParam spx_mono_ext (its mono was
-  /// placed by monocheck v2's extension), which mode 2 removes from every spectrum.
-  static size_t mergeTwins_(vector<MSSpectrum>& v, double im_tol, bool keyed = false, double rt_tol = 0.0,
-                            const vector<double>* cells = nullptr, double cell_drt = 0.0, std::array<size_t, 3>* st = nullptr,
-                            int near_mode = 0)
+  /// frame, pairs linked across frames, near pairs refused at a cell edge}. A pair from two frames must have its precursor
+  /// m/z within BIN_PPM (one flight-time bin: one MS1 trace, or one bin at two frames, is the monoisotope of both), and
+  /// one of the two must carry the userParam spx_mono_ext (its mono was placed by monocheck v2's extension); the mark
+  /// is removed from every spectrum.
+  static size_t mergeTwins_(vector<MSSpectrum>& v, double im_tol, double rt_tol = 0.0,
+                            const vector<double>* cells = nullptr, double cell_drt = 0.0, std::array<size_t, 3>* st = nullptr)
   {
     const double TWIN_PPM = 20.0, FUSE_PPM = 10.0;   // fixed tolerances
     // [twin-rt] one flight-time bin across frames: the per-frame calibration moves one bin's m/z by < 0.01 ppm, distinct
@@ -2385,7 +2372,7 @@ namespace
     {
       const auto& p = v[i].getPrecursors();
       if (!p.empty() && p[0].getCharge() > 0) ks.push_back({v[i].getRT(), p[0].getMZ(), p[0].getDriftTime(), p[0].getCharge(), (uint32_t)i, cellOf(v[i].getRT()),
-                                                               near_mode == 2 && v[i].metaValueExists("spx_mono_ext")});
+                                                               v[i].metaValueExists("spx_mono_ext")});
     }
     // one charge, then m/z: a pair is found from its lower-m/z member's 20-ppm window whatever its frames
     sort(ks.begin(), ks.end(), [](const K& a, const K& b) {
@@ -2398,8 +2385,8 @@ namespace
     auto linked = [&](const K& a, const K& b) -> int {
       if (!(fabs(b.mz - a.mz) <= a.mz * TWIN_PPM * 1e-6) || !(fabs(b.im - a.im) <= im_tol) || !(fabs(b.rt - a.rt) <= rt_tol)) return 0;
       const bool same = b.rt == a.rt;
-      if (!same && near_mode >= 1 && fabs(b.mz - a.mz) > a.mz * BIN_PPM * 1e-6) return 0;
-      if (!same && near_mode == 2 && !a.ext && !b.ext) return 0;
+      if (!same && fabs(b.mz - a.mz) > a.mz * BIN_PPM * 1e-6) return 0;
+      if (!same && !a.ext && !b.ext) return 0;
       if (b.cell != a.cell) return 3;
       return same ? 1 : 2;
     };
@@ -2455,36 +2442,6 @@ namespace
     // fuse: each thread reads and writes one cluster's spectra only
     auto fuse = [&](const long c)
     {
-      if (keyed)
-      {
-        // [recap] the same fusion over (m/z, intensity, key) triples. Peaks equal in m/z and intensity add equal terms
-        // and always land in one fused peak, so the peaks are the unkeyed fold's; each fused peak keeps its members' max key.
-        vector<std::array<double, 3>> ps;
-        for (uint32_t i : members[(size_t)c])
-        {
-          const auto& fd = v[i].getFloatDataArrays();
-          for (Size j = 0; j < v[i].size(); ++j) ps.push_back({v[i][j].getMZ(), (double)v[i][j].getIntensity(), fd.empty() ? 0.0 : (double)fd[0][j]});
-        }
-        sort(ps.begin(), ps.end());
-        vector<pair<double, double>> fused;
-        OpenMS::DataArrays::FloatDataArray kk;
-        kk.setName("spx_cap_key");
-        const double NO_KEY = -std::numeric_limits<double>::infinity();
-        double gm = 0.0, gw = 0.0, gi = 0.0, gk = NO_KEY;
-        for (const auto& pk : ps)
-        {
-          if (gw != 0.0 && pk[0] - gm / gw > (gm / gw) * (FUSE_PPM * 1e-6)) { fused.emplace_back(gm / gw, gi); kk.push_back((float)gk); gm = gw = gi = 0.0; gk = NO_KEY; }
-          gm += pk[0] * pk[1]; gw += pk[1]; gi = std::max(gi, pk[1]); gk = std::max(gk, pk[2]);
-        }
-        if (gw != 0.0) { fused.emplace_back(gm / gw, gi); kk.push_back((float)gk); }
-        MSSpectrum& s = v[surv[(size_t)c]];
-        s.clear(false);
-        s.reserve(fused.size());
-        for (const auto& f : fused) s.emplace_back(f.first, (float)f.second);
-        s.getFloatDataArrays().clear();
-        s.getFloatDataArrays().push_back(std::move(kk));   // moved, not copied (assign(1, x) copies)
-        return;
-      }
       vector<pair<double, double>> ps;
       for (uint32_t i : members[(size_t)c]) for (const auto& pk : v[i]) ps.emplace_back(pk.getMZ(), (double)pk.getIntensity());
       sort(ps.begin(), ps.end());
@@ -2518,58 +2475,15 @@ namespace
     }
     const size_t removed = v.size() - w;
     v.erase(v.begin() + (long)w, v.end());
-    if (near_mode == 2) for (auto& sp : v) if (sp.metaValueExists("spx_mono_ext")) sp.removeMetaValue("spx_mono_ext");   // [twin-rt] never written
+    for (auto& sp : v) if (sp.metaValueExists("spx_mono_ext")) sp.removeMetaValue("spx_mono_ext");   // [twin-rt] never written
     return removed;
   }
 
-  /// [recap] assembly:post_fusion_cap: the twin fold unions capped spectra, so a folded one can exceed max_frags. Keeps
-  /// the max_frags peaks with the highest carried cap key (ties: higher intensity, then lower m/z), in m/z order, and
-  /// drops the key array of every spectrum (it is never written). Per spectrum, so thread-invariant.
-  /// Returns {spectra re-capped, peaks removed, largest spectrum before}.
-  static std::array<size_t, 3> capAfterFusion_(vector<MSSpectrum>& v, Size max_frags)
-  {
-    size_t n_sp = 0, n_pk = 0, n_max = 0;
-    // the counters are parameters, not captures: inside the reduction loop they must be the thread's copies
-    auto capOne = [&v, max_frags](const long i, size_t& n_sp, size_t& n_pk, size_t& n_max)
-    {
-      MSSpectrum& s = v[(size_t)i];
-      n_max = std::max(n_max, (size_t)s.size());
-      if (s.size() > max_frags && !s.getFloatDataArrays().empty())
-      {
-        const auto& k = s.getFloatDataArrays()[0];
-        vector<Size> idx(s.size());
-        for (Size j = 0; j < idx.size(); ++j) idx[j] = j;
-        partial_sort(idx.begin(), idx.begin() + (long)max_frags, idx.end(), [&](Size a, Size b) {
-          if (k[a] != k[b]) return k[a] > k[b];
-          if (s[a].getIntensity() != s[b].getIntensity()) return s[a].getIntensity() > s[b].getIntensity();
-          if (s[a].getMZ() != s[b].getMZ()) return s[a].getMZ() < s[b].getMZ();
-          return a < b;
-        });
-        idx.resize(max_frags);
-        sort(idx.begin(), idx.end());   // the peaks are m/z-sorted: ascending positions keep that order
-        n_pk += s.size() - max_frags; ++n_sp;
-        s.getFloatDataArrays().clear();
-        s.select(idx);
-      }
-      s.getFloatDataArrays().clear();
-    };
-    if (!omp_in_parallel())
-    {
-      std::exception_ptr cap_err;   // [task-err] an exception escaping the region (bad_alloc) would abort without a message
-#pragma omp parallel for schedule(dynamic, 256) reduction(+ : n_sp, n_pk) reduction(max : n_max)
-      for (long i = 0; i < (long)v.size(); ++i) { try { capOne(i, n_sp, n_pk, n_max); } catch (...) { taskErr_(cap_err); } }
-      if (cap_err) std::rethrow_exception(cap_err);
-    }
-    else
-    {
-      // [pipe] the pipelined tile writer: per-slot partial counters, summed here
-      vector<std::array<size_t, 3>> part((size_t)std::max(1, omp_get_num_threads()), std::array<size_t, 3>{0, 0, 0});
-      teamFor_((long)v.size(), 256, [&](long i, int slot) { auto& p = part[(size_t)slot]; capOne(i, p[0], p[1], p[2]); });
-      for (const auto& p : part) { n_sp += p[0]; n_pk += p[1]; n_max = std::max(n_max, p[2]); }
-    }
-    return {n_sp, n_pk, n_max};
-  }
-
+#ifdef _WIN32
+  static constexpr const char* NULL_DEVICE_ = "NUL";   // the encoders' own files: never written, only opened
+#else
+  static constexpr const char* NULL_DEVICE_ = "/dev/null";
+#endif
   /// [tile] Streams spectra to an mzML in BLOCKS: the header once, then every block encoded in
   /// parallel chunks (the tool-side twin of patches/openms-mzml-parallel-write.patch) and appended in
   /// order, the index offsets rebased as each chunk lands. Blocks arrive in the canonical order (a
@@ -2577,11 +2491,6 @@ namespace
   /// produced. With the total known up front (setExpectedSize) the count is written exactly and the
   /// bytes from <spectrumList> on are the bulk writer's; without it a zero-padded placeholder is
   /// overwritten at the end -- same width, so the indexedmzML offsets stay valid.
-#ifdef _WIN32
-  static constexpr const char* NULL_DEVICE_ = "NUL";   // the encoders' own files: never written, only opened
-#else
-  static constexpr const char* NULL_DEVICE_ = "/dev/null";
-#endif
   class TileWriter : public PlainMSDataWritingConsumer
   {
   public:
@@ -2696,7 +2605,7 @@ namespace
     }
     String path_;
     std::streamoff count_off_ = -1;
-    vector<std::unique_ptr<TileWriter>> enc_;   ///< per-thread encoders (never write their /dev/null)
+    vector<std::unique_ptr<TileWriter>> enc_;   ///< per-thread encoders (never write their null device)
   };
 }
 
@@ -2705,7 +2614,7 @@ class TOPPDIAspeXtract : public TOPPBase
 public:
   TOPPDIAspeXtract() :
     // official=false: a standalone tool, absent from ToolHandler's official list (TOPPBase rejects an unregistered official name).
-    TOPPBase("DIAspeXtract", "Builds pseudo-MS/MS spectra from diaPASEF (ion-mobility DIA) data for DDA search engines.", false)
+    TOPPBase("DIAspeXtract", "Builds pseudo-MS/MS spectra from DIA data (diaPASEF, Orbitrap, SWATH) for DDA search engines.", false)
   {
     // Otherwise TOPPBase reports OpenMS's version as ours: version_ feeds the ini and the mzML software entry,
     // verboseVersion_ the --help Version line, which carries both numbers because a bug report needs the OpenMS build too.
@@ -2730,7 +2639,8 @@ protected:
     // a true/false option: a string option restricted to "true" and "false"
     auto regBool = [this](const String& name, const String& def, const String& desc, bool advanced = false)
     { registerStringOption_(name, "<true/false>", def, desc, false, advanced); setValidStrings_(name, {"true", "false"}); };
-    registerInputFile_("in", "<file>", "", "Input diaPASEF run (ion-mobility DIA): a Bruker .d directory, mzML, or mzPeak in a build that supports it.");
+    registerInputFile_("in", "<file>", "", "Input DIA run: a Bruker diaPASEF .d directory, an mzML (with ion mobility, or centroided Orbitrap/SWATH "
+                       "DIA without it, which takes the separate noims path), or mzPeak in a build that supports it.");
 #ifdef DIASPEXTRACT_WITH_MZPEAK
     setValidFormats_("in", {"mzML", "mzpeak", "d"});
 #else
@@ -2747,7 +2657,7 @@ protected:
                               "the extension; an unknown extension gives mzPeak (mzML in a build without mzPeak support).", false);
     setValidStrings_("out_type", {"", "mzpeak", "mzML"});
 
-    registerTOPPSubsection_("gate", "Which fragments join a precursor's spectrum");
+    registerTOPPSubsection_("gate", "Which fragments join a precursor's spectrum (diaPASEF input only)");
     registerDoubleOption_("gate:delta_im", "<1/K0>", 0.01, "Largest ion-mobility (1/K0) difference between a precursor and a fragment. It also sets "
                               "the 1/K0 tolerance of peak picking and tracing; to widen only the fragment match, use gate:fragment_delta_im.", false);
     registerDoubleOption_("gate:delta_rt", "<sec>", 4.0, "Largest apex retention-time difference (seconds) between a precursor and a fragment.", false);
@@ -2756,23 +2666,20 @@ protected:
     registerIntOption_("gate:min_correlation_points", "<n>", 3, "Fewest shared points a fragment's correlation needs. Where gate:shrinkage applies, "
                            "gate:shrink_min_points is used instead.", false, true);
 
-    registerTOPPSubsection_("assembly", "Building the spectra");
+    registerTOPPSubsection_("assembly", "Building the spectra (diaPASEF input only)");
     registerIntOption_("assembly:min_fragments", "<n>", 3, "Write a spectrum only if it has at least this many fragments.", false);
     registerIntOption_("assembly:max_fragments", "<n>", 500, "Keep at most this many fragments per spectrum, best-ranked first. The twin fold can "
-                           "exceed it; assembly:post_fusion_cap applies it again after the fold. At least assembly:min_fragments.", false);
+                           "exceed it. At least assembly:min_fragments.", false);
     registerDoubleOption_("assembly:im_weight_sigma", "<1/K0>", 0.005, "Weight each fragment's intensity by a Gaussian of its 1/K0 distance to the "
                               "precursor (sigma in 1/K0), before the fragment cap. 0 = off.", false);
     registerDoubleOption_("assembly:corr_power", "<k>", 2.0, "Weight each fragment's intensity by corr^k, corr its elution correlation with the precursor. 0 = off.", false);
     registerDoubleOption_("assembly:twin_im_tolerance", "<1/K0>", 0.005, "Fold spectra that claim the same precursor twice (same charge, m/z within "
                               "20 ppm, 1/K0 within this tolerance) into one spectrum with the fragments of both. Negative = off; 0 folds only twins of identical 1/K0.", false);
     registerIntOption_("assembly:twin_rt_frames", "<n>", 0, "Also fold twins whose apexes are up to n + 0.5 MS1 cycles apart and in the same "
-                           "retention-time cell, as assembly:twin_rt_match allows. 0 (default) = auto, from the run's MS1 peak width; -1 = the same MS1 frame only.", false);
-    registerStringOption_("assembly:twin_rt_match", "<mode>", "ext", "Which twins from different MS1 frames fold. 'ext' (default): precursor m/z within "
-                              "0.05 ppm (one flight-time bin), and charge:mono_profile_check v2 moved one of the two monoisotopes; 'bin': any pair "
-                              "within 0.05 ppm; "
-                              "'ppm': within 20 ppm. 'bin' and 'ppm' fold more and are not recommended.", false, true);
+                           "retention-time cell, when their precursor m/z lie within 0.05 ppm (one flight-time bin) and charge:mono_profile_check v2 "
+                           "moved one of the two monoisotopes. 0 (default) = auto, from the run's MS1 peak width; -1 = the same MS1 frame only.", false);
 
-    registerTOPPSubsection_("trace", "Mass-trace detection");
+    registerTOPPSubsection_("trace", "Mass-trace detection (diaPASEF input only)");
     registerDoubleOption_("trace:mass_error_ppm", "<ppm>", 15.0, "m/z tolerance (ppm) of mass-trace detection.", false);
     registerDoubleOption_("trace:noise_threshold_int", "<int>", 100.0, "MS1 (precursor) noise level: peaks at or below it are not traced.", false);
     registerDoubleOption_("trace:ms2_noise_threshold_int", "<int>", 10.0, "MS2 (fragment) noise level: peaks at or below it are not traced.", false);
@@ -2784,7 +2691,7 @@ protected:
     registerDoubleOption_("trace:ms2_chrom_peak_snr", "<x>", 1.0, "A fragment trace's apex must exceed this times trace:ms2_noise_threshold_int. "
                               "Lower it to keep weaker fragments.", false);
     registerDoubleOption_("trace:ms2_min_length_sec", "<sec>", 0.0, "Shortest fragment trace kept (seconds). 0 = no filter.", false);
-    registerTOPPSubsection_("tile", "Retention-time cells and tiles");   // registered, or --helphelp throws ElementNotFound
+    registerTOPPSubsection_("tile", "Retention-time cells and tiles (diaPASEF input only)");   // registered, or --helphelp throws ElementNotFound
     registerDoubleOption_("tile:rt_sec", "<sec>", 600.0, "Width (seconds) of the fixed retention-time cells the integer detector traces in; a trace "
                               "that crosses a cell edge is cut there. 0 or negative = the whole run as one cell. Changes the output.", false, true);
     registerIntOption_("tile:cells_per_tile", "<n>", 1, "Process the run in tiles of this many retention-time cells to bound memory; fewer cells per "
@@ -2813,9 +2720,9 @@ protected:
                           "Read the input frame by frame (Bruker .d, or mzPeak in a build that supports it; mzML is always read whole). false loads "
                           "the whole run first: much more memory and a longer run. Changes the output.");
     registerIntOption_("trace:native_ms1_neighbors", "<n>", 0, "Add n neighbouring MS1 frames on each side to every MS1 frame before peak picking "
-                           "(Bruker .d with perf:stream_load true). 0 = off. Needs -dnoise:ms1 false.", false);
+                           "(Bruker .d with perf:stream_load true). 0 = off. Needs -dnoise:ms1 false.", false, true);
 
-    registerTOPPSubsection_("perf", "Speed and memory (the output does not change unless an option says so)");
+    registerTOPPSubsection_("perf", "Speed and memory, diaPASEF input only (the output does not change unless an option says so)");
     registerStringOption_("gate:short_traces", "<mode>", "concentric", "Fragment traces too short for a correlation: 'concentric' (default) keeps one "
                               "whose retention-time span lies inside the precursor's (one frame of slack) and is centred on it; 'off' drops them. Applies to the "
                               "precursors gate:adaptive selects.", false, true);
@@ -2827,33 +2734,11 @@ protected:
     setMinInt_("gate:short_min_points", 1);
     registerDoubleOption_("gate:fragment_delta_im", "<1/K0>", -1.0, "Largest precursor-fragment 1/K0 difference for the fragment match only, leaving "
                               "the tracing tolerance unchanged. Negative (default) = gate:delta_im. Experimental.", false, true);
-    regBool("gate:anchor_rescue", "false", "Rescue weak fragments of well-sampled precursors: when at least gate:anchor_min_count fragments pass with "
-                "a correlation of gate:anchor_min_corr or more, a rejected fragment joins if it correlates with their summed profile by "
-                "gate:anchor_rescue_corr or more. At most gate:anchor_max_rescued per spectrum. Experimental.", true);
-    registerIntOption_("gate:anchor_min_count", "<n>", 3, "gate:anchor_rescue: fewest anchor fragments a precursor needs.", false, true);
-    setMinInt_("gate:anchor_min_count", 1);
-    registerDoubleOption_("gate:anchor_min_corr", "<r>", 0.8, "gate:anchor_rescue: least correlation of an anchor fragment; also the highest score a rescued fragment gets.", false, true);
-    setMinFloat_("gate:anchor_min_corr", 0.0);
-    setMaxFloat_("gate:anchor_min_corr", 1.0);
-    registerDoubleOption_("gate:anchor_rescue_corr", "<r>", 0.7, "gate:anchor_rescue: least correlation of a rejected fragment with the anchors' summed profile.", false, true);
-    setMinFloat_("gate:anchor_rescue_corr", 0.0);
-    setMaxFloat_("gate:anchor_rescue_corr", 1.0);
-    registerIntOption_("gate:anchor_max_rescued", "<n>", 50, "gate:anchor_rescue: most rescued fragments per spectrum, best first.", false, true);
-    setMinInt_("gate:anchor_max_rescued", 0);
     registerDoubleOption_("trace:im_slice_merge", "<1/K0>", 0.015, "Integer detector: before tracing, merge a frame's fragment peaks in one "
                               "flight-time bin whose 1/K0 values lie within this distance, so one ion does not become several traces. Negative = off.", false, true);
     setMaxFloat_("trace:im_slice_merge", 1.0);   // 1/K0 units: anything wider than the mobility axis is a typo
     regBool("assembly:merge_same_bin", "true", "Merge a spectrum's fragments at the same m/z (one flight-time bin) into one peak before the fragment "
                 "cap. Two peaks at one m/z break the fragment matching of OpenMS-based search engines.", true);
-    regBool("assembly:post_fusion_cap", "false", "Apply assembly:max_fragments again after the twin fold. Experimental.", true);
-    registerStringOption_("assembly:frag_intensity", "<mode>", "apex", "Fragment intensity written to the spectrum: 'apex' (default) the trace's "
-                              "maximum; 'core' its sum over assembly:frag_core_frames frames centred on the precursor's apex; 'sum' its sum over the "
-                              "precursor's retention-time span. A fragment with no signal in those frames takes its point nearest the precursor's apex. "
-                              "Experimental.", false, true);
-    setValidStrings_("assembly:frag_intensity", {"apex", "core", "sum"});
-    registerIntOption_("assembly:frag_core_frames", "<n>", 3, "assembly:frag_intensity core: number of frames (odd) centred on the precursor's apex.", false, true);
-    setMinInt_("assembly:frag_core_frames", 1);
-    setMaxInt_("assembly:frag_core_frames", 15);
     registerDoubleOption_("assembly:foreign_precursor_weight", "<w>", 0.0, "Multiply fragments that lie on the isotope envelope of another precursor "
                               "isolated in the same window by this weight. 0 (default) removes them; 1 = off. The precursor's own "
                               "envelope is never touched.", false, false);
@@ -2895,6 +2780,7 @@ protected:
     setValidStrings_("gate:colocation", {"off", "ranges"});
     registerDoubleOption_("gate:colocation_overlap", "<frac>", 0.3, "gate:colocation ranges: least overlap of the two spans, as a fraction of the shorter one.", false, true);
     setMinFloat_("gate:colocation_overlap", 0.0);
+    setMaxFloat_("gate:colocation_overlap", 1.0);
     registerStringOption_("gate:shrinkage", "<mode>", "fisher", "'fisher' (default): pull the correlation of a fragment with few shared points toward "
                               "a prior (gate:shrink_prior_r, gate:shrink_prior_sd) before the gate:min_correlation test, instead of requiring "
                               "gate:min_correlation_points points. 'off' uses the plain point count. At the defaults a fragment with at most 4 shared "
@@ -2912,7 +2798,7 @@ protected:
                            "the window count gives. Changes the output. 1 = off; 0 = auto (the output then depends on the thread count; the integer "
                            "detector refuses it with tile:rt_sec > 0 or a streamed .d).", false);
     registerDoubleOption_("perf:mem_fraction", "<f>", 0.75, "Fraction of free memory the window loop may use, re-checked for every window: MemAvailable, "
-                              "or the headroom under a cgroup limit when lower. Linux only; elsewhere windows run one at a time. One window always runs, however large.", false);
+                              "or the headroom under a cgroup limit when lower. Linux and Windows; on macOS windows run one at a time. One window always runs, however large.", false);
     registerIntOption_("perf:max_concurrent_windows", "<n>", 0, "Most isolation windows processed at once; fewer use less memory but take longer. 0 = "
                            "no cap (free memory still limits them).", false);
 
@@ -2920,11 +2806,11 @@ protected:
     registerStringOption_("diag:dump_ms1_tsv", "<prefix>", "", "Write the MS1 traces and the precursors inferred from them to <prefix>.traces.tsv and "
                               "<prefix>.precursors.tsv, to see where a precursor was lost. Empty = off.", false, true);
 
-    registerIntOption_("max_charge", "<n>", 5, "Highest precursor charge considered.", false);
+    registerIntOption_("max_charge", "<n>", 5, "Highest precursor charge considered (diaPASEF input only).", false);
 
     // NOTE: the subsection MUST be registered or printUsage_() throws ElementNotFound — which turns
     // any user parameter typo into a FATAL crash instead of a usage message.
-    registerTOPPSubsection_("charge", "Isotopes, charge and monoisotope");
+    registerTOPPSubsection_("charge", "Isotopes, charge and monoisotope (diaPASEF input only)");
     registerIntOption_("charge:min_charge", "<n>", 1, "Lowest precursor charge written. Default 1: singly charged precursors are real 1+ ions but "
                            "carry a higher FDR, so control FDR per charge downstream. 2 writes only 2+ and higher, the same spectra as at 1.", false);
     regBool("charge:im_charge_veto", "true", "Use ion mobility to correct charge calls: a 1+ call on the run's 2+ mobility trend is re-called 2+, one "
@@ -2949,24 +2835,8 @@ protected:
     regBool("dnoise:ms1", "true",
                           "Denoise every MS1 frame before peak picking, with a port of dnoise v0.1.0 (Garrett, Diedrich & Yates III, bioRxiv "
                           "2026.08.27.747603). Bruker .d input only; other inputs pass through. Lowers peak memory; false turns it off.");
-    registerIntOption_("dnoise:mz_half_width", "<bins>", 3, "Streak filter: flight-time bins on each side of a point summed per scan (dnoise --mz-half-width).", false, true);
-    registerIntOption_("dnoise:min_feature_length", "<scans>", 5, "Streak filter: occupied scans a streak needs (dnoise --min-feature-length).", false, true);
-    registerIntOption_("dnoise:max_internal_gap", "<scans>", 2, "Streak filter: empty scans a streak may bridge (dnoise --max-internal-gap).", false, true);
-    registerIntOption_("dnoise:iterations", "<n>", 2, "Streak filter passes; 0 skips the streak filter (dnoise --iterations).", false, true);
-    registerIntOption_("dnoise:min_window_intensity", "<counts>", 0, "Streak filter: raw intensity a scan needs to count as occupied (dnoise --min-window-intensity).", false, true);
-    registerIntOption_("dnoise:min_feature_intensity", "<counts>", 0, "Streak filter: raw intensity a streak needs in total (dnoise --min-feature-intensity).", false, true);
-    regBool("dnoise:halo", "true", "Halo filter: keep a point only if it reaches dnoise:halo_peak_fraction of the strongest nearby point (false = dnoise --no-halo).", true);
-    registerDoubleOption_("dnoise:halo_peak_fraction", "<f>", 0.15, "Halo filter: the fraction (dnoise --halo-peak-fraction).", false, true);
-    registerIntOption_("dnoise:halo_mz_idx_half_width", "<bins>", 80, "Halo filter: box half-width in flight-time bins (dnoise --halo-mz-idx-half-width).", false, true);
-    registerIntOption_("dnoise:halo_scan_half_width", "<scans>", 2, "Halo filter: box half-width in scans (dnoise --halo-scan-half-width).", false, true);
-    regBool("dnoise:dia_ms1_window", "true", "Keep only MS1 points inside one of the run's diaPASEF isolation windows, padded (false = dnoise --no-dia-ms1-window).", true);
-    registerDoubleOption_("dnoise:dia_ms1_mz_pad", "<Th>", 5.0, "Isolation-window filter: m/z added on both sides of each window (dnoise --dia-ms1-mz-pad).", false, true);
-    registerDoubleOption_("dnoise:dia_ms1_im_pad", "<1/K0>", 0.05, "Isolation-window filter: 1/K0 added on both sides of each window (dnoise --dia-ms1-im-pad).", false, true);
 
-    registerTOPPSubsection_("noims", "Input without ion mobility (Orbitrap, SWATH): a separate extraction path");
-    registerStringOption_("noims:path", "<auto/off>", "auto", "auto: input without ion mobility goes to the separate non-IMS path "
-                          "(prototype); off: refuse such input, as 1.7.x did. Input with ion mobility never uses it.", false, true);
-    setValidStrings_("noims:path", {"auto", "off"});
+    registerTOPPSubsection_("noims", "Input without ion mobility (Orbitrap, SWATH): a separate extraction path; the other sections do not apply to it");
     registerDoubleOption_("noims:min_corr", "<r>", 0.3, "Non-IMS path: minimum fragment-precursor profile correlation.", false, true);
     setMinFloat_("noims:min_corr", 0.0);
     setMaxFloat_("noims:min_corr", 1.0);
@@ -2979,8 +2849,10 @@ protected:
     setMinInt_("assembly:max_fragments", 1);
     setMinFloat_("assembly:twin_im_tolerance", -1.0);   // any negative value = off
     setMinInt_("assembly:twin_rt_frames", -1);          // -1 = off (same frame), 0 = auto
-    setValidStrings_("assembly:twin_rt_match", {"ext", "bin", "ppm"});
     setMinInt_("max_charge", 1);
+    setMinInt_("charge:min_charge", 1);
+    setMinFloat_("trace:mass_error_ppm", 0.0);
+    setMinFloat_("noims:ppm", 0.0);
     setMinInt_("perf:trace_bands", 0);      // 0 = auto (documented)
     setMinFloat_("gate:delta_im", 0.0);
     setMinFloat_("gate:delta_rt", 0.0);
@@ -2998,11 +2870,6 @@ protected:
     setMinInt_("perf:ms1_trace_bands", 0);      // 0 is read as 1 (off): MS1 has no auto
     setMinFloat_("perf:mem_fraction", 0.05);
     setMaxFloat_("perf:mem_fraction", 0.95);
-    // [dnoise] dnoise's fields are unsigned, and a negative fraction or pad is not one
-    for (const char* o : {"dnoise:mz_half_width", "dnoise:min_feature_length", "dnoise:max_internal_gap", "dnoise:iterations",
-                          "dnoise:min_window_intensity", "dnoise:min_feature_intensity", "dnoise:halo_mz_idx_half_width", "dnoise:halo_scan_half_width"})
-      setMinInt_(o, 0);
-    for (const char* o : {"dnoise:halo_peak_fraction", "dnoise:dia_ms1_mz_pad", "dnoise:dia_ms1_im_pad"}) setMinFloat_(o, 0.0);
   }
 
   /// IM-aware MassTraceDetection (banded) + valley splitting on @p map. The apex gate is snr * noise
@@ -3827,11 +3694,10 @@ protected:
   /// precursor's own envelope (mono to M+3) neither counts nor is touched. Two matched positions are weak evidence for a 1+
   /// (or same-charge) fragment and its own isotope, which line up with a co-isolated envelope of that charge as soon as one
   /// does (open). Returns the fragments
-  /// attenuated. @p resc: gate:anchor_rescue's rescued flags, @p frag_kq: the [fuse] key factors; each parallel to @p frags
-  /// when not empty, compacted with it.
+  /// attenuated. @p frag_kq: the [fuse] key factors, parallel to @p frags when not empty, compacted with it.
   size_t attenuateForeign_(const Precursor_& pc, double drt, const ForeignIdx_& fx, vector<pair<double, double>>& frags,
                            vector<double>& frag_scores, vector<uint32_t>& frag_bin, vector<pair<int, int>>& frag_span,
-                           vector<double>& frag_ai, vector<double>& frag_kq, vector<char>& resc) const
+                           vector<double>& frag_ai, vector<double>& frag_kq) const
   {
     // The two own-ion tests take a wider tolerance than the envelope match: an ion's residual peaks scatter tens of
     // ppm around the MS1 mono grid, so at foreign_ppm_ the same ion called again with a mono just outside the sibling
@@ -3902,12 +3768,10 @@ protected:
         {
           frags[w] = frags[i]; frag_scores[w] = frag_scores[i]; frag_bin[w] = frag_bin[i]; frag_span[w] = frag_span[i]; frag_ai[w] = frag_ai[i];
           if (!frag_kq.empty()) frag_kq[w] = frag_kq[i];
-          if (!resc.empty()) resc[w] = resc[i];
           ++w;
         }
       frags.resize(w); frag_scores.resize(w); frag_bin.resize(w); frag_span.resize(w); frag_ai.resize(w);
       if (!frag_kq.empty()) frag_kq.resize(w);
-      if (!resc.empty()) resc.resize(w);
     }
     cnt[1] += n_env; cnt[3] += (long long)n;
     if (n) ++cnt[2];
@@ -3918,14 +3782,14 @@ protected:
   /// that spans 4-7, so one ion becomes several traces and several peaks 5-20 ppm apart; the same-bin merge reaches only
   /// exact bins. Groups the fragments within @p ppm (anchored: strongest first, each unfused fragment an anchor taking
   /// every unfused one within ppm of its own m/z). A fused peak: m/z = intensity-weighted mean of the members' (emitted) intensities,
-  /// intensity = their sum, rescued flag = the strongest member's, key = the best-keyed member's factor @p kq (its score
+  /// intensity = their sum, key = the best-keyed member's factor @p kq (its score
   /// and shared frames) times ln(1 + the summed IM-weighted apex @p ai), the formula
   /// of an unfused fragment's key applied to the whole ion; it is never below the best member's key (non-negative keys, up to rounding). It sits at its
   /// members' lowest index, so the relative order of the peaks is kept; a lone fragment is kept bit for bit. @p keys and
-  /// @p resc (when not empty) are parallel to @p frags and compacted with it; @p ai and @p kq are parallel to it on entry
+  /// are parallel to @p frags and compacted with it; @p ai and @p kq are parallel to it on entry
   /// and stale on return. Deterministic: every order has a total tie-break and the sums run in m/z order. Returns the
   /// groups of >= 2 fused and adds their members to @p n_members.
-  static long long fuseFragments_(vector<pair<double, double>>& frags, vector<double>& keys, vector<char>& resc,
+  static long long fuseFragments_(vector<pair<double, double>>& frags, vector<double>& keys,
                                   const vector<double>& ai, const vector<double>& kq,
                                   double ppm, long long& n_members)
   {
@@ -3971,19 +3835,16 @@ protected:
     {
       const Acc& g = acc[grp[i]];
       if (g.head != i) continue;
-      if (g.n == 1) { frags[w] = frags[i]; keys[w] = keys[i]; if (!resc.empty()) resc[w] = resc[i]; }
+      if (g.n == 1) { frags[w] = frags[i]; keys[w] = keys[i]; }
       else
       {
         const double mz = g.w > 0.0 ? g.wmz / g.w : frags[g.top].first;
-        const char r = resc.empty() ? 0 : resc[g.top];
         frags[w] = {mz, g.w}; keys[w] = kq[g.best] * pmath::log1p(g.ai);
-        if (!resc.empty()) resc[w] = r;
         ++groups; n_members += g.n;
       }
       ++w;
     }
     frags.resize(w); keys.resize(w);
-    if (!resc.empty()) resc.resize(w);
     return groups;
   }
 
@@ -4034,34 +3895,6 @@ protected:
     // [recall] assembly:im_weight_sigma: a Gaussian of the fragment's 1/K0 distance @p dim to the precursor
     auto imWeigh = [this](double& x, double dim) {
       if (im_weight_sigma_ > 0.0) x *= pmath::exp(-(dim * dim) / (2.0 * im_weight_sigma_ * im_weight_sigma_)); };
-    // [fragint] the frames a fragment's amplitude is summed over: core, the K frames centred on the precursor apex
-    // (ties to the earlier frame); sum, the precursor's span with its gaps: a faint MS1 trace has missing points and the
-    // concentric gate keeps fragments with no point where pdense != 0
-    int fint_apex = -1, fint_lo = 0, fint_hi = -1;
-    long long n_fint = 0, n_fint_fb = 0;
-    if (frag_int_ != 0)
-    {
-      for (int gi : touched) if (fint_apex < 0 || pdense[gi] > pdense[fint_apex] || (pdense[gi] == pdense[fint_apex] && gi < fint_apex)) fint_apex = gi;
-      fint_lo = frag_int_ == 1 ? fint_apex - frag_core_half_ : p_lo;
-      fint_hi = frag_int_ == 1 ? fint_apex + frag_core_half_ : p_hi;
-    }
-    auto fintAmp = [&](const Trace& f, double dim)                     // [fragint] a gate-passing or rescued fragment's amplitude
-    {
-      const int f0 = (int)f.frame0, f1 = f0 + (int)f.span() - 1;
-      double b = 0.0;                                                  // the same frames for every fragment of this precursor
-      for (int g = std::max(fint_lo, f0); g <= std::min(fint_hi, f1); ++g) b += xv(wst, f, (size_t)(g - f0));
-      if (!(b > 0.0))                                                  // no point there: the point nearest the precursor apex (ties earlier),
-      {                                                                // so the peak set stays the apex mode's and no peak is written at 0
-        int kb = -1;
-        for (int k = 0; k < (int)f.span(); ++k)
-          if (real(wst, f, (size_t)k) && (kb < 0 || std::abs(f0 + k - fint_apex) < std::abs(f0 + kb - fint_apex))) kb = k;
-        if (kb >= 0) b = xv(wst, f, (size_t)kb);
-        ++n_fint_fb;
-      }
-      imWeigh(b, dim);
-      ++n_fint;
-      return b;
-    };
     // [adaptive] with gate:adaptive faint, the relaxed modes apply only to faint precursors (short precursor traces)
     const bool faint = adaptive_ && (int)touched.size() <= faint_frames_, all_p = !adaptive_ || faint;
     const size_t n_touched = touched.size();                            // [diag] spectrum_meta, after pdense is reset
@@ -4071,13 +3904,6 @@ protected:
     const double p_ctr = 0.5 * (p_lo + p_hi), p_half = 0.5 * (p_hi - p_lo);
     double pmean = psum / G, pvar = psumsq - G * pmean * pmean;
     double pinv = pvar > 0 ? 1.0 / sqrt(pvar) : 0.0;
-    // [anchor] gate:anchor_rescue, well-sampled precursors (signal in more than gate:faint_max_frames window frames, the
-    // faint test of gate:adaptive, whatever that mode is set to): the accepted fragments that can anchor a consensus, and
-    // the ones the gate rejected only for support (point or overlap floor) or by the correlation cut, with at least 2 points
-    const bool g_anchor = anchor_rescue_ && (int)touched.size() > faint_frames_;
-    vector<uint32_t> anchors;
-    vector<size_t> cands;                                               // cands: index << 2 | rejection (0 points, 1 overlap, 2 corr)
-    vector<char> resc;                                                  // [anchor] 1 = rescued, parallel to frags (empty: none)
     if (pinv > 0.0)
     {
       size_t lo = lower_bound(frag_im.begin(), frag_im.end(), pc.im - delta_im) - frag_im.begin();
@@ -4097,8 +3923,7 @@ protected:
         // min_corr_pts can never pass the overlap guard below: skip it before the dot product.
         // Output-identical by construction (the guard's continue is the only thing it would reach).
         const bool short_np = f.np() < (size_t)std::max(min_corr_pts, 0);
-        if (short_np && !g_conc && !(g_shrink && (int)f.np() >= shrink_min_pts_))
-        { if (g_anchor && f.np() >= 2) cands.push_back(fi << 2); continue; }
+        if (short_np && !g_conc && !(g_shrink && (int)f.np() >= shrink_min_pts_)) continue;
         int f_lo = -1, f_hi = -1, f_apex = -1;                         // [short]/[coloc] the fragment's detected span and apex
         float f_max = 0.0f;
         // two sequential streams: the fragment's span in the arena and pdense over window frames
@@ -4131,8 +3956,7 @@ protected:
         }
         else
         {
-          if (overlap < (g_shrink ? shrink_min_pts_ : min_corr_pts))    // overlap guard; [shrink] its own floor
-          { if (g_anchor && f.np() >= 2) cands.push_back(fi << 2 | 1u); continue; }
+          if (overlap < (g_shrink ? shrink_min_pts_ : min_corr_pts)) continue;   // overlap guard; [shrink] its own floor
           c = (dot - G * pmean * fg.mean[fi]) * pinv * fg.invnorm[fi]; // Pearson over the full RT grid
           c_raw = c;
           if (g_shrink)                                                  // [shrink] Fisher-z posterior mean
@@ -4141,15 +3965,13 @@ protected:
             const double t2 = shrink_sd_ * shrink_sd_, mu = pmath::atanh(std::max(-0.999, std::min(0.999, shrink_r0_)));
             c = pmath::tanh((z / s2 + mu / t2) / (1.0 / s2 + 1.0 / t2));
           }
-          if (!(c >= min_corr))                                          // correlation gate (a NaN score is rejected too)
-          { if (g_anchor && f.np() >= 2) cands.push_back(fi << 2 | 2u); continue; }
+          if (!(c >= min_corr)) continue;                                // correlation gate (a NaN score is rejected too)
         }
         // The IM weight feeds both the cap key and the emitted intensity; corr^corr_power feeds only the emitted one.
         double inten = intensityOf(wst, f);
         const double dim = frag_im[fi] - pc.im;
         imWeigh(inten, dim);
         double emit_inten = inten;
-        if (frag_int_ != 0) emit_inten = fintAmp(f, dim);               // [fragint] base amplitude summed over frames; the cap key keeps the apex
         if (g_cp > 0.0 && c > 0.0) emit_inten *= pmath::pow(c, g_cp);
         frags.emplace_back(exportMz_(f.tof, bOf(wst, f), f.mz), emit_inten);
         frag_bin.push_back(f.tof);
@@ -4158,110 +3980,12 @@ protected:
         frag_scores.push_back(std::max(c_raw, 0.0) * pmath::log1p(inten) * (1.0 + overlap));   // [cap] the max_fragments ranking key
         if (fuse_on)                                                   // [fuse] the same key without its intensity term
           frag_kq.push_back(std::max(c_raw, 0.0) * (1.0 + overlap));
-        if (g_anchor && c >= anchor_min_corr_) anchors.push_back((uint32_t)fi);   // [anchor] a well-correlated accepted fragment
-      }
-      // [anchor] gate:anchor_rescue. A weak fragment of a strong precursor is a 2-3 point tip that fails the plain gate's
-      // point floor or its full-grid Pearson, while the precursor's well-correlated fragments (the anchors) outline the
-      // elution peak. Their profiles, each at unit maximum, are summed into a consensus over the window frames; a candidate
-      // joins when its apex is within one cycle of the consensus apex and its own points follow the consensus (local
-      // Pearson; with two points: both in the core, >= half the consensus maximum, and in its direction, scored at the
-      // threshold like a borderline fragment). The score, capped at anchor_min_corr, weighs it like any other fragment, and
-      // its cap key counts the frames it shares with the precursor, as every other fragment's does.
-      // Deterministic: anchors and candidates come in index order, the budget sorts by (score, m/z, index).
-      if (g_anchor)
-      {
-        auto& ac = anchorCount_();
-        ++ac[0];
-        if ((int)anchors.size() >= anchor_min_count_)
-        {
-          ++ac[1]; ac[2] += (long long)cands.size();
-          int c_lo = std::numeric_limits<int>::max(), c_hi = -1;
-          for (uint32_t ai : anchors)
-          { const Trace& a = frag_traces[ai]; c_lo = std::min(c_lo, (int)a.frame0); c_hi = std::max(c_hi, (int)(a.frame0 + a.span()) - 1); }
-          vector<double> cons((size_t)(c_hi - c_lo + 1), 0.0);
-          for (uint32_t ai : anchors)
-          {
-            const Trace& a = frag_traces[ai];
-            float amax = 0.0f;
-            for (size_t k = 0; k < a.span(); ++k) amax = std::max(amax, xv(wst, a, k));
-            if (!(amax > 0.0f)) continue;
-            for (size_t k = 0; k < a.span(); ++k) cons[a.frame0 + k - (size_t)c_lo] += (double)xv(wst, a, k) / amax;
-          }
-          size_t ca = 0;
-          for (size_t j = 1; j < cons.size(); ++j) if (cons[j] > cons[ca]) ca = j;   // the consensus apex (first maximum)
-          const int c_apex = c_lo + (int)ca;
-          const double core = 0.5 * cons[ca];
-          struct Resc { double r, mz; uint32_t fi; int why, ov, t_lo, t_hi; };
-          vector<Resc> rs;
-          for (size_t cw : cands)
-          {
-            const uint32_t fi = (uint32_t)(cw >> 2);
-            const Trace& f = frag_traces[fi];
-            if (std::abs((int)(f.frame0 + f.apex) - c_apex) > 1) continue;   // the raw apex, within one cycle
-            // sums shifted by the first point, so a constant profile has exactly zero variance
-            double sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, x0 = 0, y0 = 0, dx1 = 0, dy1 = 0;
-            int n = 0, ov = 0, t_lo = -1, t_hi = -1;
-            bool in_core = true;
-            for (size_t k = 0; k < f.span(); ++k)
-            {
-              const double x = xv(wst, f, k); if (x <= 0.0) continue;
-              const int g = (int)(f.frame0 + k);
-              const double y = g < c_lo || g > c_hi ? 0.0 : cons[(size_t)(g - c_lo)];
-              if (t_lo < 0) { t_lo = g; x0 = x; y0 = y; }
-              t_hi = g;
-              if (pdense[g] != 0.0f) ++ov;                               // shared with the precursor (pdense is still live)
-              if (y < core) in_core = false;
-              const double dx = x - x0, dy = y - y0;
-              if (n == 1) { dx1 = dx; dy1 = dy; }
-              sx += dx; sy += dy; sxx += dx * dx; syy += dy * dy; sxy += dx * dy; ++n;
-            }
-            double r = -1.0;
-            if (n == 2) { if (in_core && dx1 * dy1 > 0.0) r = anchor_rescue_corr_; }
-            else if (n > 2)
-            {
-              const double vx = sxx - sx * sx / n, vy = syy - sy * sy / n;
-              if (vx > 0.0 && vy > 0.0) r = (sxy - sx * sy / n) / std::sqrt(vx * vy);
-            }
-            if (!(r >= anchor_rescue_corr_)) continue;
-            rs.push_back({r, exportMz_(f.tof, bOf(wst, f), f.mz), fi, (int)(cw & 3), ov, t_lo, t_hi});
-          }
-          std::sort(rs.begin(), rs.end(), [](const Resc& a, const Resc& b) {
-            if (a.r != b.r) return a.r > b.r;
-            if (a.mz != b.mz) return a.mz < b.mz;
-            return a.fi < b.fi;
-          });
-          const size_t nk = std::min(rs.size(), (size_t)anchor_max_rescued_);
-          ac[4] += (long long)(rs.size() - nk);
-          if (nk) { ac[3] += (long long)nk; ++ac[5]; resc.assign(frags.size(), 0); }
-          long long n_why[3] = {0, 0, 0};
-          for (size_t j = 0; j < nk; ++j)
-          {
-            const Resc& q = rs[j];
-            const Trace& f = frag_traces[q.fi];
-            const double c = std::min(q.r, anchor_min_corr_);
-            double inten = intensityOf(wst, f);                          // as above: IM weight, then c^corr_power
-            const double dim = frag_im[q.fi] - pc.im;
-            imWeigh(inten, dim);
-            double emit_inten = frag_int_ != 0 ? fintAmp(f, dim) : inten;  // [fragint] the same amplitude as a gate-passing fragment
-            if (g_cp > 0.0 && c > 0.0) emit_inten *= pmath::pow(c, g_cp);
-            frags.emplace_back(q.mz, emit_inten);
-            frag_bin.push_back(f.tof);
-            frag_span.emplace_back(q.t_lo, q.t_hi);
-            if (fx || fuse_on) frag_ai.push_back(inten);                 // [foreign]/[fuse] parallel to frags, as above
-            frag_scores.push_back(c * pmath::log1p(inten) * (1.0 + q.ov));
-            if (fuse_on) frag_kq.push_back(c * (1.0 + q.ov));
-            resc.push_back(1);
-            ++n_why[q.why];
-          }
-          for (int w = 0; w < 3; ++w) if (n_why[w]) ac[8 + w] += n_why[w];
-        }
       }
     }
-    if (n_fint) { fragIntCount_()[0] += n_fint; fragIntCount_()[1] += n_fint_fb; }   // [fragint] once per precursor x window
     for (int gi : touched) pdense[gi] = 0.0f;                          // reset scratch
     // [foreign] other precursors' residual envelopes, before the merge and the cap: a removed fragment frees its slot
     const size_t n_before = frags.size();                              // [foreign] for the fell-below count
-    const size_t n_foreign = fx && !frags.empty() ? attenuateForeign_(pc, g_drt, *fx, frags, frag_scores, frag_bin, frag_span, frag_ai, frag_kq, resc) : 0;
+    const size_t n_foreign = fx && !frags.empty() ? attenuateForeign_(pc, g_drt, *fx, frags, frag_scores, frag_bin, frag_span, frag_ai, frag_kq) : 0;
     // [merge] guard: one TOF bin is one m/z. What toTof's same-frame merge cannot reach (slices beyond its span, valley-
     // split children, band edges, tile carries) is merged here, before the cap, into the strongest member: members whose
     // RT span overlaps its span are summed (parallel slices of one ion), RT-disjoint pieces are dropped (the stronger
@@ -4301,7 +4025,6 @@ protected:
           }
           frags[head] = {frags[top].first, sum}; frag_scores[head] = cap;
           if (fuse_on) { frag_ai[head] = asum; frag_kq[head] = frag_kq[kb]; }   // [fuse] the summed apex, the key's member's factor
-          if (!resc.empty()) resc[head] = resc[top];                    // [anchor] rescued if its m/z is a rescued one's
           nm += (long long)(e - g - 1);
         }
         g = e;
@@ -4314,12 +4037,10 @@ protected:
           {
             frags[w] = frags[i]; frag_scores[w] = frag_scores[i];
             if (fuse_on) { frag_ai[w] = frag_ai[i]; frag_kq[w] = frag_kq[i]; }
-            if (!resc.empty()) resc[w] = resc[i];
             ++w;
           }
         frags.resize(w); frag_scores.resize(w);
         if (fuse_on) { frag_ai.resize(w); frag_kq.resize(w); }
-        if (!resc.empty()) resc.resize(w);
         mergeCount_()[2] += nm;
       }
     }
@@ -4330,7 +4051,7 @@ protected:
     if (fuse_on && n_merged > 0)
     {
       long long n_mem = 0;
-      const long long n_grp = fuseFragments_(frags, frag_scores, resc, frag_ai, frag_kq, fuse_ppm_, n_mem);
+      const long long n_grp = fuseFragments_(frags, frag_scores, frag_ai, frag_kq, fuse_ppm_, n_mem);
       auto& fc = fuseCount_();
       ++fc[0]; fc[1] += (long long)n_merged; fc[2] += (long long)frags.size();
       if (n_grp) { fc[3] += n_grp; fc[4] += n_mem; }
@@ -4341,8 +4062,6 @@ protected:
       if (n_foreign && foreign_w_ <= 0.0 && n_before >= min_frags && n_merged < min_frags) ++foreignCount_()[5];
       return;
     }
-    long long n_resc = 0;                                               // [anchor] rescued peaks in this spectrum
-    for (char r : resc) n_resc += r;
     if (frags.size() > max_frags)
     {
       vector<size_t> idx(frags.size());
@@ -4357,29 +4076,14 @@ protected:
       });
       vector<pair<double, double>> keep; keep.reserve(max_frags);
       for (size_t i = 0; i < max_frags; ++i) keep.push_back(frags[idx[i]]);
-      if (!resc.empty()) { n_resc = 0; for (size_t i = 0; i < max_frags; ++i) n_resc += resc[idx[i]]; }
       frags.swap(keep);
-      if (post_fusion_cap_)                                            // [recap] the kept peaks' keys, in the same order
-      {
-        vector<double> keep_k(max_frags);
-        for (size_t i = 0; i < max_frags; ++i) keep_k[i] = frag_scores[idx[i]];
-        frag_scores.swap(keep_k);
-      }
     }
-    if (n_resc) { anchorCount_()[6] += n_resc; ++anchorCount_()[7]; }
     out.setMSLevel(2);
     out.setType(SpectrumSettings::SpectrumType::CENTROID);
     out.setRT(pc.rt);
     // [mem] exact reserve: no doubling slack held from emit until the write.
     out.reserve(frags.size());
     for (const auto& fr : frags) out.emplace_back(fr.first, fr.second);
-    if (post_fusion_cap_)   // [recap] each peak's cap key rides along as a float data array (sorted with the peaks), dropped before the write
-    {
-      OpenMS::DataArrays::FloatDataArray k;
-      k.setName("spx_cap_key");
-      k.assign(frag_scores.begin(), frag_scores.end());
-      out.getFloatDataArrays().push_back(std::move(k));
-    }
     out.sortByPosition();
     OpenMS::Precursor prec;
     prec.setMZ(pc.mono_mz);   // MS1 traces come from the OpenMS detector: no bin to calibrate
@@ -4502,9 +4206,11 @@ protected:
     chk(pair_folds(sp(10.0, 500.001, 2, 1.004, 2, P)), "1/K0 inside the tolerance: folded");
     chk(!pair_folds(sp(11.1, 500.0, 2, 1.0, 2, P)), "the next MS1 frame: untouched");
     // [twin-rt] the near-frame relation (assembly:twin_rt_frames): |dRT| <= rt_tol, inside one RT cell
-    { auto nearFold = [&](double rt_b, double tol, const vector<double>* cells, std::array<size_t, 3>* st = nullptr) {
-        vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(rt_b, 500.001, 2, 1.0, 3, P)};
-        return mergeTwins_(v, 0.005, false, tol, cells, 3.0, st) == 1 && v.size() == 1; };
+    // across frames a pair must sit in one flight-time bin (0.05 ppm) and one member must carry spx_mono_ext
+    { auto ext = [&](MSSpectrum s) { s.setMetaValue("spx_mono_ext", 1); return s; };
+      auto nearFold = [&](double rt_b, double tol, const vector<double>* cells, std::array<size_t, 3>* st = nullptr) {
+        vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), ext(sp(rt_b, 500.00002, 2, 1.0, 3, P))};
+        return mergeTwins_(v, 0.005, tol, cells, 3.0, st) == 1 && v.size() == 1; };
       const vector<double> edges{20.0};   // cell 0 owns rt < 17, cell 1 rt >= 17 (the first edge T with (T - rt) > 3)
       std::array<size_t, 3> st{};
       chk(nearFold(11.1, 1.5, nullptr, &st) && st[0] == 0 && st[1] == 1, "the next MS1 frame inside rt_tol: folded, counted as a near-frame link");
@@ -4513,25 +4219,24 @@ protected:
       chk(!nearFold(11.1, 0.0, nullptr), "rt_tol 0: the same-frame relation, the next frame untouched");
       chk(nearFold(16.9, 7.0, &edges), "both inside one cell: dRT 6.9 within a 7-s tolerance folds");
       { std::array<size_t, 3> se{};
-        vector<MSSpectrum> v{sp(16.5, 500.0, 2, 1.0, 2, P), sp(17.5, 500.001, 2, 1.0, 3, P)};
-        chk(mergeTwins_(v, 0.005, false, 1.65, &edges, 3.0, &se) == 0 && v.size() == 2 && se[2] == 1, "a pair across a cell edge stays two spectra (counted)"); }
-      { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(10.0, 500.002, 2, 1.0, 2, P), sp(11.1, 500.001, 2, 1.004, 2, P), sp(12.2, 500.0, 2, 1.0, 2, P)};
+        vector<MSSpectrum> v{sp(16.5, 500.0, 2, 1.0, 2, P), ext(sp(17.5, 500.00002, 2, 1.0, 3, P))};
+        chk(mergeTwins_(v, 0.005, 1.65, &edges, 3.0, &se) == 0 && v.size() == 2 && se[2] == 1, "a pair across a cell edge stays two spectra (counted)"); }
+      { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(10.0, 500.002, 2, 1.0, 2, P), ext(sp(11.1, 500.00002, 2, 1.004, 2, P)), sp(12.2, 500.0, 2, 1.0, 2, P)};
         std::array<size_t, 3> sc{};
-        chk(mergeTwins_(v, 0.005, false, 1.2, nullptr, 3.0, &sc) == 3 && v.size() == 1 && sc[0] == 1,
+        chk(mergeTwins_(v, 0.005, 1.2, nullptr, 3.0, &sc) == 3 && v.size() == 1 && sc[0] == 1,
             "frames 10, 11.1, 12.2 chain into one cluster (span 2.2 > rt_tol); one pair is linked at one frame"); }
-      { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(11.1, 500.0, 2, 1.006, 2, P), sp(11.1, 500.0, 3, 1.0, 2, P), sp(11.1, 500.0125, 2, 1.0, 2, P)};
-        chk(mergeTwins_(v, 0.005, false, 1.65) == 0 && v.size() == 4, "near frames: 1/K0, charge and 20 ppm still apply"); }
-      { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(11.1, 500.0002, 2, 1.0, 2, P), sp(11.6, 500.00002, 2, 1.0, 2, P), sp(10.0, 500.0005, 2, 1.0, 2, P)};
-        chk(mergeTwins_(v, 0.005, false, 1.65, nullptr, 3.0, nullptr, 1) == 2 && v.size() == 2,
-            "near_bin: across frames only m/z within 0.05 ppm links (10/500.0 with 11.6/500.00002 at 0.04 ppm, not 11.1/500.0002 at 0.4 ppm); one frame keeps the 20-ppm relation"); }
-      { auto ext = [&](MSSpectrum s) { s.setMetaValue("spx_mono_ext", 1); return s; };
-        vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(11.1, 500.00002, 2, 1.0, 2, P), sp(20.0, 600.0, 2, 1.0, 2, P), ext(sp(21.1, 600.00002, 2, 1.0, 2, P))};
-        chk(mergeTwins_(v, 0.005, false, 1.65, nullptr, 3.0, nullptr, 2) == 1 && v.size() == 3 && v[0].getRT() == 10.0 && v[1].getRT() == 11.1,
-            "near_mode 2: a one-bin pair across frames folds only when one member's mono came from the v2 extension");
+      { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), ext(sp(11.1, 500.0, 2, 1.006, 2, P)), ext(sp(11.1, 500.0, 3, 1.0, 2, P)), ext(sp(11.1, 500.0125, 2, 1.0, 2, P))};
+        chk(mergeTwins_(v, 0.005, 1.65) == 0 && v.size() == 4, "near frames: 1/K0, charge and m/z still apply"); }
+      { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), ext(sp(11.1, 500.0002, 2, 1.0, 2, P)), sp(10.0, 500.0005, 2, 1.0, 2, P)};
+        chk(mergeTwins_(v, 0.005, 1.65) == 1 && v.size() == 2,
+            "across frames only m/z within 0.05 ppm links (not 11.1/500.0002 at 0.4 ppm); one frame keeps the 20-ppm relation"); }
+      { vector<MSSpectrum> v{sp(10.0, 500.0, 2, 1.0, 2, P), sp(11.1, 500.00002, 2, 1.0, 2, P), sp(20.0, 600.0, 2, 1.0, 2, P), ext(sp(21.1, 600.00002, 2, 1.0, 2, P))};
+        chk(mergeTwins_(v, 0.005, 1.65) == 1 && v.size() == 3 && v[0].getRT() == 10.0 && v[1].getRT() == 11.1,
+            "a one-bin pair across frames folds only when one member's mono came from the v2 extension");
         bool clean = true; for (const auto& q : v) clean = clean && !q.metaValueExists("spx_mono_ext");
-        chk(clean, "near_mode 2: the spx_mono_ext marks are removed (never written)"); }
-      { vector<MSSpectrum> v{sp(12.0, 500.001, 2, 1.0, 2, P), sp(10.0, 500.0, 2, 1.0, 3, P)};
-        mergeTwins_(v, 0.005, false, 2.5);
+        chk(clean, "the spx_mono_ext marks are removed (never written)"); }
+      { vector<MSSpectrum> v{ext(sp(12.0, 500.00002, 2, 1.0, 2, P)), sp(10.0, 500.0, 2, 1.0, 3, P)};
+        mergeTwins_(v, 0.005, 2.5);
         chk(v.size() == 1 && v[0].getRT() == 10.0 && v[0].getPrecursors()[0].getMZ() == 500.0, "near frames: the survivor rule is the fold's (more isotopes), with its own RT"); } }
     chk(!pair_folds(sp(10.0, 500.0, 3, 1.0, 2, P)), "another charge: untouched");
     chk(!pair_folds(sp(10.0, 500.0125, 2, 1.0, 2, P)), "25 ppm apart: untouched");
@@ -4582,26 +4287,6 @@ protected:
       chk(v.size() == 1 && v[0].getRT() == 40.0 && q.getMZ() == 700.0 && q.getCharge() == 3 && q.getDriftTime() == 1.1
           && q.getIsolationWindowLowerOffset() == 7.0 && q.getIsolationWindowUpperOffset() == 18.0 && (int)v[0].getMetaValue("spx_guessed") == 0,
           "the survivor keeps its own RT, precursor, 1/K0, isolation offsets and userParams"); }
-    // [recap] the keyed fold (assembly:post_fusion_cap) and the cap after it
-    auto keyed = [](MSSpectrum s, const vector<float>& k) {
-      OpenMS::DataArrays::FloatDataArray a; a.setName("spx_cap_key"); a.assign(k.begin(), k.end()); s.getFloatDataArrays().push_back(std::move(a)); return s; };
-    { const vector<pair<double, float>> A{{100.0, 10.0f}, {200.0, 20.0f}}, B{{200.0005, 5.0f}, {300.0, 30.0f}};
-      vector<MSSpectrum> u{sp(10.0, 500.0, 2, 1.0, 2, A), sp(10.0, 500.001, 2, 1.0, 3, B)};
-      vector<MSSpectrum> v{keyed(sp(10.0, 500.0, 2, 1.0, 2, A), {1.0f, 2.0f}), keyed(sp(10.0, 500.001, 2, 1.0, 3, B), {7.0f, 0.5f})};
-      mergeTwins_(u, 0.005); mergeTwins_(v, 0.005, true);
-      bool same = u.size() == 1 && v.size() == 1 && u[0].size() == v[0].size();
-      for (Size i = 0; same && i < u[0].size(); ++i) same = u[0][i].getMZ() == v[0][i].getMZ() && u[0][i].getIntensity() == v[0][i].getIntensity();
-      chk(same, "keyed fold: the peaks of the unkeyed fold, bit for bit");
-      const auto& k = v[0].getFloatDataArrays();
-      chk(k.size() == 1 && k[0].size() == 3 && k[0][0] == 1.0f && k[0][1] == 7.0f && k[0][2] == 0.5f, "keyed fold: a fused peak keeps its members' max key");
-      const std::array<size_t, 3> r = capAfterFusion_(v, 2);
-      chk(r[0] == 1 && r[1] == 1 && r[2] == 3 && v[0].size() == 2 && v[0][0].getMZ() == 100.0 && v[0][1].getMZ() == u[0][1].getMZ()
-          && v[0].getFloatDataArrays().empty(), "post-fusion cap: the top keys survive in m/z order, the key array is dropped"); }
-    { vector<MSSpectrum> v{keyed(sp(10.0, 500.0, 2, 1.0, 2, {{100.0, 5.0f}, {200.0, 9.0f}, {300.0, 9.0f}}), {1.0f, 1.0f, 1.0f}),
-                           keyed(sp(12.0, 500.0, 2, 1.0, 2, {{100.0, 5.0f}}), {3.0f})};
-      const std::array<size_t, 3> r = capAfterFusion_(v, 1);
-      chk(r[0] == 1 && r[1] == 2 && v[0].size() == 1 && v[0][0].getMZ() == 200.0, "post-fusion cap ties: the higher intensity, then the lower m/z");
-      chk(v[1].size() == 1 && v[1][0].getMZ() == 100.0 && v[1].getFloatDataArrays().empty(), "post-fusion cap: a spectrum within the cap keeps its peaks, without the key array"); }
     writeLogInfo_(fail ? "[twins] SELFTEST FAILED" : "[twins] selftest passed");
     return fail ? UNEXPECTED_RESULT : EXECUTION_OK;
   }
@@ -4647,13 +4332,21 @@ protected:
   ExitCodes runNoIms_(PeakMap& exp, const String& out, FileTypes::Type out_type)
   {
     for (const MSSpectrum& s : exp)
+    {
       if (s.getType(true) == SpectrumSettings::SpectrumType::PROFILE)
       {
         writeLogError_("Error: the input has profile spectra (MS level " + String(s.getMSLevel()) + ", " + s.getNativeID()
                        + "); the non-IMS path needs centroided MS1 and MS2 (centroid them first, e.g. with PeakPickerHiRes).");
         return INCOMPATIBLE_INPUT_DATA;
       }
-    writeLogInfo_("[noims] the input has no ion mobility: using the separate non-IMS path (prototype).");
+      if (s.getMSLevel() == 2 && s.getPrecursors().size() > 1)
+      {   // multiplexed DIA: one <precursor>, with its own isolation window, per window
+        writeLogError_("Error: MS2 spectrum " + s.getNativeID() + " has " + String(s.getPrecursors().size())
+                       + " isolation windows (multiplexed DIA); the non-IMS path reads one isolation window per MS2 scan.");
+        return INCOMPATIBLE_INPUT_DATA;
+      }
+    }
+    writeLogInfo_("[noims] the input has no ion mobility: using the separate non-IMS path.");
     // the path walks scans in file order and binary-searches their RTs: put an unordered file in RT order (stable, so
     // an ordered file is left exactly as it is)
     auto rt_less = [](const MSSpectrum& a, const MSSpectrum& b) { return a.getRT() < b.getRT(); };
@@ -4665,20 +4358,8 @@ protected:
     spx_noims::Params P;
     P.min_corr = getDoubleOption_("noims:min_corr");
     P.ppm = getDoubleOption_("noims:ppm");
-    // ponytail: tuning knobs for the prototype via the environment; options once the values settle
-    if (const char* e = getenv("SPX_NOIMS_MS1_MIN_SCANS")) P.ms1_min_scans = atoi(e);
-    if (const char* e = getenv("SPX_NOIMS_MS1_SPLIT")) P.ms1_split = atoi(e) != 0;
-    if (const char* e = getenv("SPX_NOIMS_MS2_MIN_SCANS")) P.ms2_min_scans = atoi(e);
-    if (const char* e = getenv("SPX_NOIMS_FEW_APEX")) P.few_apex_cycles = atof(e);
-    if (const char* e = getenv("SPX_NOIMS_SINGLES")) P.singles = atoi(e);
-    if (const char* e = getenv("SPX_NOIMS_MAX_PEAKS")) P.max_peaks = atoi(e);
-    if (const char* e = getenv("SPX_NOIMS_WEIGHT_POW")) P.weight_pow = atof(e);
-    if (const char* e = getenv("SPX_NOIMS_MIN_FRAGS")) P.min_frags = atoi(e);
-    if (const char* e = getenv("SPX_NOIMS_MS2_PREC")) P.ms2_prec = atoi(e) != 0;
-    if (const char* e = getenv("SPX_NOIMS_MONO")) P.mono = atoi(e);
     PeakMap res;
-    spx_noims::run(exp, P, res, [this](const String& m) { writeLogInfo_(m); });
-    exp.clear(true);
+    spx_noims::run(exp, P, res, [this](const String& m) { writeLogInfo_(m); });   // moves the spectra out of exp
     const String part = out + ".part";
     FileHandler().storeExperiment(part, res, {out_type}, log_type_);
     if (out_type == FileTypes::MZML)   // FileHandler does not report a failed write: the file must end in its footer
@@ -4740,11 +4421,6 @@ protected:
     auto_faint_frac_ = getDoubleOption_("gate:auto_faint_fraction");
     im_slice_merge_ = getDoubleOption_("trace:im_slice_merge");
     merge_same_bin_ = getStringOption_("assembly:merge_same_bin") == "true";
-    frag_int_ = getStringOption_("assembly:frag_intensity") == "core" ? 1 : getStringOption_("assembly:frag_intensity") == "sum" ? 2 : 0;
-    if (frag_int_ == 1 && getIntOption_("assembly:frag_core_frames") % 2 == 0)   // used by 'core' only
-      throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "assembly:frag_core_frames must be odd (the frames are centred on the precursor's apex).");
-    frag_core_half_ = getIntOption_("assembly:frag_core_frames") / 2;
-    post_fusion_cap_ = getStringOption_("assembly:post_fusion_cap") == "true";
     foreign_w_ = getDoubleOption_("assembly:foreign_precursor_weight");
     foreign_ppm_ = getDoubleOption_("assembly:foreign_precursor_ppm");
     foreign_dim_ = getDoubleOption_("assembly:foreign_precursor_dim");
@@ -4754,11 +4430,6 @@ protected:
     spectrum_meta_ = getFlag_("diag:spectrum_meta");
     faint_drt_ = getDoubleOption_("gate:faint_delta_rt");
     faint_cp_ = getDoubleOption_("gate:faint_corr_power");
-    anchor_rescue_ = getStringOption_("gate:anchor_rescue") == "true";
-    anchor_min_count_ = getIntOption_("gate:anchor_min_count");
-    anchor_min_corr_ = getDoubleOption_("gate:anchor_min_corr");
-    anchor_rescue_corr_ = getDoubleOption_("gate:anchor_rescue_corr");
-    anchor_max_rescued_ = getIntOption_("gate:anchor_max_rescued");
     corr_power_ = getDoubleOption_("assembly:corr_power");
     const double min_corr = getDoubleOption_("gate:min_correlation");
     const int min_corr_pts = getIntOption_("gate:min_correlation_points");
@@ -4769,9 +4440,10 @@ protected:
             + ") is below assembly:min_fragments (" + String(min_frags) + "): every written spectrum would hold fewer fragments than the minimum.");
     const double twin_im = getDoubleOption_("assembly:twin_im_tolerance");
     const int twin_rt_frames = getIntOption_("assembly:twin_rt_frames");   // [twin-rt] -1 off, 0 auto, n frames
-    const String twin_rt_match = getStringOption_("assembly:twin_rt_match");
-    const int twin_rt_mode = twin_rt_match == "ppm" ? 0 : twin_rt_match == "bin" ? 1 : 2;
     const int max_charge = getIntOption_("max_charge");
+    if (getIntOption_("charge:min_charge") > max_charge)
+      throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "charge:min_charge (" + String(getIntOption_("charge:min_charge"))
+            + ") is above max_charge (" + String(max_charge) + "): no precursor charge could be written.");
     const double mass_ppm = getDoubleOption_("trace:mass_error_ppm");
 
     PeakMap exp;
@@ -4896,20 +4568,6 @@ protected:
         }
         throw refuse("needs the run's m/z calibration table (MzCalibration in analysis.tdf), which is not usable here (" + why_axis + ").");
       }
-      spx::dnoise::Params& p = dnoise.p;
-      p.mz_half_width = (uint32_t)getIntOption_("dnoise:mz_half_width");
-      p.min_feature_length = (size_t)getIntOption_("dnoise:min_feature_length");
-      p.max_internal_gap = (size_t)getIntOption_("dnoise:max_internal_gap");
-      p.iterations = (size_t)getIntOption_("dnoise:iterations");
-      p.min_window_intensity = (uint64_t)getIntOption_("dnoise:min_window_intensity");
-      p.min_feature_intensity = (uint64_t)getIntOption_("dnoise:min_feature_intensity");
-      p.halo = (getStringOption_("dnoise:halo") == "true");
-      p.halo_peak_fraction = getDoubleOption_("dnoise:halo_peak_fraction");
-      p.halo_mz_idx_half_width = (uint32_t)getIntOption_("dnoise:halo_mz_idx_half_width");
-      p.halo_scan_half_width = (size_t)getIntOption_("dnoise:halo_scan_half_width");
-      p.dia_ms1_window = (getStringOption_("dnoise:dia_ms1_window") == "true");
-      p.dia_ms1_mz_pad = getDoubleOption_("dnoise:dia_ms1_mz_pad");
-      p.dia_ms1_im_pad = getDoubleOption_("dnoise:dia_ms1_im_pad");
       const std::string why = dnoise.setup(in + "/analysis.tdf");
       if (!why.empty() && diaspextract::tdfReasonIsCorrupt(why))
       {
@@ -5094,11 +4752,6 @@ protected:
       IMFormat imf = IMTypes::determineIMFormat(exp, 1);
       if (imf == IMFormat::NONE)
       {
-        if (getStringOption_("noims:path") == "off")
-        {
-          writeLogError_("Error: the input has no ion mobility at MS1; DIAspeXtract needs diaPASEF (ion-mobility DIA) data.");
-          return ILLEGAL_PARAMETERS;
-        }
         if (IMTypes::determineIMFormat(exp, 2) != IMFormat::NONE)
         {
           writeLogError_("Error: the input has ion mobility at MS2 but not at MS1; neither path reads such a mix.");
@@ -5579,11 +5232,11 @@ protected:
     // median of a multiset does not depend on the container order, so neither does n.
     double twin_rt_tol = 0.0;
     String twin_rt_desc;
-    // `ext` folds across frames only through v2's extension: without v2 no spectrum carries the mark, so the relation
+    // the fold joins frames only through v2's extension: without v2 no spectrum carries the mark, so the relation
     // is the same-frame one, and it is logged and stamped as such
-    const bool twin_rt_inert = twin_rt_mode == 2 && mono_check_ < 2;
+    const bool twin_rt_inert = mono_check_ < 2;
     if (twin_im >= 0.0 && twin_rt_frames >= 0 && cycle > 0.0 && twin_rt_inert)
-      writeLogInfo_("[twins] assembly:twin_rt_frames: the same MS1 frame only (twin_rt_match ext needs charge:mono_profile_check v2)");
+      writeLogInfo_("[twins] assembly:twin_rt_frames: the same MS1 frame only (the cross-frame fold needs charge:mono_profile_check v2)");
     if (twin_im >= 0.0 && twin_rt_frames >= 0 && cycle > 0.0 && !twin_rt_inert)
     {
       int n = twin_rt_frames;
@@ -5605,9 +5258,8 @@ protected:
       char b[96];
       std::snprintf(b, sizeof b, "|dRT| <= %.4f s", twin_rt_tol);
       twin_rt_desc = "MS1 frames up to " + how + " cycles apart (" + String(b) + ", cycle " + String(cycle) + " s"
-                     + (twin_rt_mode == 0 ? ", precursor m/z within 20 ppm across frames" : twin_rt_mode == 1 ? ", precursor m/z within 0.05 ppm across frames"
-                        : ", across frames precursor m/z within 0.05 ppm and one monoisotope placed by the v2 extension") + "), one RT cell";
-      twin_ext_mark_ = twin_rt_mode == 2;
+                     + ", across frames precursor m/z within 0.05 ppm and one monoisotope placed by the v2 extension), one RT cell";
+      twin_ext_mark_ = true;
       writeLogInfo_("[twins] assembly:twin_rt_frames: the fold joins " + twin_rt_desc);
     }
     // sort precursors by mono m/z so each window can binary-search its members instead of
@@ -5890,9 +5542,6 @@ protected:
     out_exp.setMetaValue("spx:cap_rank", String("evidence"));
     out_exp.setMetaValue("spx:same_bin_merge", String("im_slices ") + (!integer_detector ? String("n/a (openms detector)") : im_slice_merge_ >= 0.0 ? String(im_slice_merge_) + " (span " + String(2.0 * im_slice_merge_) + ")" : String("off"))
                          + ", assembly " + (merge_same_bin_ ? (integer_detector ? "on" : "on (exact m/z)") : "off"));
-    if (anchor_rescue_)   // [anchor] stamped only when on: the default header is unchanged
-      out_exp.setMetaValue("spx:anchor", String("anchors ") + String(anchor_min_count_) + " at r " + String(anchor_min_corr_) + ", rescue r "
-                                          + String(anchor_rescue_corr_) + ", max " + String(anchor_max_rescued_) + " per spectrum");
     out_exp.setMetaValue("spx:im_weight_sigma", im_weight_sigma_);
     // [dnoise] what was applied: the port, "off", or skipped because the input is no .d
     out_exp.setMetaValue("spx:dnoise_ms1", dnoise.on ? String(String(spx::dnoise::kPortedFrom) + " MS1") : String(dnoise_req ? "skipped (input is not a Bruker .d)" : "off"));
@@ -5903,12 +5552,8 @@ protected:
     if (mono_check_) out_exp.setMetaValue("spx:monocheck", mono_check_stamp_);   // [monocheck] only when on
     if (getDoubleOption_("charge:iso_im_tolerance") <= 0.0)       // [isotol] auto only: a fixed value leaves no stamp
       out_exp.setMetaValue("spx:iso_im_tolerance", iso_tol_stamp + ", first partner in m/z");
-    if (post_fusion_cap_)   // [recap] only when on: the default header is unchanged
-      out_exp.setMetaValue("spx:post_fusion_cap", String("max_fragments ") + String(max_frags) + " after the twin fold, ranked by the evidence cap key");
     out_exp.setMetaValue("spx:twin_merge", twin_im < 0.0 ? String("off") : twin_rt_desc.empty() ? String("same frame, same charge, 20 ppm, 1/K0 <= " + String(twin_im) + ", fused 10 ppm")
                          : String(twin_rt_desc + ", same charge, 20 ppm, 1/K0 <= " + String(twin_im) + ", fused 10 ppm"));   // [twin-rt] the same-frame text without the cross-frame fold
-    if (frag_int_ != 0)   // [fragint] stamped only when on: the default header is unchanged
-      out_exp.setMetaValue("spx:fragint", frag_int_ == 1 ? String("core ") + String(2 * frag_core_half_ + 1) + " frames" : String("sum"));
     if (foreign_w_ < 1.0)   // [foreign] stamped only when on (1 = off leaves no stamp)
       out_exp.setMetaValue("spx:foreign", String("weight " + String(foreign_w_) + ", " + String(foreign_ppm_) + " ppm, 1/K0 " + String(foreign_dim_)
                                                  + ", min_iso " + String(foreign_min_iso_) + ", positions mono..M+3, own ion kept ("
@@ -5928,7 +5573,6 @@ protected:
     Size n_out = 0;
     Size n_twins = 0;   // [twins] spectra folded into a twin, over every tile
     std::array<size_t, 3> twin_st{};   // [twin-rt] mergeTwins_'s counters, over every tile
-    std::array<size_t, 4> recap{};   // [recap] spectra re-capped, peaks removed, largest spectrum before, spectra seen
     writeLogInfo_("Processing " + String(n_win) + " isolation windows in " + String(tiles.size()) + " tile(s) from the " + (tile_source ? "streaming" : "resident") + " source (OpenMP over windows, <="
                   + String(n_conc) + " concurrent, admission bounded by " + String((int)(mem_frac * 100))
                   + "% of free RAM)..." + rss_());
@@ -6524,15 +6168,9 @@ protected:
       if (twin_im >= 0.0)
       {
         Phase _ph("MERGE(twins)");
-        const size_t before = tile_out.size(), gone = mergeTwins_(tile_out, twin_im, post_fusion_cap_, twin_rt_tol, &cell_edges, tile_drt, &twin_st, twin_rt_mode);
+        const size_t before = tile_out.size(), gone = mergeTwins_(tile_out, twin_im, twin_rt_tol, &cell_edges, tile_drt, &twin_st);
         n_twins += gone;
         writeLogInfo_("[twins] tile " + String(tk + 1) + "/" + String(tiles.size()) + ": " + String(gone) + " of " + String(before) + " spectra folded into a twin");
-      }
-      if (post_fusion_cap_)
-      {
-        Phase _ph("RECAP(post-fusion)");
-        const std::array<size_t, 3> r = capAfterFusion_(tile_out, max_frags);
-        recap[0] += r[0]; recap[1] += r[1]; recap[2] = std::max(recap[2], r[2]); recap[3] += tile_out.size();
       }
       if (writer)
       {
@@ -6679,7 +6317,9 @@ protected:
       { Phase _ph("ASSEMBLE(PeakMap)"); out_exp.setSpectra(std::move(all_out)); }
       n_out = out_exp.size();
       for (Size i = 0; i < out_exp.size(); ++i) out_exp[i].getDataProcessing().push_back(out_dp);
-      { Phase _ph("WRITE(mzPeak)"); FileHandler().storeExperiment(out, out_exp, {out_type}, log_type_); }
+      // to <out>.part like the mzML path (the unknown extension takes the one allowed type), then committed
+      { Phase _ph("WRITE(mzPeak)"); FileHandler().storeExperiment(out_part, out_exp, {out_type}, log_type_); }
+      commitOutput_(out_part, out);
     }
     writeLogInfo_("Wrote " + String(n_out) + " pseudo-MS2 spectra to " + out
                   + " (" + String(FileTypes::typeToName(out_type)) + ")");
@@ -6688,19 +6328,12 @@ protected:
     if (twin_im >= 0.0 && twin_rt_tol > 0.0)   // [twin-rt] the before/after of the near-frame relation
       writeLogInfo_("[twins] assembly:twin_rt_frames: " + String(twin_st[0]) + " twin pairs at one MS1 frame, " + String(twin_st[1])
                     + " same-monoisotope pairs at nearby frames joined, " + String(twin_st[2]) + " left apart at an RT cell edge");
-    if (post_fusion_cap_)
-      writeLogInfo_("[recap] assembly:post_fusion_cap: " + String(recap[0]) + " of " + String(recap[3]) + " spectra re-capped to " + String(max_frags)
-                    + " peaks after the twin fold, " + String(recap[1]) + " peaks removed (largest spectrum before: " + String(recap[2]) + " peaks)");
     {   // [merge] how much splitting the two merges removed
       auto& m = mergeCount_();
       writeLogInfo_("[merge] im-slice merge (trace:im_slice_merge " + (!integer_detector ? String("n/a, openms detector") : im_slice_merge_ >= 0.0 ? String(im_slice_merge_) : String("off")) + "): " + String(m[0].load())
                     + " picked MS2 peaks merged away in " + String(m[1].load()) + " frames; assembly same-bin merge (" + (merge_same_bin_ ? "on" : "off") + "): "
                     + String(m[2].load()) + " fragments merged away");
     }
-    if (frag_int_ != 0)   // [fragint] what the fragment-intensity mode did (gate-passing and rescued fragments, before the merge and the cap)
-      writeLogInfo_("[fragint] assembly:frag_intensity " + (frag_int_ == 1 ? "core (" + String(2 * frag_core_half_ + 1) + " frames around the precursor apex)" : String("sum (the precursor's span)"))
-                    + ": " + String(fragIntCount_()[0].load()) + " fragments took the summed amplitude, " + String(fragIntCount_()[1].load())
-                    + " of them had no point there and took their point nearest the precursor apex");
     if (foreign_w_ < 1.0)
     {   // [foreign] what assembly:foreign_precursor_weight did
       auto& c = foreignCount_();
@@ -6720,19 +6353,6 @@ protected:
                     + " precursor-window assemblies; " + String(g) + " groups of >= 2 fused, mean size "
                     + String(g ? (double)c[4].load() / (double)g : 0.0, false) + "; " + String(c[5].load())
                     + " assemblies fell below assembly:min_fragments");
-    }
-    if (anchor_rescue_)
-    {   // [anchor] what the rescue did (counted at assembly: before the twin fold)
-      auto& a = anchorCount_();
-      char b[640];
-      snprintf(b, sizeof b, "[anchor] %lld of %lld non-faint precursors anchored (>= %d fragments at r >= %g), %lld candidates; %lld fragments "
-                            "rescued (r >= %g; rejected at the point floor %lld, overlap guard %lld, correlation cut %lld) in %lld precursors, "
-                            "%.2f per anchored precursor, %lld more beyond %d per spectrum; %lld rescued peaks in %lld written spectra after the "
-                            "same-bin merge and the cap (%.2f per such spectrum)",
-               a[1].load(), a[0].load(), anchor_min_count_, anchor_min_corr_, a[2].load(), a[3].load(), anchor_rescue_corr_, a[8].load(),
-               a[9].load(), a[10].load(), a[5].load(), a[1].load() ? (double)a[3].load() / a[1].load() : 0.0, a[4].load(),
-               anchor_max_rescued_, a[6].load(), a[7].load(), a[7].load() ? (double)a[6].load() / a[7].load() : 0.0);
-      writeLogInfo_(b);
     }
     report_phases_(phase_clock_());
     return EXECUTION_OK;
@@ -6764,6 +6384,12 @@ int main(int argc, const char** argv)
       const int m = n - (int)op.len;                            // the part after the old prefix
       std::fprintf(stderr, "Error: %.*s is set, but this tool reads only DIASPEXTRACT_* variables: "
                            "rename it to DIASPEXTRACT_%.*s or unset it. Nothing was run.\n", n, *e, m, *e + op.len);
+      old_name = true;
+    }
+    if (std::strncmp(*e, "SPX_NOIMS_", 10) == 0)   // the non-IMS path's tuning variables, removed after 1.8.0: fixed values now
+    {
+      std::fprintf(stderr, "Error: %.*s is set, but the non-IMS path no longer reads SPX_NOIMS_* variables (their values are "
+                           "fixed): unset it. Nothing was run.\n", (int)std::strcspn(*e, "="), *e);
       old_name = true;
     }
   }

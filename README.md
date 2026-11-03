@@ -2,14 +2,15 @@
 
 # DIAspeXtract
 
-DIAspeXtract turns Bruker timsTOF **diaPASEF** data into pseudo-MS/MS spectra that any DDA search engine can
-search. It finds the precursor ions in the MS1 frames, collects the fragments that elute with each precursor at the
-same ion mobility, and writes one MS2 spectrum per precursor to mzML. It uses no spectral library, so an
+DIAspeXtract turns DIA data into pseudo-MS/MS spectra that any DDA search engine can search. It reads Bruker
+timsTOF **diaPASEF** runs and, since 1.8.0, centroided DIA mzML **without ion mobility** (Orbitrap, SWATH). It finds
+the precursor ions in the MS1 scans, collects the fragments that elute with each precursor (on diaPASEF data also at
+the same ion mobility), and writes one MS2 spectrum per precursor to mzML. It uses no spectral library, so an
 **open or blind search** of the output can find sequence variants and unexpected modifications. It is a standalone
 application under BSD-3-Clause that links a patched OpenMS.
 
-Since 1.8.0 it also reads centroided DIA mzML without ion mobility (Orbitrap, SWATH) through a separate path that
-leaves the diaPASEF processing untouched ([docs/options.md](docs/options.md#input-without-ion-mobility)).
+The two kinds of input take separate paths: input without ion mobility never enters the diaPASEF processing
+described below, and its own path is summarised under [Input without ion mobility](#input-without-ion-mobility).
 
 Earlier releases were named speXtract (up to 1.1.0) and DIAspeXtractor (1.2.x); [CHANGELOG.md](CHANGELOG.md) maps
 the old names to the current ones.
@@ -57,6 +58,16 @@ flowchart TD
   window starts only when it fits in 75 % of the free memory (under a Slurm or container memory limit, of the room
   left under it); elsewhere windows run one at a time. The output does not depend on the thread count or the tiling.
 
+### Input without ion mobility
+
+An mzML without ion mobility at MS1 (centroided, one isolation window per MS2 scan) takes a separate path. Biosaur2
+finds the precursors (averagine-checked isotope patterns, charge 1 to 4) in the whole run's MS1 scans; isotope
+envelopes of unfragmented precursors in a window's MS2 traces are added when MS1 lacks them. In each isolation window
+the MS2 peaks are traced over time, and a fragment joins a precursor when their elution profiles correlate (r ≥ 0.3,
+`-noims:min_corr`) over the precursor's elution span. Fragments are weighted by r²⁴ and the 200 heaviest are kept; a
+spectrum needs at least 3. The whole mzML is held in memory (about 10 GB for a 1.3 GB file). Profile spectra, ion
+mobility at MS2 but not at MS1, and MS2 scans with several isolation windows are refused (exit code 11).
+
 ## Requirements
 
 | | |
@@ -69,8 +80,8 @@ flowchart TD
 | Disk | the mzML output is large |
 
 These memory figures are for a `.d` at the defaults. `DIASPEXTRACT_PIPE_TILES=1` and a lower
-`-perf:max_concurrent_windows` need less. An mzML input, `-trace:detector openms` and `-tile:cells_per_tile 0`
-process the whole run at once and need several times as much.
+`-perf:max_concurrent_windows` need less. An mzML with ion mobility, `-trace:detector openms` and
+`-tile:cells_per_tile 0` process the whole run at once and need several times as much.
 
 ## Install
 
@@ -151,8 +162,13 @@ names the new spelling.
 diaspextract -in sample.d -out pseudo.mzML
 ```
 
-Give the tool the `.d` itself. An mzML input runs without MS1 noise removal and, because it carries no instrument
-calibration, with the `openms` detector on the whole run: it needs more memory and gives different spectra.
+For diaPASEF, give the tool the `.d` itself. A diaPASEF mzML runs without MS1 noise removal and, because it carries no
+instrument calibration, with the `openms` detector on the whole run: it needs more memory and gives different spectra.
+An Orbitrap or SWATH run goes in as centroided mzML (for example from ThermoRawFileParser with peak picking):
+
+```bash
+diaspextract -in orbitrap_dia.mzML -out pseudo.mzML
+```
 
 Then search the output like any DDA file, for example with Sage (`bench/sage_closed.json` is a closed-search
 configuration; set its FASTA first):
@@ -168,8 +184,8 @@ Exit codes, for pipelines:
 | 0 | spectra written (a run that finds none writes a valid mzML with an empty spectrum list) |
 | 3 | the input is corrupt: a truncated `analysis.tdf_bin`, impossible frame metadata, no diaPASEF frames, a calibration value that is missing or not a number (when `-dnoise:ms1` reads it, as at the defaults) |
 | 5 | the output could not be written completely (disk full, quota); only `<out>.part` is left |
-| 6 | an option value is invalid |
-| 11 | the `.d` is ddaPASEF (MsMsType 8), not diaPASEF: search it directly |
+| 6 | an option value is invalid, or two options contradict each other (`-charge:min_charge` above `-max_charge`) |
+| 11 | the input cannot be processed: a ddaPASEF `.d` (MsMsType 8; search it directly), profile spectra without ion mobility, ion mobility at MS2 but not at MS1, or MS2 scans with several isolation windows |
 | other | another error; the message says which |
 
 Control the FDR **per precursor charge**. Singly charged precursors are written by default: they are real 1+ ions,
@@ -178,7 +194,8 @@ results per charge yourself, or run with `-charge:min_charge 2` to write only 2+
 
 ## Options
 
-The defaults are the recommended configuration. These are the settings users change most:
+The defaults are the recommended configuration. These are the settings users change most. Except `-threads`, they
+apply to diaPASEF input only; input without ion mobility reads `-threads`, `-noims:min_corr` and `-noims:ppm`:
 
 | setting | default | what it does |
 |---|---|---|
@@ -189,7 +206,7 @@ The defaults are the recommended configuration. These are the settings users cha
 | `-perf:mem_fraction` | 0.75 | share of the free memory the windows may use (Linux, Windows) |
 | `DIASPEXTRACT_PIPE_TILES=1` | 2 | environment variable: one tile at a time instead of two. Less memory, longer run, same spectra |
 | `-perf:stream_load` | true | `false` loads the whole run first: much more memory, a longer run and different spectra |
-| `-trace:detector` | integer | `openms` uses OpenMS mass-trace detection on whole windows, without tiles. The two find partly different peptides; `integer` needs a `.d` and uses much less memory |
+| `-trace:detector` | integer | `openms` uses OpenMS mass-trace detection on whole windows, without tiles. The two find partly different peptides; `integer` needs the flight-time calibration of a `.d` and uses much less memory |
 | `-dnoise:ms1` | true | MS1 noise removal for `.d` input; `false` turns it off and changes the spectra |
 
 Every option, with its default and valid values, is in [docs/options.md](docs/options.md) and in
@@ -198,7 +215,7 @@ Every option, with its default and valid values, is in [docs/options.md](docs/op
 ## Output
 
 Each spectrum is an MS2 spectrum with a synthetic precursor: the monoisotopic m/z, the charge, the retention time,
-the 1/K0 and the isolation window it came from. A precursor gets its own spectrum even when it shares fragments with
+the isolation window it came from and, for diaPASEF input, the 1/K0. A precursor gets its own spectrum even when it shares fragments with
 another, and one fragment can appear in several spectra; this is intended, so search the output as written. The mzML
 header records the settings that shaped the file as `spx:` entries.
 
@@ -218,7 +235,7 @@ grep -a 'spx:' pseudo.mzML
 ## Layout
 
 ```
-src/        the tool and its headers: m/z calibration, .d metadata reader, MS1 denoiser, mzPeak loader
+src/        the tool and its headers: m/z calibration, .d metadata reader, MS1 denoiser, mzPeak loader, the path for input without ion mobility
 patches/    the eight OpenMS patches, the pinned OpenMS commit (openms.lock) and mzPeak build helpers
 scripts/    OpenMS patch application, mzPeak library build, option-name check
 test/       the end-to-end tests

@@ -802,7 +802,26 @@ jobs:
             UNRESOLVED_DEPENDENCIES_VAR missing
             DIRECTORIES ${DIRS}
             PRE_EXCLUDE_REGEXES "^[Aa][Pp][Ii]-[Mm][Ss]-.*" "^[Ee][Xx][Tt]-[Mm][Ss]-.*"
-            POST_EXCLUDE_REGEXES "^[A-Za-z]:[/\\\\][Ww][Ii][Nn][Dd][Oo][Ww][Ss][/\\\\].*")
+            POST_EXCLUDE_REGEXES "^[A-Za-z]:[/\\\\][Ww][Ii][Nn][Dd][Oo][Ww][Ss][/\\\\].*"
+            CONFLICTING_DEPENDENCIES_PREFIX dup)
+          # One DLL name, two copies (zlib.dll: contrib's for OpenMS, conda's for Arrow): Windows loads one per process,
+          # the first on the search path. Ship that one -- the directory order here is the tests' PATH order.
+          foreach(name IN LISTS dup_FILENAMES)
+            set(pick "")
+            foreach(d IN LISTS DIRS)
+              foreach(c IN LISTS dup_${name})
+                get_filename_component(cd "${c}" DIRECTORY)
+                if(pick STREQUAL "" AND cd STREQUAL d)
+                  set(pick "${c}")
+                endif()
+              endforeach()
+            endforeach()
+            if(pick STREQUAL "")
+              message(FATAL_ERROR "no search directory holds ${name}: ${dup_${name}}")
+            endif()
+            message(STATUS "bundle: ${pick} (of ${dup_${name}})")
+            list(APPEND found "${pick}")
+          endforeach()
           foreach(f IN LISTS found)
             message(STATUS "bundle: ${f}")
             file(COPY "${f}" DESTINATION "${OUT}")

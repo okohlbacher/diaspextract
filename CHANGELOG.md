@@ -1,9 +1,10 @@
 # Changelog
 
-## v1.8.2 — 2026-11-03
+## v1.8.3 — 2026-11-04
 
-The program is 1.8.1's; only the release build changed. 1.8.1 was tagged but never published: the macOS x64 disk image
-failed its notarization check twice on a dropped connection to Apple, and the build now retries that check.
+The program is 1.8.1's; only the release build changed. 1.8.1 and 1.8.2 were tagged but never published: the macOS x64
+build could not reach Apple's notarization ticket server. The x64 disk image is notarized; when the ticket cannot be
+attached, it ships without it, and macOS checks it online the first time it is opened.
 
 ## v1.8.1 — 2026-11-03
 

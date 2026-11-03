@@ -44,3 +44,40 @@
  
  #include <OpenMS/CONCEPT/Types.h>
  
+--- a/src/openms/include/OpenMS/ANALYSIS/ID/MessagePasserFactory.h
++++ b/src/openms/include/OpenMS/ANALYSIS/ID/MessagePasserFactory.h
+@@ -191,7 +191,7 @@
+ 
+   template <typename Label>
+   evergreen::TableDependency<Label> MessagePasserFactory<Label>::createSumFactor(size_t nrParents, Label nId) {
+-    evergreen::Tensor<double> table({nrParents+1});
++    evergreen::Tensor<double> table({static_cast<unsigned long>(nrParents + 1)});
+     for (unsigned long i=0; i <= nrParents; ++i) {
+       table[i] = 1.0/(nrParents+1.);
+     }
+--- a/src/openms/include/OpenMS/FORMAT/MascotRemoteQuery.h
++++ b/src/openms/include/OpenMS/FORMAT/MascotRemoteQuery.h
+@@ -38,10 +38,10 @@
+     OPENMS_DLLAPI MascotRemoteQuery();
+ 
+     /// assignment operator
+-    OPENMS_DLLAPI MascotRemoteQuery& operator=(const MascotRemoteQuery& rhs) = delete;
++    MascotRemoteQuery& operator=(const MascotRemoteQuery& rhs) = delete;
+ 
+     /// copy constructor
+-    OPENMS_DLLAPI MascotRemoteQuery(const MascotRemoteQuery& rhs) = delete;
++    MascotRemoteQuery(const MascotRemoteQuery& rhs) = delete;
+ 
+     /// destructor
+     OPENMS_DLLAPI ~MascotRemoteQuery() override;
+--- a/src/openms/include/OpenMS/SYSTEM/SIMDe.h
++++ b/src/openms/include/OpenMS/SYSTEM/SIMDe.h
+@@ -22,7 +22,7 @@
+ #include <simde/x86/ssse3.h> 
+ 
+ // these operators are defined for GCC/clang, but not in MSVC (TODO: maybe use SFINAE, but that is overkill for the moment)
+-#ifdef _MSC_VER
++#if defined(_MSC_VER) && !defined(__clang__)   // clang-cl has the vector operators built in, and rejects these
+ inline simde__m128i operator|(const simde__m128i& left, const simde__m128i& right)
+ {
+   return simde_mm_or_si128(left, right);

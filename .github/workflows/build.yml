@@ -1057,9 +1057,9 @@ jobs:
             codesign --force --timestamp --keychain "$KC" --sign "$ID" "$DMG"
             . "$RUNNER_TEMP/notarize.sh"
             notarize "$DMG"
-            # stapler can fail right after an Accepted notarization (CDN flake, Error 68 / -1005): retry, do not rebuild
+            # stapler (staple and validate both) can fail right after an Accepted notarization (CDN flake, Error 68 / -1005): retry, do not rebuild
             for i in 1 2 3 4; do xcrun stapler staple "$DMG" && break; [ "$i" = 4 ] && exit 1; sleep $((i * 30)); done
-            xcrun stapler validate "$DMG"
+            for i in 1 2 3 4; do xcrun stapler validate "$DMG" && break; [ "$i" = 4 ] && exit 1; sleep $((i * 30)); done
             spctl --assess --type open --context context:primary-signature -vv "$DMG"
           fi
           ls -l assets

@@ -4,7 +4,7 @@
 #
 # The placeholder sha256 values below are replaced on the first release dispatched to the tap.
 class Diaspextract < Formula
-  desc "Pseudo-MS/MS spectra from Bruker timsTOF diaPASEF data for any DDA search engine"
+  desc "Pseudo-MS/MS spectra from DIA data (diaPASEF, Orbitrap) for DDA search engines"
   homepage "https://github.com/okohlbacher/diaspextract"
   version "1.8.0"
   license "BSD-3-Clause"

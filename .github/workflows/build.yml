@@ -385,14 +385,16 @@ jobs:
 
       - name: Build contrib and libcurl (Windows)
         if: runner.os == 'Windows' && steps.contrib.outputs.cache-hit != 'true'
-        timeout-minutes: 120
+        timeout-minutes: 150
         run: |
           set -euo pipefail
           git init -q contrib-src
           git -C contrib-src remote add origin https://github.com/OpenMS/contrib.git
           git -C contrib-src fetch -q --depth 1 origin "$CONTRIB_REV"
           git -C contrib-src checkout -q FETCH_HEAD
-          cmake -S contrib-src -B contrib-tmp -G "Visual Studio 17 2022" -A x64 -DBUILD_TYPE=ALL
+          # Only what OpenMS at the pin needs: ALL at this contrib commit also builds Arrow, curl, HDF5 and libzip from
+          # source (run 41587712077 timed out after 2 h in it), and those come from conda / the curl step below.
+          cmake -S contrib-src -B contrib-tmp -G "Visual Studio 17 2022" -A x64 "-DBUILD_TYPE=BOOST;XERCESC;COINOR;BZIP2;ZLIB;LIBSVM"
           cmake --build contrib-tmp --config Release
           mkdir -p contrib-build
           for d in lib bin include share; do [ -d "contrib-tmp/$d" ] && mv "contrib-tmp/$d" contrib-build/; done

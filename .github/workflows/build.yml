@@ -1,192 +1,1145 @@
-name: full build
+name: build
 
-# Builds OpenMS from source at the commit pinned in patches/openms.lock, applies the DIAspeXtract
-# patches, builds the tool, and runs the end-to-end suite against the binary it just built.
+# Builds OpenMS from source at the pin in patches/openms.lock with the DIAspeXtract patches, builds the tool on five
+# platforms, tests it, packages a self-contained bundle per platform and proves the PACKAGED binary runs on its own.
+# On a v* tag it also signs (macOS: Developer ID + notarization; Windows: SignPath), attaches every asset plus
+# SHA256SUMS to the release and asks the Homebrew tap to follow.
 #
-# DIAspeXtract cannot be built against a RELEASED OpenMS package, and that is a property of the tool
-# rather than of CI: it uses BrukerTimsFile::loadDIAStreaming and PeakPickerIM, which postdate
-# OpenMS 3.5.0, the newest tag; and it needs the patches in patches/, one of which adds
-# BrukerTimsFile::lastMzCalibration(). Hence a source build at a pinned commit.
+# No released OpenMS works: the tool uses BrukerTimsFile::loadDIAStreaming and PeakPickerIM, which postdate the newest
+# OpenMS tag, and the patches add BrukerTimsFile::lastMzCalibration(). Hence a source build at a pinned commit.
 #
-# Roughly an hour with a warm ccache, so it runs weekly and on demand rather than per push. It is
-# the only job that proves the tool compiles, and it is deliberately NOT continue-on-error: a build
-# job allowed to fail quietly reports green while the tool does not build.
+# Where it runs. The file is exported unchanged to the public repository (.../diaspextract), whose Actions minutes are
+# free; the private development repository pays for every macOS and Windows minute. So everything heavy runs on the
+# public repository only -- pushes, pull requests, tags and the weekly schedule -- and on a manual dispatch anywhere.
+# tests.yml keeps the cheap OpenMS-free checks on every push in both repositories.
+#
+# OpenMS is a ~1-2 h build per platform, so its build tree is cached (see "OpenMS cache key") and saved by an explicit
+# actions/cache/save right after the build: a post-job save only runs when the whole job succeeds, so a failure in the
+# tool's own steps would otherwise throw away the expensive part (FASTag lost several cold Windows builds that way).
+#
+# The spectra are bit-identical across platforms -- a tested property: each leg runs the same real diaPASEF test run,
+# the "identity" job compares the five digests, and DIASPEXTRACT_TEST_D_DIGEST (a repository variable) pins them.
+# Everything that could break it is pinned or built here: -ffp-contract=off for OpenMS and the tool, src/PortableMath.h
+# through the patches, and clang (not cl) on Windows.
+
 on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  schedule:
+    - cron: '0 4 * * 1'      # Mondays, 04:00 UTC; public repository only (see the preflight job)
+  # The tag-only path (signing, notarization, the disk image, SignPath) would otherwise first run on a real release,
+  # the one run where a mistake is expensive. release_dry_run takes that path on any ref and returns the packages as
+  # workflow artifacts; nothing is ever attached to a release from a dispatch.
   workflow_dispatch:
     inputs:
-      openms_ref:
-        description: 'OpenMS ref to build against (default: the pin in patches/openms.lock)'
-        required: false
+      release_dry_run:
+        description: 'Take the tag-only packaging and signing path; results become workflow artifacts, never a release'
+        type: boolean
+        default: false
+      signing_policy:
+        description: 'SignPath signing policy slug (empty: release-signing on a v* tag, test-signing otherwise)'
+        type: string
         default: ''
-  push:
-    tags: ['v*']
-  schedule:
-    - cron: '0 4 * * 1'      # Mondays, 04:00 UTC
+      openms_ref:
+        description: 'OpenMS ref to build against (empty: the pin in patches/openms.lock)'
+        type: string
+        default: ''
+
+# cancel-in-progress: a superseded push should not hold runners for hours. A dispatch gets its own group, so a push to
+# the same branch cannot cancel a dry run mid-flight (FASTag lost its first dry run that way).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'workflow_dispatch' && format('-dispatch-{0}', github.run_id) || '' }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # The 5.6-minute HeLa diaPASEF run OpenMS publishes as test data for its Bruker reader (345 MB).
+  TEST_D_URL: https://github.com/OpenMS/timsrust_cpp_bridge/releases/download/test-data-v1/DIA_HeLa_50ng_5_6min.d.zip
+  # SignPath: the project and the organisation are not secrets; the API token is.
+  SIGNPATH_PROJECT_SLUG: diaspextract
+  SIGNPATH_ORG_ID_DEFAULT: 02cd3c85-b99a-4a78-bc04-b103eb1070c1
+  # Windows only: Qt for OpenMS's QtCore/QtNetwork (the version OpenMS's own CI uses with MSVC 2022), and libcurl,
+  # which OpenMS needs and contrib does not build (OpenMS's CI builds it the same way).
+  QT_VERSION: '6.8.3'
+  CURL_VERSION: '8.12.1'
 
 jobs:
-  linux:
-    name: ubuntu-latest, OpenMS from source + patches
-    # The weekly build runs only on the public repository (.../diaspextract): this file is exported there
-    # unchanged, and the private development repository pays for its Actions minutes. Tag pushes and
-    # manual dispatches run everywhere.
-    if: github.event_name != 'schedule' || endsWith(github.repository, '/diaspextract')
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
+  # ------------------------------------------------------------------------------------------------------- preflight
+  # Decides once what this run is, so no other job re-derives it. event_name is tested before the ref: a dispatch
+  # against a tag ref must not take the release path.
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      heavy: ${{ steps.p.outputs.heavy }}
+      release: ${{ steps.p.outputs.release }}
+      sign: ${{ steps.p.outputs.sign }}
+      version: ${{ steps.p.outputs.version }}
+      openms_ref: ${{ steps.p.outputs.openms_ref }}
+      other_commit: ${{ steps.p.outputs.other_commit }}
     steps:
+      - uses: actions/checkout@v7
+      - id: p
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          DRY_RUN: ${{ inputs.release_dry_run }}
+          OPENMS_REF_IN: ${{ inputs.openms_ref }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^project(DIAspeXtract VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          [ -n "$version" ] || { echo "::error::cannot read project(VERSION) from CMakeLists.txt"; exit 1; }
+
+          heavy=false
+          if [ "$EVENT" = workflow_dispatch ] || [[ "$REPO" == */diaspextract ]]; then heavy=true; fi
+          release=false
+          if [ "$EVENT" = push ] && [[ "$REF" == refs/tags/v* ]] && [ "$heavy" = true ]; then release=true; fi
+          sign=$release
+          if [ "$EVENT" = workflow_dispatch ] && [ "$DRY_RUN" = true ]; then sign=true; fi
+
+          pin=$(sed -n 's/^OPENMS_BASE=//p' patches/openms.lock)
+          ref=${OPENMS_REF_IN:-$pin}
+          other=false; [ "$ref" = "$pin" ] || other=true
+          if [ "$release" = true ] && [ "$other" = true ]; then echo "::error::a release builds against the pin only"; exit 1; fi
+
+          # A tag must name the version the binary reports, and the release notes come from its CHANGELOG section.
+          if [ "$release" = true ]; then
+            [ "$REF_NAME" = "v$version" ] || { echo "::error::tag $REF_NAME does not match project(VERSION) $version"; exit 1; }
+            grep -Eq "^## v${version//./\\.}( |$)" CHANGELOG.md \
+              || { echo "::error::CHANGELOG.md has no '## v$version' section"; exit 1; }
+          fi
+          {
+            echo "heavy=$heavy"; echo "release=$release"; echo "sign=$sign"; echo "version=$version"
+            echo "openms_ref=$ref"; echo "other_commit=$other"
+          } | tee -a "$GITHUB_OUTPUT"
+          [ "$heavy" = true ] || echo "::notice title=Heavy jobs skipped::$REPO is not the public repository; dispatch the workflow to run them here."
+
+  # ----------------------------------------------------------------------------------------------------------- build
+  build:
+    name: ${{ matrix.name }}
+    needs: preflight
+    if: needs.preflight.outputs.heavy == 'true'
+    runs-on: ${{ matrix.runner }}
+    # actions: read lets SignPath fetch the unsigned artifact with this job's token.
+    permissions:
+      contents: read
+      actions: read
+    # A cold OpenMS build is the long pole (Intel macOS and Windows: 2-3 h); the rest is ~30-60 min, plus up to 30 min
+    # waiting for a SignPath approval and up to 90 min for Apple's notary on a tag.
+    timeout-minutes: 345
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x64,   runner: ubuntu-24.04,     archive: tar.gz }
+          - { name: linux-arm64, runner: ubuntu-24.04-arm, archive: tar.gz }
+          # macos_floor is the deployment target of the tool and libOpenMS, and the highest minos any bundled Mach-O
+          # may carry. Homebrew bottles carry the runner's macOS as minos, so the floor is the runner's: 14 on
+          # macos-14, 15 on macos-15-intel (macos-13 is retired and wedges queues). Lowering it means taking the
+          # dependencies from conda-forge instead.
+          - { name: macos-arm64, runner: macos-14,       archive: tar.gz, macos_floor: '14.0' }
+          - { name: macos-x64,   runner: macos-15-intel, archive: tar.gz, macos_floor: '15.0' }
+          - { name: windows-x64, runner: windows-2022,   archive: zip }
+    defaults:
+      run:
+        shell: bash
+    env:
+      DIST: DIAspeXtract-${{ matrix.name }}
+      SIGN: ${{ needs.preflight.outputs.sign }}
+      RELEASE: ${{ needs.preflight.outputs.release }}
+      VERSION: ${{ needs.preflight.outputs.version }}
+      OPENMS_REF: ${{ needs.preflight.outputs.openms_ref }}
+      MACOS_FLOOR: ${{ matrix.macos_floor }}
+      # brew: the runner image's formula index, not today's. Fewer version moves, so fewer OpenMS cache misses.
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: '1'
+
+    steps:
+      # The patches and shell scripts must keep LF: the Windows image checks out with core.autocrlf=true.
+      - name: Keep LF line endings (Windows)
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+
       - uses: actions/checkout@v7
         with: { path: diaspextract }
 
-      - name: Build dependencies
+      # Before anything expensive: a tag build without the full Apple signing material fails NOW, not after a 2-hour
+      # OpenMS build -- and never ships unsigned (mzPeakViewer shipped 37 green, ad-hoc-signed releases that way).
+      # secrets.* is illegal in if:, so the presence check becomes a step output that later steps test.
+      - name: Signing material (macOS)
+        id: macsign
+        if: runner.os == 'macOS' && env.SIGN == 'true'
+        env:
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_APPLE_ID: ${{ secrets.MACOS_APPLE_ID }}
+          MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+          MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build ccache ca-certificates lsb-release wget \
-            qt6-base-dev libqt6svg6-dev \
-            libboost-all-dev libeigen3-dev libxerces-c-dev libbz2-dev zlib1g-dev \
-            libglpk-dev libsvm-dev libhdf5-dev libsqlite3-dev libzip-dev liblzma-dev \
-            coinor-libcbc-dev coinor-libcgl-dev coinor-libclp-dev \
-            coinor-libcoinutils-dev coinor-libosi-dev
-          # Arrow/Parquet are not in stock Ubuntu; OpenMS needs them for the mzPeak format.
-          wget -q "https://apache.jfrog.io/artifactory/arrow/$(lsb_release --id --short | tr 'A-Z' 'a-z')/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb"
-          sudo apt-get install -y ./apache-arrow-apt-source-latest-*.deb
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libarrow-dev libparquet-dev
-
-      - name: ccache
-        uses: hendrikmuhs/ccache-action@v1
-        with:
-          key: openms-${{ runner.os }}
-          max-size: 2G
-
-      - name: Check out OpenMS
-        # Pinned by default: a moving base makes a patch failure indistinguishable from an upstream
-        # change. Pass openms_ref to test against a newer commit deliberately.
-        run: |
-          REF="${{ github.event.inputs.openms_ref }}"
-          [ -n "$REF" ] || REF=$(sed -n 's/^OPENMS_BASE=//p' diaspextract/patches/openms.lock)
-          echo "building against OpenMS $REF"
-          git clone https://github.com/OpenMS/OpenMS.git
-          git -C OpenMS checkout "$REF"
-
-      - name: Apply the DIAspeXtract patches to OpenMS
-        # a deliberate openms_ref is another commit than the pin
-        run: diaspextract/scripts/apply_openms_patches.sh "$GITHUB_WORKSPACE/OpenMS" ${{ github.event.inputs.openms_ref && '--other-commit' || '' }}
-
-      - name: Build OpenMS
-        run: |
-          cmake -S OpenMS -B OpenMS/build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release -DWITH_GUI=OFF -DHAS_XSERVER=OFF -DCMAKE_CXX_FLAGS=-ffp-contract=off \
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-          grep -q '^CMAKE_CXX_FLAGS:STRING=-ffp-contract=off$' OpenMS/build/CMakeCache.txt
-          cmake --build OpenMS/build --target OpenMS
-
-      - name: Build DIAspeXtract
-        run: |
-          cmake -S diaspextract -B diaspextract/build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release -DOpenMS_DIR="$GITHUB_WORKSPACE/OpenMS/build" \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-          cmake --build diaspextract/build
-
-      # The C++ unit tests again, under the tool build's own flags (tests.yml builds them without OpenMS):
-      # dnoise_ms1 pins the FMA-sensitive gate boxes, tdf_load the analysis.tdf metadata loader. Each must
-      # actually run -- a regex that matches no registered test passes vacuously.
-      - name: C++ unit tests in the tool build (dnoise MS1 port, analysis.tdf loader)
-        run: |
-          set -o pipefail
-          ctest --test-dir diaspextract/build --output-on-failure --no-tests=error -R 'dnoise|tdf_load' | tee "$RUNNER_TEMP/ctest.txt"
-          for t in dnoise_ms1 tdf_load; do
-            grep -Eq "Test +#[0-9]+: $t" "$RUNNER_TEMP/ctest.txt" \
-              || { echo "::error::no $t test ran in the tool build"; exit 1; }
+          missing=""
+          for v in MACOS_CERTIFICATE_BASE64 MACOS_CERTIFICATE_PASSWORD MACOS_SIGNING_IDENTITY MACOS_APPLE_ID MACOS_TEAM_ID MACOS_NOTARY_PASSWORD; do
+            [ -n "${!v}" ] || missing="$missing $v"
           done
+          if [ -z "$missing" ]; then
+            echo "::notice title=macOS signing::Developer ID signing and notarization enabled"
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          elif [ "$RELEASE" = true ]; then
+            echo "::error title=macOS signing material missing::$missing -- a release is never shipped unsigned"
+            exit 1
+          else
+            # Signed but not notarized is as bad as unsigned to Gatekeeper, so partial material signs nothing.
+            echo "::warning title=Unsigned macOS dry run::missing:$missing -- the bundle and disk image stay unsigned"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      # OpenMS refuses to start without its share/ directory (unit definitions, CV terms). A source
-      # build does not install it, so point at the tree directly. Without this the binary dies on
-      # --help with an uncaught exception whose message never reaches the log.
-      # These gates run the binary with NOTHING inherited from the runner except the variables
-      # the tool documents as required. `env -i` is the load-bearing part: a runner that still has
-      # the build tree on PATH, or OPENMS_DATA_PATH exported globally, will happily run a binary
-      # that cannot stand on its own -- which is how a broken artefact reaches users past a green
-      # pipeline.
-      #
-      # Streams are MERGED deliberately: TOPPBase writes --help to STDERR, not stdout, so a gate
-      # that reads stdout alone sees an empty file and every grep below passes vacuously.
-      - name: The binary runs from a clean environment and reports itself
+      # Same gate for SignPath, with one difference kept from FASTag: without the secrets even a TAG build ships the
+      # Windows zip unsigned, with a warning. The SignPath Foundation application is still pending; failing every
+      # release on it would block the other four platforms. Revisit once the project is approved.
+      - name: Signing material (Windows)
+        id: winsign
+        if: runner.os == 'Windows' && env.SIGN == 'true'
+        env:
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          SIGNPATH_ORG_ID: ${{ secrets.SIGNPATH_ORG_ID || env.SIGNPATH_ORG_ID_DEFAULT }}
+          POLICY: ${{ inputs.signing_policy || (needs.preflight.outputs.release == 'true' && 'release-signing' || 'test-signing') }}
         run: |
-          set -o pipefail
-          env -i HOME="$HOME" \
-                 OPENMS_DATA_PATH="$GITHUB_WORKSPACE/OpenMS/share/OpenMS" \
-                 LD_LIBRARY_PATH="$GITHUB_WORKSPACE/OpenMS/build/lib" \
-                 diaspextract/build/diaspextract --help > help.txt 2>&1 \
-            || { echo "::error::the tool does not run from a clean environment"; cat help.txt; exit 1; }
-          head -6 help.txt
+          if [ -n "$SIGNPATH_API_TOKEN" ] && [ -n "$SIGNPATH_ORG_ID" ]; then
+            echo "::notice title=Windows signing::SignPath policy $POLICY"
+            { echo "enabled=true"; echo "policy=$POLICY"; } >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning title=Unsigned Windows binary::SIGNPATH_API_TOKEN is not set -- diaspextract.exe ships unsigned; SmartScreen warns on first run"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
 
-          # the space matters: '^DIAspeXtract' alone would also accept the pre-rename 'DIAspeXtractor -- ...' header
-          grep -q '^DIAspeXtract ' help.txt \
-            || { echo "::error::the tool does not identify itself as DIAspeXtract"; cat help.txt; exit 1; }
+      # setup-python's interpreter, not a conda one: the e2e suite needs the standard library only.
+      - uses: actions/setup-python@v7
+        id: py
+        with:
+          python-version: '3.12'
 
-          # OUR version, not the OpenMS one TOPPBase prints by default.
-          V=$(sed -n 's/^project(DIAspeXtract VERSION \([0-9.]*\).*/\1/p' diaspextract/CMakeLists.txt)
-          VE=${V//./\\.}   # 1.3.0 -> 1\.3\.0: the dots are literal in both greps below
-          grep -q "^Version: $VE" help.txt \
-            || { echo "::error::wrong version (want $V, likely OpenMS's)"; cat help.txt; exit 1; }
-          # and the OpenMS build alongside it, because a bug report needs both numbers
-          grep -qE "^Version: $VE \\(OpenMS .+\\)" help.txt \
-            || { echo "::error::Version line does not carry the OpenMS build"; cat help.txt; exit 1; }
-
-          # OpenMS builds with ENABLE_UPDATE_CHECK=ON by default and TOPPBase then makes a network
-          # request on every run; when it fails, Qt prints to stderr and users report it as ours.
-          # main() disables it -- assert that it stayed disabled.
-          ! grep -qi 'QIODevice\|QNetwork' help.txt \
-            || { echo "::error::the OpenMS update check is live -- see main()"; cat help.txt; exit 1; }
-
-      # Same check tests.yml runs from the source, but against the inventory the binary actually
-      # registers -- the only authority on what the shipped tool accepts.
-      - name: Option tokens in README and CONTRIBUTING are options the binary registers
-        run: |
-          set -o pipefail
-          env -i HOME="$HOME" \
-                 OPENMS_DATA_PATH="$GITHUB_WORKSPACE/OpenMS/share/OpenMS" \
-                 LD_LIBRARY_PATH="$GITHUB_WORKSPACE/OpenMS/build/lib" \
-                 diaspextract/build/diaspextract -write_ini "$RUNNER_TEMP/ini.xml"
-          python3 diaspextract/scripts/check_option_tokens.py --ini "$RUNNER_TEMP/ini.xml"
-
-      # Check 23 runs a REAL diaPASEF .d through the default path (streaming loader, exact calibration, dnoise, tiles).
-      # OpenMS publishes a 5.6-minute HeLa diaPASEF run as test data for its own Bruker reader (ENABLE_OPENTIMS_TESTS).
-      - name: Real diaPASEF test run (OpenMS test data)
+      # One set of paths for every later step. On Windows they are mixed (D:/a/...): bash, CMake and the native tools
+      # all accept that form, and $GITHUB_WORKSPACE's backslashes break CMake string escapes ("\a").
+      - name: Paths
+        env:
+          PY: ${{ steps.py.outputs.python-path }}
         run: |
           set -euo pipefail
-          wget -q -O "$RUNNER_TEMP/dia.zip" https://github.com/OpenMS/timsrust_cpp_bridge/releases/download/test-data-v1/DIA_HeLa_50ng_5_6min.d.zip
-          unzip -q "$RUNNER_TEMP/dia.zip" -d "$RUNNER_TEMP/dia"
-          D=$(find "$RUNNER_TEMP/dia" -name analysis.tdf -printf '%h\n' | head -1)
-          [ -n "$D" ] || { echo "::error::no analysis.tdf in the test data"; exit 1; }
-          echo "DIASPEXTRACT_TEST_D=$D" >> "$GITHUB_ENV"
+          if [ "$RUNNER_OS" = Windows ]; then
+            WS=$(cygpath -m "$GITHUB_WORKSPACE"); RT=$(cygpath -m "$RUNNER_TEMP"); EXE=.exe; NPROC=$NUMBER_OF_PROCESSORS
+            PY=$(cygpath -m "$PY")
+          else
+            WS=$GITHUB_WORKSPACE; RT=$RUNNER_TEMP; EXE=
+            if [ "$RUNNER_OS" = macOS ]; then NPROC=$(sysctl -n hw.ncpu); else NPROC=$(nproc); fi
+          fi
+          {
+            echo "WS=$WS"; echo "RT=$RT"; echo "EXE=$EXE"; echo "NPROC=$NPROC"; echo "PY=$PY"
+            echo "BIN=$WS/diaspextract/build/diaspextract$EXE"
+            echo "OMS_SHARE=$WS/OpenMS/share/OpenMS"
+          } | tee -a "$GITHUB_ENV"
 
-      # The golden spectra digest of that run at the defaults (repository variable DIASPEXTRACT_TEST_D_DIGEST): check 23
-      # compares against it when it is set and prints the digest when it is not; set it from the first green run's log
-      # ("real .d spectra digest ...") and update it only with a CHANGELOG entry that changes the spectra.
-      - name: End-to-end suite against the freshly built binary
-        env:
-          OPENMS_DATA_PATH: ${{ github.workspace }}/OpenMS/share/OpenMS
-          DIASPEXTRACT_TEST_D_DIGEST: ${{ vars.DIASPEXTRACT_TEST_D_DIGEST }}
+      # Shallow, at the resolved commit. GitHub serves a reachable commit by SHA; if that is ever refused, a blobless
+      # fetch of develop has the pin too.
+      - name: Fetch OpenMS
         run: |
-          set -o pipefail
-          python3 diaspextract/test/test_diaspextract.py diaspextract/build/diaspextract | tee e2e.log
-          grep -q 'PASS  a real diaPASEF .d' e2e.log || { echo "::error::the real .d check did not run"; exit 1; }
+          set -euo pipefail
+          git init -q OpenMS
+          git -C OpenMS remote add origin https://github.com/OpenMS/OpenMS.git
+          if git -C OpenMS fetch -q --depth 1 origin "$OPENMS_REF"; then
+            git -C OpenMS checkout -q --detach FETCH_HEAD
+          else
+            git -C OpenMS fetch -q --filter=blob:none origin develop
+            git -C OpenMS checkout -q --detach "$OPENMS_REF"
+          fi
+          echo "OPENMS_SHA=$(git -C OpenMS rev-parse HEAD)" | tee -a "$GITHUB_ENV"
 
-      # A tool that only builds against a PATCHED development OpenMS has one more way to ship
-      # broken: the patches silently not applying. apply_openms_patches.sh is what CI runs above,
-      # so assert the markers the patches leave behind are actually in the built tree.
+      # ---- dependencies, per platform. Each step ends by writing DEPS_FP, a fingerprint of the library versions the
+      # OpenMS build links. It is part of the cache key: a cached libOpenMS linked against libarrow.so.2300 or a Homebrew
+      # boost that has since moved cannot link the tool, so a dependency move must rebuild OpenMS, not break.
+
+      # OpenMS's own tools/ci/deps-ubuntu.sh at the pin, without the GUI, docs and uv parts, plus build.yml's earlier
+      # list (coinor, Arrow from the Apache repository). GLPK is left out on purpose: OpenMS uses COIN-OR when it is
+      # there, and a GPL library must not end up in a BSD bundle (asserted in "Check the bundle").
+      - name: Dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          PKGS="build-essential cmake ninja-build patch patchelf ca-certificates lsb-release wget
+            qt6-base-dev libqt6svg6-dev libboost-all-dev libeigen3-dev libxerces-c-dev libbz2-dev zlib1g-dev
+            libsvm-dev libhdf5-dev libsqlite3-dev libzip-dev liblzma-dev libcurl4-openssl-dev
+            coinor-libcbc-dev coinor-libcgl-dev coinor-libclp-dev coinor-libcoinutils-dev coinor-libosi-dev"
+          sudo apt-get update -q
+          # shellcheck disable=SC2086
+          sudo apt-get install -y -q --no-install-recommends $PKGS
+          wget -q "https://packages.apache.org/artifactory/arrow/$(lsb_release --id --short | tr '[:upper:]' '[:lower:]')/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb"
+          sudo apt-get install -y -q ./apache-arrow-apt-source-latest-*.deb
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends libarrow-dev libparquet-dev
+          # shellcheck disable=SC2086
+          fp=$( { lsb_release -rs; uname -m; dpkg-query -W -f='${Package}=${Version}\n' $PKGS libarrow-dev libparquet-dev | sort; } | sha256sum | cut -c1-16)
+          echo "DEPS_FP=$fp" | tee -a "$GITHUB_ENV"
+
+      # OpenMS's tools/ci/deps-macos.sh at the pin (qtbase instead of its GUI set). OpenMP comes from Homebrew's
+      # libomp: Apple's clang ships no runtime. dylibbundler is the bundling tool, not a build dependency.
+      - name: Dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          FORMULAE="ninja libomp libsvm xerces-c boost eigen sqlite coinutils cbc cgl clp apache-arrow libzip zstd qtbase"
+          # shellcheck disable=SC2086
+          brew install --overwrite $FORMULAE dylibbundler
+          # shellcheck disable=SC2086
+          fp=$( { sw_vers -productVersion | cut -d. -f1; uname -m; brew list --versions $FORMULAE | sort; } | shasum -a 256 | cut -c1-16)
+          {
+            echo "DEPS_FP=$fp"
+            echo "BREW=$(brew --prefix)"
+            echo "LIBOMP=$(brew --prefix libomp)"
+          } | tee -a "$GITHUB_ENV"
+
+      # Windows follows OpenMS's own CI and FASTag's windows.yml: MSVC environment, contrib (built with MSVC, cached),
+      # Eigen and Ninja from choco, Qt from install-qt-action, Arrow/Parquet/libzip from conda-forge, curl from source.
+      # OpenMS and the tool are then compiled with clang-cl (MSVC ABI): cl's OpenMP lacks taskloop, and the
+      # cross-platform identity was verified with a clang-cl OpenMS.
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with:
+          arch: amd64
+
+      - name: Eigen and Ninja (Windows)
+        if: runner.os == 'Windows'
+        run: choco install -y --no-progress eigen ninja
+
+      - name: Qt (Windows)
+        if: runner.os == 'Windows'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: 'win64_msvc2022_64'
+          cache: 'false'
+          archives: 'qtbase'
+
+      - name: conda (Windows)
+        if: runner.os == 'Windows'
+        uses: conda-incubator/setup-miniconda@v4
+        with:
+          auto-update-conda: true
+          activate-environment: diaspextract-deps
+          python-version: '3.11'
+          use-mamba: true
+
+      # Arrow >= 23 is what OpenMS at the pin requires. No libarrow-dataset/acero: they make OpenMS require a libxml2
+      # that conda's MSVC layout does not satisfy (FASTag). sqlite is the tool's own SQLite (OpenMS vendors its own).
+      - name: Dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          conda install -q -y -c conda-forge 'libarrow>=23' libparquet libzip nlohmann_json sqlite
+          CONDA_LIB="$(cygpath -m "$CONDA_PREFIX")/Library"
+          # clang-cl and the LLVM OpenMP runtime it links. Prefer Visual Studio's own LLVM (matched to this MSVC STL);
+          # fall back to the standalone LLVM on the image. OpenMS and the tool must share ONE OpenMP runtime.
+          VSLLVM="$(cygpath -u "$VCINSTALLDIR")/Tools/Llvm/x64"
+          LLVM=""
+          for d in "$VSLLVM" "/c/Program Files/LLVM"; do
+            if [ -x "$d/bin/clang-cl.exe" ] && [ -f "$d/lib/libomp.lib" ]; then LLVM=$d; break; fi
+          done
+          [ -n "$LLVM" ] || { echo "::error::no clang-cl with libomp.lib in $VSLLVM or C:/Program Files/LLVM"; find "$VSLLVM" "/c/Program Files/LLVM" -maxdepth 2 -iname '*omp*' 2>&1; exit 1; }
+          CLANG_CL=$(cygpath -m "$LLVM/bin/clang-cl.exe")
+          "$CLANG_CL" --version
+          llvm_major=$("$CLANG_CL" --version | sed -n 's/.*clang version \([0-9]*\).*/\1/p' | head -1)
+          eigen=$(choco list --limit-output eigen || true)
+          fp=$( { echo "qt=$QT_VERSION llvm=$llvm_major $eigen"
+                  conda list --json | python -c "import json,sys; [print(p['name'],p['version'],p['build_string']) for p in json.load(sys.stdin) if p['name'] in ('libarrow','libparquet','libzip','sqlite')]"
+                } | sha256sum | cut -c1-16)
+          {
+            echo "DEPS_FP=$fp"
+            echo "CONDA_LIB=$CONDA_LIB"
+            echo "LLVM_DIR=$(cygpath -m "$LLVM")"
+            echo "CLANG_CL=$CLANG_CL"
+            echo "QT_DIR=$(cygpath -m "$QT_ROOT_DIR")"
+            echo "EIGEN_DIR=C:/ProgramData/chocolatey/lib/eigen/share/cmake"
+            # clang-cl -fopenmp links libomp.lib by name: put LLVM's lib directory on the linker's search path.
+            echo "LIB=$(cygpath -w "$LLVM/lib");$LIB"
+          } | tee -a "$GITHUB_ENV"
+
+      # contrib (Boost, Xerces-C, libsvm, COIN-OR, ...) at the commit the OpenMS pin records as its submodule, read from
+      # the tree rather than assumed (FASTag broke twice on a stale contrib pin). Saved right after it is built, with
+      # curl installed into the same prefix; only lib/, bin/ and include/ are kept, as OpenMS's CI does.
+      - name: contrib revision (Windows)
+        if: runner.os == 'Windows'
+        run: echo "CONTRIB_REV=$(git -C OpenMS ls-tree HEAD contrib | awk '{print $3}')" | tee -a "$GITHUB_ENV"
+
+      - name: Restore contrib (Windows)
+        id: contrib
+        if: runner.os == 'Windows'
+        uses: actions/cache/restore@v6
+        with:
+          path: contrib-build
+          key: contrib-${{ matrix.runner }}-${{ env.CONTRIB_REV }}-curl${{ env.CURL_VERSION }}-v1
+
+      - name: Build contrib and libcurl (Windows)
+        if: runner.os == 'Windows' && steps.contrib.outputs.cache-hit != 'true'
+        timeout-minutes: 120
+        run: |
+          set -euo pipefail
+          git init -q contrib-src
+          git -C contrib-src remote add origin https://github.com/OpenMS/contrib.git
+          git -C contrib-src fetch -q --depth 1 origin "$CONTRIB_REV"
+          git -C contrib-src checkout -q FETCH_HEAD
+          cmake -S contrib-src -B contrib-tmp -G "Visual Studio 17 2022" -A x64 -DBUILD_TYPE=ALL
+          cmake --build contrib-tmp --config Release
+          mkdir -p contrib-build
+          for d in lib bin include share; do [ -d "contrib-tmp/$d" ] && mv "contrib-tmp/$d" contrib-build/; done
+          curl -fsSL --retry 3 -o curl-src.tar.gz "https://curl.se/download/curl-$CURL_VERSION.tar.gz"
+          tar xzf curl-src.tar.gz
+          cmake -S "curl-$CURL_VERSION" -B curl-build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$WS/contrib-build" -DBUILD_SHARED_LIBS=ON -DCURL_USE_SCHANNEL=ON \
+            -DBUILD_CURL_EXE=OFF -DBUILD_TESTING=OFF -DCURL_DISABLE_LDAP=ON -DCURL_USE_LIBPSL=OFF
+          cmake --build curl-build
+          cmake --install curl-build
+          rm -rf contrib-tmp contrib-src curl-build "curl-$CURL_VERSION" curl-src.tar.gz
+          du -sh contrib-build
+
+      - name: Save contrib (Windows)
+        if: runner.os == 'Windows' && steps.contrib.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: contrib-build
+          key: contrib-${{ matrix.runner }}-${{ env.CONTRIB_REV }}-curl${{ env.CURL_VERSION }}-v1
+
+      # ---- OpenMS. The script installs src/TdfMzCalibration.h and src/PortableMath.h into the tree and applies the
+      # patches; it refuses another commit than the pin unless openms_ref asked for one. It runs on a cache hit too:
+      # the cache holds the build tree only, and the tool compiles against the patched headers of this source tree.
+      - name: Apply the DIAspeXtract patches to OpenMS
+        env:
+          OTHER: ${{ needs.preflight.outputs.other_commit }}
+        run: |
+          set -euo pipefail
+          if [ "$OTHER" = true ]; then diaspextract/scripts/apply_openms_patches.sh "$WS/OpenMS" --other-commit
+          else diaspextract/scripts/apply_openms_patches.sh "$WS/OpenMS"; fi
+
+      # Keyed on the runner, the resolved OpenMS commit, every input the patch script reads (patches/*, the script,
+      # the two headers it installs), the dependency fingerprint and the macOS floor. The build tree, not an install:
+      # the tool configures against OpenMS_DIR=<build> exactly as the README recipe does.
+      - name: OpenMS cache key
+        id: key
+        env:
+          PATCH_HASH: ${{ hashFiles('diaspextract/patches/**', 'diaspextract/scripts/apply_openms_patches.sh', 'diaspextract/src/TdfMzCalibration.h', 'diaspextract/src/PortableMath.h') }}
+        run: echo "key=openms-${{ matrix.runner }}-${OPENMS_SHA:0:12}-${PATCH_HASH:0:16}-${DEPS_FP}-osx${MACOS_FLOOR:-na}-v1" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Restore OpenMS
+        id: openms
+        uses: actions/cache/restore@v6
+        with:
+          path: OpenMS/build
+          key: ${{ steps.key.outputs.key }}
+
+      # The library only (`--target OpenMS`), Release, OpenTIMS on (Bruker .d), GUI off, and no floating-point
+      # contraction, so the spectra are the same bits on every platform. CMAKE_INSTALL_PREFIX points where nothing
+      # can exist on a user's machine: OpenMS probes its compiled-in install path for share/OpenMS BEFORE the one next
+      # to the executable, and the default /usr/local would let another installed OpenMS win silently.
+      - name: Build OpenMS
+        if: steps.openms.outputs.cache-hit != 'true'
+        timeout-minutes: 240
+        run: |
+          set -euo pipefail
+          COMMON=(-G Ninja -DCMAKE_BUILD_TYPE=Release -DWITH_OPENTIMS=ON -DWITH_GUI=OFF -DHAS_XSERVER=OFF
+                  -DENABLE_DOCS=OFF -DMT_ENABLE_OPENMP=ON -DCMAKE_INSTALL_PREFIX="$WS/openms-not-installed")
+          case "$RUNNER_OS" in
+            Linux)
+              cmake -S OpenMS -B OpenMS/build "${COMMON[@]}" -DCMAKE_CXX_FLAGS=-ffp-contract=off ;;
+            macOS)
+              # BOOST_USE_STATIC=OFF as in OpenMS's macOS CI: Homebrew's static Boost is not what OpenMS is tested with.
+              cmake -S OpenMS -B OpenMS/build "${COMMON[@]}" -DCMAKE_CXX_FLAGS=-ffp-contract=off \
+                -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOS_FLOOR" -DBOOST_USE_STATIC=OFF \
+                -DCMAKE_PREFIX_PATH="$BREW;$LIBOMP" -DOpenMP_ROOT="$LIBOMP" ;;
+            Windows)
+              # CXXFLAGS, not CMAKE_CXX_FLAGS: CMake combines the variable with its own defaults (/DWIN32 /D_WINDOWS
+              # /EHsc ...), where the cache variable would replace them. clang-cl needs the /clang: spelling.
+              CXXFLAGS=/clang:-ffp-contract=off cmake -S OpenMS -B OpenMS/build "${COMMON[@]}" \
+                -DCMAKE_C_COMPILER="$CLANG_CL" -DCMAKE_CXX_COMPILER="$CLANG_CL" \
+                -DOPENMS_CONTRIB_LIBS="$WS/contrib-build" -DUSE_EXTERNAL_JSON=OFF \
+                -DEigen3_DIR="$EIGEN_DIR" -DCMAKE_PREFIX_PATH="$QT_DIR;$CONDA_LIB;$WS/contrib-build" \
+                -DARROW_USE_STATIC=OFF -DArrow_DIR="$CONDA_LIB/lib/cmake/Arrow" -DParquet_DIR="$CONDA_LIB/lib/cmake/Parquet" \
+                -DOpenMP_ROOT="$LLVM_DIR" ;;
+          esac
+          cmake --build OpenMS/build --target OpenMS --parallel "$NPROC"
+          # Object files are not needed to link against the library; without them the cache is a fraction the size.
+          find OpenMS/build \( -name '*.o' -o -name '*.obj' \) -delete
+          du -sh OpenMS/build
+
+      - name: Save OpenMS
+        if: steps.openms.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: OpenMS/build
+          key: ${{ steps.key.outputs.key }}
+
+      # Read off the build that is about to be linked, cached or not: the flag in the cache, and OpenMP compiled into
+      # libOpenMS (an OpenMP the compiler silently ignored would leave every pragma serial and still build green).
+      - name: OpenMS was built without FP contraction and with OpenMP
+        run: |
+          set -euo pipefail
+          flags=$(sed -n 's/^CMAKE_CXX_FLAGS:STRING=//p' OpenMS/build/CMakeCache.txt)
+          echo "CMAKE_CXX_FLAGS=$flags"
+          case "$RUNNER_OS" in
+            Windows) [[ "$flags" == *"/clang:-ffp-contract=off"* && "$flags" == *"/EHsc"* ]] ;;
+            *)       [ "$flags" = "-ffp-contract=off" ] ;;
+          esac || { echo "::error::OpenMS was not configured with -ffp-contract=off"; exit 1; }
+          case "$RUNNER_OS" in
+            Linux)   lib=OpenMS/build/lib/libOpenMS.so;                  syms=$(nm -D --undefined-only "$lib") ;;
+            macOS)   lib=OpenMS/build/lib/libOpenMS.dylib;               syms=$(nm -u "$lib") ;;
+            Windows) lib=OpenMS/build/bin/OpenMS.dll;                    syms=$(dumpbin -nologo -imports "$lib") ;;
+          esac
+          grep -Eq 'GOMP_parallel|__kmpc_fork_call' <<< "$syms" \
+            || { echo "::error::$lib calls no OpenMP runtime entry point: its parallel regions were compiled serial"; exit 1; }
+          echo "OpenMP parallel regions in $lib: yes"
+
+      # ---- the tool
+      - name: Build DIAspeXtract
+        run: |
+          set -euo pipefail
+          ARGS=(-S diaspextract -B diaspextract/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DOpenMS_DIR="$WS/OpenMS/build")
+          case "$RUNNER_OS" in
+            Linux)   cmake "${ARGS[@]}" ;;
+            macOS)   cmake "${ARGS[@]}" -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOS_FLOOR" \
+                       -DCMAKE_PREFIX_PATH="$BREW;$LIBOMP" -DOpenMP_ROOT="$LIBOMP" ;;
+            Windows) cmake "${ARGS[@]}" -DCMAKE_CXX_COMPILER="$CLANG_CL" -DEigen3_DIR="$EIGEN_DIR" \
+                       -DCMAKE_PREFIX_PATH="$QT_DIR;$CONDA_LIB;$WS/contrib-build" -DOpenMP_ROOT="$LLVM_DIR" ;;
+          esac
+          cmake --build diaspextract/build --parallel "$NPROC"
+
+      # Windows has no RPATH: the build binary and its tests find their DLLs through PATH. Kept in a variable rather
+      # than on the job's PATH, so the clean-environment runs below can leave it out.
+      - name: Runtime DLL directories (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          p=""
+          for d in "$WS/OpenMS/build/bin" "$WS/contrib-build/bin" "$WS/contrib-build/lib" "$QT_DIR/bin" "$CONDA_LIB/bin" "$LLVM_DIR/bin"; do
+            [ -d "$d" ] && p="$p:$(cygpath -u "$d")"
+          done
+          echo "DLL_PATH=${p#:}" | tee -a "$GITHUB_ENV"
+
+      # clean_run runs the BUILD binary with nothing inherited from the runner but what the tool documents
+      # (OPENMS_DATA_PATH, a source-built OpenMS has no installed share/) and the loader path. `env -i` is the point: a
+      # runner with the build tree on PATH happily runs a binary that cannot stand on its own.
+      - name: Clean-environment helper
+        run: |
+          cat > "$RT/clean-env.sh" <<'EOF'
+          clean_run() {
+            case "$RUNNER_OS" in
+              Linux)   env -i HOME="$HOME" PATH=/usr/bin:/bin OPENMS_DATA_PATH="$OMS_SHARE" LD_LIBRARY_PATH="$WS/OpenMS/build/lib" "$@" ;;
+              macOS)   env -i HOME="$HOME" PATH=/usr/bin:/bin OPENMS_DATA_PATH="$OMS_SHARE" "$@" ;;
+              Windows) env -i HOME="$HOME" USERPROFILE="$USERPROFILE" TEMP="$TEMP" TMP="$TMP" SYSTEMROOT="$SYSTEMROOT" WINDIR="$WINDIR" \
+                         OPENMS_DATA_PATH="$OMS_SHARE" PATH="$DLL_PATH:/c/Windows/system32:/c/Windows" "$@" ;;
+            esac
+          }
+          EOF
+
+      # Every registered test must run: a regex that matches nothing passes vacuously, hence --no-tests=error and the
+      # named list. dnoise_ms1 pins the FMA-sensitive gate boxes, portable_math the exp/log bits, tdf_load the reader.
+      - name: Unit tests (ctest)
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_OS" != Windows ] || export PATH="$DLL_PATH:$PATH"
+          ctest --test-dir diaspextract/build --output-on-failure --no-tests=error | tee "$RT/ctest.txt"
+          for t in dnoise_ms1 portable_math tdf_load cgroup_mem; do
+            grep -Eq "Test +#[0-9]+: $t .*Passed" "$RT/ctest.txt" || { echo "::error::$t did not run and pass"; exit 1; }
+          done
+
+      # Streams are merged: TOPPBase writes --help to STDERR, and a gate reading stdout alone passes vacuously.
+      - name: The binary runs from a clean environment and reports itself
+        run: |
+          set -euo pipefail
+          . "$RT/clean-env.sh"
+          clean_run "$BIN" --help > "$RT/help.txt" 2>&1 || { echo "::error::the tool does not run from a clean environment"; cat "$RT/help.txt"; exit 1; }
+          head -6 "$RT/help.txt"
+          # the space matters: '^DIAspeXtract' alone would also accept the pre-rename 'DIAspeXtractor -- ...' header
+          grep -q '^DIAspeXtract ' "$RT/help.txt" || { echo "::error::the tool does not identify itself as DIAspeXtract"; exit 1; }
+          # OUR version, not the OpenMS one TOPPBase prints by default, and the OpenMS build beside it.
+          VE=${VERSION//./\\.}
+          grep -qE "^Version: $VE \\(OpenMS .+\\)" "$RT/help.txt" \
+            || { echo "::error::Version line is not '$VERSION (OpenMS ...)'"; grep '^Version' "$RT/help.txt"; exit 1; }
+          # main() disables OpenMS's update check; when it is live Qt prints network noise users report as ours.
+          ! grep -qi 'QIODevice\|QNetwork' "$RT/help.txt" || { echo "::error::the OpenMS update check is live -- see main()"; exit 1; }
+
+      # SignPath signs diaspextract.exe only when its ProductName and ProductVersion match the artifact configuration,
+      # so check them on every push, not first at a release. The output is the version the signing request passes.
+      - name: Version resource (Windows)
+        id: winver
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $info = (Get-Item diaspextract/build/diaspextract.exe).VersionInfo
+          Write-Host "diaspextract.exe: ProductName '$($info.ProductName)', ProductVersion '$($info.ProductVersion)'"
+          if ($info.ProductName -cne 'DIAspeXtract' -or $info.ProductVersion -cne $env:VERSION) {
+            Write-Host "::error::diaspextract.exe must carry ProductName 'DIAspeXtract' and ProductVersion '$env:VERSION' (src/diaspextract.rc.in)"; exit 1 }
+          "version=$env:VERSION" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+
+      # The binary's own option inventory is the authority on what README, CONTRIBUTING and docs/options.md may name.
+      - name: Option tokens in the docs are options the binary registers
+        run: |
+          set -euo pipefail
+          . "$RT/clean-env.sh"
+          clean_run "$BIN" -write_ini "$RT/ini.xml"
+          "$PY" diaspextract/scripts/check_option_tokens.py --ini "$RT/ini.xml"
+
+      # The tool only builds against a PATCHED OpenMS, so one more way to ship broken is a patch silently not applied.
       - name: The OpenMS patches are in the tree the binary was built from
         run: |
-          set -o pipefail
           fail=0
           for f in diaspextract/patches/*.patch; do
-            base=$(basename "$f")
-            # every patch must at least apply cleanly in reverse -- i.e. it IS applied
-            if ! git -C OpenMS apply --reverse --check "$GITHUB_WORKSPACE/$f" 2>/dev/null; then
-              echo "::error::$base is NOT applied to the OpenMS tree"; fail=1
-            else
-              echo "  ok: $base"
-            fi
+            if patch -p1 -R --dry-run -s -d OpenMS < "$f" > /dev/null; then echo "  ok: $(basename "$f")"
+            else echo "::error::$(basename "$f") is NOT applied to the OpenMS tree"; fail=1; fi
           done
           exit $fail
+
+      - name: Real diaPASEF test run
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 -o "$RT/dia.zip" "$TEST_D_URL"
+          "$PY" -m zipfile -e "$RT/dia.zip" "$RT/dia"
+          D=$("$PY" -c "import pathlib,sys; print(next(pathlib.Path(sys.argv[1]).rglob('analysis.tdf')).parent.as_posix())" "$RT/dia")
+          echo "DIASPEXTRACT_TEST_D=$D" | tee -a "$GITHUB_ENV"
+
+      # Check 23 runs the real .d through the default path (streaming loader, exact calibration, dnoise, tiles) five
+      # times. With the repository variable DIASPEXTRACT_TEST_D_DIGEST set, its digest must equal it -- on all five
+      # platforms, since the output is identical; unset, the suite prints the digest to set it from.
+      - name: End-to-end suite against the freshly built binary
+        timeout-minutes: 120
+        env:
+          DIASPEXTRACT_TEST_D_DIGEST: ${{ vars.DIASPEXTRACT_TEST_D_DIGEST }}
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_OS" != Windows ] || export PATH="$DLL_PATH:$PATH"
+          export OPENMS_DATA_PATH="$OMS_SHARE"
+          "$PY" diaspextract/test/test_diaspextract.py "$BIN" "$RT/e2e" | tee "$RT/e2e.log"
+          grep -q 'PASS  a real diaPASEF .d' "$RT/e2e.log" || { echo "::error::the real .d check did not run"; exit 1; }
+
+      # The digest of check 23's default-settings output: compared across platforms by the identity job, and against
+      # the packaged binary's own run below.
+      - name: Spectra digest of the real run
+        run: |
+          set -euo pipefail
+          mkdir -p "$RT/digest"
+          "$PY" -c "import sys; sys.path.insert(0, sys.argv[1]); from test_diaspextract import digest; print(digest(sys.argv[2]))" \
+            diaspextract/test "$RT/e2e/real_default.mzML" > "$RT/digest/${{ matrix.name }}.txt"
+          echo "DIGEST=$(cat "$RT/digest/${{ matrix.name }}.txt")" | tee -a "$GITHUB_ENV"
+          echo "${{ matrix.name }}: real .d spectra digest \`$(cat "$RT/digest/${{ matrix.name }}.txt")\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ matrix.name }}
+          path: ${{ env.RT }}/digest/${{ matrix.name }}.txt
+          if-no-files-found: error
+
+      # ---- Windows signing, before bundling: Authenticode signs the .exe file itself, so the signed copy is what the
+      # bundle and its portability check use. upload-artifact zips, hence the zip-file artifact configuration
+      # (.signpath/artifact-configurations/initial.xml); the policy defaults to release-signing only on a v* tag.
+      - name: Upload the unsigned exe for SignPath (Windows)
+        id: unsigned
+        if: steps.winsign.outputs.enabled == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: diaspextract-windows-x64-unsigned
+          path: diaspextract/build/diaspextract.exe
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Sign via SignPath (Windows)
+        if: steps.winsign.outputs.enabled == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORG_ID || env.SIGNPATH_ORG_ID_DEFAULT }}
+          project-slug: ${{ env.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ steps.winsign.outputs.policy }}
+          artifact-configuration-slug: 'initial'
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          parameters: |
+            version: ${{ toJSON(steps.winver.outputs.version) }}
+          wait-for-completion: true
+          # The default 600 s fails a release whose Approve click comes later than ten minutes after the request.
+          wait-for-completion-timeout-in-seconds: 1800
+          output-artifact-directory: signed
+
+      # An error, not a warning: carrying on would ship the unsigned exe in a run that asked for a signature.
+      - name: Put the signed exe in place (Windows)
+        if: steps.winsign.outputs.enabled == 'true'
+        shell: pwsh
+        run: |
+          $signed = Get-ChildItem -Path signed -Filter diaspextract.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $signed) { Write-Host "::error::SignPath returned no diaspextract.exe"; exit 1 }
+          $sig = Get-AuthenticodeSignature $signed.FullName
+          Write-Host "Authenticode: $($sig.Status) -- $($sig.SignerCertificate.Subject)"
+          if (-not $sig.SignerCertificate -or $sig.Status -eq 'HashMismatch') { Write-Host "::error::the signed exe carries no intact signature"; exit 1 }
+          # A test-signing certificate is not Windows-trusted (Status UnknownError); only release-signing gives Valid.
+          if ($sig.Status -ne 'Valid') { Write-Host "::warning::signature status $($sig.Status) (expected for test-signing)" }
+          Copy-Item -Path $signed.FullName -Destination diaspextract/build/diaspextract.exe -Force
+
+      # ---- the bundle: bin/, lib/ (Linux, macOS), share/OpenMS, LICENSE, NOTICE, LICENSES/, README.md.
+      # No launcher and no environment variable: OpenMS finds share/OpenMS at <exe>/../share/OpenMS by itself once its
+      # compiled-in paths do not exist (see "Build OpenMS"), and the libraries are found through RPATH (Linux: $ORIGIN,
+      # macOS: @executable_path) or beside the exe (Windows).
+      - name: Bundle skeleton
+        run: |
+          set -euo pipefail
+          rm -rf dist && mkdir -p "dist/$DIST/bin" "dist/$DIST/share" "dist/$DIST/LICENSES/third-party"
+          cp "$BIN" "dist/$DIST/bin/"
+          cp -R OpenMS/share/OpenMS "dist/$DIST/share/OpenMS"
+          # examples/ is test and tutorial data, not runtime data (OpenMS's own install leaves it out too).
+          rm -rf "dist/$DIST/share/OpenMS/examples"
+          cp diaspextract/LICENSE diaspextract/NOTICE diaspextract/README.md "dist/$DIST/"
+          cp diaspextract/LICENSES/* "dist/$DIST/LICENSES/"
+          cp OpenMS/LICENSE "dist/$DIST/LICENSES/OpenMS-BSD-3-Clause.txt"
+
+      # Every non-system library ldd resolves, copied under its soname, RPATH rewritten to the bundle. glibc and the
+      # GCC runtime stay with the system: they are ABI-coupled to it, and the binary needs glibc >= the build's anyway.
+      - name: Bundle the libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          L="dist/$DIST/lib"; mkdir -p "$L"
+          ldd "$BIN" | awk '$2 == "=>" && $3 ~ /^\// {print $1, $3}' | while read -r so path; do
+            case "$so" in
+              linux-vdso*|ld-linux*|libc.so*|libm.so*|libmvec.so*|libpthread.so*|libdl.so*|librt.so*|libresolv.so*|libutil.so*|libgcc_s.so*|libstdc++.so*) continue ;;
+            esac
+            cp -L "$path" "$L/$so"
+            # the Debian copyright file of the package that ships it, for the third-party licence texts
+            pkg=$(dpkg -S "$path" 2>/dev/null || dpkg -S "$(readlink -f "$path")" 2>/dev/null || dpkg -S "/usr$path" 2>/dev/null || true)
+            pkg=${pkg%%:*}
+            if [ -n "$pkg" ] && [ -f "/usr/share/doc/$pkg/copyright" ]; then cp "/usr/share/doc/$pkg/copyright" "dist/$DIST/LICENSES/third-party/$pkg.txt"; fi
+          done
+          # shellcheck disable=SC2016  # $ORIGIN is for the loader, not the shell
+          patchelf --set-rpath '$ORIGIN/../lib' "dist/$DIST/bin/diaspextract"
+          for f in "$L"/*; do
+            # shellcheck disable=SC2016
+            patchelf --set-rpath '$ORIGIN' "$f"
+          done
+          ls "$L"; du -sh "dist/$DIST"
+
+      # dylibbundler for the dylibs, plus the frameworks it skips (Homebrew's Qt); the script says how, and ends by
+      # checking that every reference in every Mach-O is the system's or a file in lib/.
+      - name: Bundle the libraries (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          L="dist/$DIST/lib"
+          diaspextract/.github/scripts/bundle-macos.sh "dist/$DIST" \
+            "$WS/OpenMS/build/lib" "$LIBOMP/lib" "$BREW/lib" "$BREW/opt/qtbase/lib"
+          # third-party licence texts: the keg each bundled library came from
+          for f in "$L"/*; do
+            src=$(find "$BREW/Cellar" -name "$(basename "$f")" -path '*/lib/*' -print -quit 2>/dev/null || true)
+            [ -n "$src" ] || continue
+            formula=${src#"$BREW/Cellar/"}; formula=${formula%%/*}
+            keg=$(dirname "$(dirname "$src")")
+            for lic in "$keg"/LICENSE* "$keg"/COPYING* "$keg"/NOTICE*; do
+              [ -f "$lic" ] && cp "$lic" "dist/$DIST/LICENSES/third-party/$formula-$(basename "$lic")"
+            done
+          done
+          ls "$L"; du -sh "dist/$DIST"
+
+      # The DLL closure, resolved by CMake from the import tables (dumpbin) rather than by copying whole directories,
+      # plus the MSVC runtime: the runner has it in System32, a user's machine may not (app-local deployment is
+      # allowed). Windows has no RPATH, so every DLL sits beside the exe.
+      - name: Bundle the DLLs (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          set -euo pipefail
+          B="dist/$DIST/bin"
+          dirs=""
+          for d in "$WS/OpenMS/build/bin" "$WS/contrib-build/bin" "$WS/contrib-build/lib" "$QT_DIR/bin" "$CONDA_LIB/bin" "$LLVM_DIR/bin" "C:/Windows/System32"; do
+            [ -d "$d" ] && dirs="$dirs;$d"
+          done
+          cat > "$RT/bundle-dlls.cmake" <<'EOF'
+          set(CMAKE_GET_RUNTIME_DEPENDENCIES_PLATFORM "windows+pe")
+          set(CMAKE_GET_RUNTIME_DEPENDENCIES_TOOL "dumpbin")
+          set(CMAKE_GET_RUNTIME_DEPENDENCIES_COMMAND "${DUMPBIN}")
+          file(GET_RUNTIME_DEPENDENCIES
+            EXECUTABLES "${EXE}"
+            RESOLVED_DEPENDENCIES_VAR found
+            UNRESOLVED_DEPENDENCIES_VAR missing
+            DIRECTORIES ${DIRS}
+            PRE_EXCLUDE_REGEXES "^[Aa][Pp][Ii]-[Mm][Ss]-.*" "^[Ee][Xx][Tt]-[Mm][Ss]-.*"
+            POST_EXCLUDE_REGEXES "^[A-Za-z]:[/\\\\][Ww][Ii][Nn][Dd][Oo][Ww][Ss][/\\\\].*")
+          foreach(f IN LISTS found)
+            message(STATUS "bundle: ${f}")
+            file(COPY "${f}" DESTINATION "${OUT}")
+          endforeach()
+          foreach(f IN LISTS missing)
+            message(WARNING "unresolved: ${f}")
+          endforeach()
+          EOF
+          cmake -DEXE="$WS/$B/diaspextract.exe" -DOUT="$WS/$B" -DDIRS="${dirs#;}" -DDUMPBIN="$(cygpath -m "$(command -v dumpbin)")" -P "$RT/bundle-dlls.cmake"
+          crt="$(cygpath -u "$VCToolsRedistDir")/x64"
+          crts=("$crt"/Microsoft.VC*.CRT)
+          cp "${crts[-1]}"/*.dll "$B/"
+          ls "$B"; du -sh "dist/$DIST"
+
+      # Static checks on what is about to ship, before any of it runs.
+      - name: Check the bundle
+        run: |
+          set -euo pipefail
+          D="dist/$DIST"
+          # A GPL library (GLPK, linked only without COIN-OR) must not end up in a BSD-licensed bundle.
+          if find "$D" -iname '*glpk*' | grep -q .; then echo "::error::GLPK is in the bundle"; exit 1; fi
+          test -f "$D/share/OpenMS/CHEMISTRY/unimod.xml"
+          case "$RUNNER_OS" in
+            Linux)
+              # nothing may point back into the build tree
+              if readelf -d "$D/bin/diaspextract" "$D"/lib/* | grep -E 'R(UN)?PATH' | grep -v 'ORIGIN'; then
+                echo "::error::an RPATH outside the bundle"; exit 1; fi
+              # glibc floor: the highest GLIBC_ symbol version anything in the bundle asks for
+              syms=$(for f in "$D/bin/diaspextract" "$D"/lib/*; do objdump -T "$f" 2>/dev/null || true; done)
+              floor=$(grep -o 'GLIBC_[0-9.]*' <<< "$syms" | sort -uV | tail -1)
+              echo "glibc floor: $floor" | tee -a "$GITHUB_STEP_SUMMARY" ;;
+            macOS)
+              bad=0
+              while IFS= read -r f; do
+                file -b "$f" | grep -q Mach-O || continue
+                # (references and LC_RPATHs were checked by bundle-macos.sh)
+                # the floor: dyld refuses a Mach-O whose minos is above the running macOS. Parsed from a variable, not
+                # a pipe: awk's early exit would SIGPIPE otool, and pipefail would turn that into a failure.
+                lc=$(otool -l "$f")
+                minos=$(awk '/LC_BUILD_VERSION/{g=1} g&&$1=="minos"{print $2; exit}' <<< "$lc")
+                [ -n "$minos" ] || minos=$(awk '/LC_VERSION_MIN_MACOSX/{g=1} g&&$1=="version"{print $2; exit}' <<< "$lc")
+                echo "  $(basename "$f"): minos ${minos:-?}"
+                if [ -z "$minos" ] || [ "$(printf '%s\n%s\n' "$minos" "$MACOS_FLOOR" | sort -V | tail -1)" != "$MACOS_FLOOR" ]; then
+                  echo "::error::$f needs macOS ${minos:-?}, above the floor $MACOS_FLOOR"; bad=1; fi
+                case "$(basename "$f")" in diaspextract|libOpenMS*.dylib|libOpenSwathAlgo*.dylib)
+                  [ "$minos" = "$MACOS_FLOOR" ] || { echo "::error::$f targets $minos, not the chosen floor $MACOS_FLOOR"; bad=1; } ;;
+                esac
+              done < <(find "$D" -type f)
+              echo "macOS floor: $MACOS_FLOOR" >> "$GITHUB_STEP_SUMMARY"
+              exit $bad ;;
+            Windows)
+              # listed once into a variable: `ls | grep -q` under pipefail fails at random when grep exits first (FASTag)
+              files=$(ls "$D/bin")
+              for need in OpenMS.dll libomp vcruntime140; do grep -qi "$need" <<< "$files" || { echo "::error::$need is not in the bundle"; exit 1; }; done ;;
+          esac
+
+      # ---- macOS Developer ID signing: a throwaway keychain (password from the secret, or generated), the identity
+      # read from the keychain and accepted only as a Developer ID Application matching MACOS_SIGNING_IDENTITY (an
+      # Apple Development certificate looks alike and notarization rejects it).
+      - name: Import the signing certificate (macOS)
+        id: mackc
+        if: steps.macsign.outputs.enabled == 'true'
+        env:
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+          MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KC="$RUNNER_TEMP/diaspextract-signing.keychain-db"
+          KCPW=${MACOS_KEYCHAIN_PASSWORD:-$(uuidgen)}
+          echo "::add-mask::$KCPW"
+          CERT="$RUNNER_TEMP/cert.p12"
+          printf '%s' "$MACOS_CERTIFICATE_BASE64" | base64 --decode > "$CERT"
+          security create-keychain -p "$KCPW" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KCPW" "$KC"
+          security import "$CERT" -P "$MACOS_CERTIFICATE_PASSWORD" -t cert -f pkcs12 -k "$KC" -T /usr/bin/codesign
+          rm -f "$CERT"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KCPW" "$KC" > /dev/null
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          ids=$(security find-identity -v -p codesigning "$KC" | sed -n 's/.*"\(Developer ID Application: .*\)"$/\1/p' | sort -u)
+          [ "$(printf '%s' "$ids" | grep -c .)" = 1 ] || { echo "::error::expected exactly one Developer ID Application identity in the certificate"; exit 1; }
+          [ "$ids" = "$MACOS_SIGNING_IDENTITY" ] || { echo "::error::the certificate's identity differs from MACOS_SIGNING_IDENTITY"; exit 1; }
+          [[ "$ids" == *"($MACOS_TEAM_ID)" ]] || { echo "::error::the certificate's team differs from MACOS_TEAM_ID"; exit 1; }
+          { echo "identity=$ids"; echo "keychain=$KC"; } >> "$GITHUB_OUTPUT"
+
+      # Every Mach-O, dylibs first: signing the executable checks its dependencies' signatures. Hardened runtime and a
+      # secure timestamp are what notarization requires; library validation then needs every dylib under this team.
+      - name: Codesign every Mach-O (macOS)
+        if: steps.macsign.outputs.enabled == 'true'
+        env:
+          ID: ${{ steps.mackc.outputs.identity }}
+          KC: ${{ steps.mackc.outputs.keychain }}
+        run: |
+          set -euo pipefail
+          libs=(); exes=()
+          while IFS= read -r f; do
+            file -b "$f" | grep -q Mach-O || continue
+            case "$(file -b "$f")" in *executable*) exes+=("$f") ;; *) libs+=("$f") ;; esac
+          done < <(find "dist/$DIST" -type f)
+          for f in "${libs[@]}" "${exes[@]}"; do
+            codesign --force --options runtime --timestamp --keychain "$KC" --sign "$ID" "$f"
+          done
+          for f in "${libs[@]}" "${exes[@]}"; do codesign --verify --strict "$f"; done
+          codesign -dv --verbose=2 "dist/$DIST/bin/diaspextract" 2>&1 | grep -E 'Authority=Developer ID|TeamIdentifier|flags'
+
+      # ---- the regression guard: run the PACKAGED binary the way a user who only unpacked it would. env -i, a
+      # directory outside the build, and the build tree renamed away, so neither the compiled-in share/OpenMS paths nor
+      # the build's libraries can stand in for the bundle. Twice: with no variable at all (what users get), and with
+      # OPENMS_DATA_PATH pointing into the bundle on the real run, whose digest must equal the build binary's.
+      - name: The packaged binary runs on its own
+        timeout-minutes: 45
+        run: |
+          set -euo pipefail
+          B="$WS/dist/$DIST/bin/diaspextract$EXE"
+          S="$WS/dist/$DIST/share/OpenMS"
+          mv "$WS/OpenMS" "$WS/OpenMS.hidden"
+          trap 'mv "$WS/OpenMS.hidden" "$WS/OpenMS"' EXIT
+          bare() {
+            case "$RUNNER_OS" in
+              Windows) env -i HOME="$HOME" USERPROFILE="$USERPROFILE" TEMP="$TEMP" TMP="$TMP" SYSTEMROOT="$SYSTEMROOT" WINDIR="$WINDIR" \
+                         PATH="/c/Windows/system32:/c/Windows" "$@" ;;
+              *)       env -i HOME="$HOME" PATH=/usr/bin:/bin "$@" ;;
+            esac
+          }
+          cd "$RT"
+          bare "$B" --help > pkg-help.txt 2>&1 || { cat pkg-help.txt; echo "::error::the packaged binary does not start on its own"; exit 1; }
+          grep -qE "^Version: ${VERSION//./\\.} \\(OpenMS " pkg-help.txt || { cat pkg-help.txt; echo "::error::the packaged binary reports the wrong version"; exit 1; }
+          bare OPENMS_DATA_PATH="$S" "$B" -in "$DIASPEXTRACT_TEST_D" -out "$RT/pkg-real.mzML" -threads 4 > pkg-real.log 2>&1 \
+            || { tail -40 pkg-real.log; echo "::error::the packaged binary failed on the real .d"; exit 1; }
+          got=$("$PY" -c "import sys; sys.path.insert(0, sys.argv[1]); from test_diaspextract import digest; print(digest(sys.argv[2]))" \
+                "$WS/diaspextract/test" "$RT/pkg-real.mzML")
+          [ "$got" = "$DIGEST" ] || { echo "::error::the packaged binary's spectra ($got) differ from the build's ($DIGEST)"; exit 1; }
+          echo "packaged binary: starts with no environment, real .d digest $got equals the build's"
+
+      # The runner itself has every library installed, so a missing one could still hide. A minimal Debian 13 (glibc
+      # 2.41, nothing of Qt, Boost, Arrow or libgomp) has none of them: --help loads every NEEDED library at startup.
+      - name: The packaged binary runs on another distribution (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$WS/dist/$DIST:/opt/diaspextract:ro" debian:trixie-slim \
+            /opt/diaspextract/bin/diaspextract --help > "$RT/debian-help.txt" 2>&1 \
+            || { cat "$RT/debian-help.txt"; echo "::error::the bundle does not run on Debian 13"; exit 1; }
+          grep -qE "^Version: ${VERSION//./\\.} " "$RT/debian-help.txt"
+
+      # Apple takes a zip, not a tarball; the ticket records the code hashes, so the tarball made from the same tree
+      # afterwards is covered (checked online on first run; only the disk image below carries a stapled ticket).
+      - name: Notarize the bundle (macOS)
+        if: steps.macsign.outputs.enabled == 'true'
+        timeout-minutes: 90
+        env:
+          MACOS_APPLE_ID: ${{ secrets.MACOS_APPLE_ID }}
+          MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+          MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # notarytool takes the app-specific password only as an argument: it is in that process's argv on this
+          # throwaway runner for the duration of the call, and masked in the log.
+          cat > "$RUNNER_TEMP/notarize.sh" <<'EOF'
+          notarize() {
+            local out id status
+            out=$(xcrun notarytool submit "$1" --apple-id "$MACOS_APPLE_ID" --team-id "$MACOS_TEAM_ID" \
+                    --password "$MACOS_NOTARY_PASSWORD" --wait --timeout 80m --output-format json) || true
+            id=$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)
+            status=$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status",""))' 2>/dev/null || true)
+            echo "notarization of $(basename "$1"): ${status:-no answer} (submission ${id:-none})"
+            if [ "$status" != Accepted ]; then
+              # a rejection names only the submission; the log names the offending file
+              [ -z "$id" ] || xcrun notarytool log "$id" --apple-id "$MACOS_APPLE_ID" --team-id "$MACOS_TEAM_ID" --password "$MACOS_NOTARY_PASSWORD"
+              echo "::error::notarization of $(basename "$1") was not accepted"; return 1
+            fi
+          }
+          EOF
+          . "$RUNNER_TEMP/notarize.sh"
+          ditto -c -k --keepParent "dist/$DIST" "$RUNNER_TEMP/notarize.zip"
+          notarize "$RUNNER_TEMP/notarize.zip"
+
+      - name: Archive
+        run: |
+          set -euo pipefail
+          mkdir -p assets
+          if [ "$RUNNER_OS" = Windows ]; then
+            pwsh -NoProfile -Command "Compress-Archive -Path 'dist/$DIST' -DestinationPath 'assets/$DIST.zip' -Force"
+          else
+            tar -C dist -czf "assets/$DIST.tar.gz" "$DIST"
+          fi
+          ls -l assets
+
+      # The disk image is the macOS asset that carries its ticket: stapling attaches only to .app, .pkg and .dmg, so it
+      # opens offline where the tarball needs one online check. Built on the signing path only; on a dry run without
+      # the secrets it is built unsigned, so the image itself is still exercised.
+      - name: Disk image (macOS)
+        if: runner.os == 'macOS' && env.SIGN == 'true'
+        timeout-minutes: 90
+        env:
+          ENABLED: ${{ steps.macsign.outputs.enabled }}
+          ID: ${{ steps.mackc.outputs.identity }}
+          KC: ${{ steps.mackc.outputs.keychain }}
+          MACOS_APPLE_ID: ${{ secrets.MACOS_APPLE_ID }}
+          MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+          MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          DMG="assets/$DIST.dmg"
+          # the image holds the bundle folder itself; ditto keeps the signatures and the symlinks
+          STAGE="$RUNNER_TEMP/dmgroot"; rm -rf "$STAGE"; mkdir -p "$STAGE"
+          ditto "dist/$DIST" "$STAGE/$DIST"
+          hdiutil create -volname "DIAspeXtract $VERSION" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+          if [ "$ENABLED" = true ]; then
+            codesign --force --timestamp --keychain "$KC" --sign "$ID" "$DMG"
+            . "$RUNNER_TEMP/notarize.sh"
+            notarize "$DMG"
+            # stapler can fail right after an Accepted notarization (CDN flake, Error 68 / -1005): retry, do not rebuild
+            for i in 1 2 3 4; do xcrun stapler staple "$DMG" && break; [ "$i" = 4 ] && exit 1; sleep $((i * 30)); done
+            xcrun stapler validate "$DMG"
+            spctl --assess --type open --context context:primary-signature -vv "$DMG"
+          fi
+          ls -l assets
+
+      - name: Delete the signing keychain (macOS)
+        if: always() && steps.mackc.outputs.keychain != ''
+        run: security delete-keychain "${{ steps.mackc.outputs.keychain }}" || true
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: DIAspeXtract-${{ matrix.name }}
+          path: assets/*
+          if-no-files-found: error
+          retention-days: ${{ needs.preflight.outputs.sign == 'true' && 30 || 7 }}
+
+  # ------------------------------------------------------------------------------------------------------- identity
+  # The five platforms must write the same spectra. Each leg already checks its packaged binary against its build and,
+  # with DIASPEXTRACT_TEST_D_DIGEST set, against the pin; this compares the legs with each other, so the property is
+  # tested even while the variable is unset.
+  identity:
+    needs: [preflight, build]
+    if: needs.preflight.outputs.heavy == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: true
+      - env:
+          PIN: ${{ vars.DIASPEXTRACT_TEST_D_DIGEST }}
+        run: |
+          set -euo pipefail
+          for f in digests/*.txt; do printf '%-14s %s\n' "$(basename "$f" .txt)" "$(cat "$f")"; done | tee -a "$GITHUB_STEP_SUMMARY"
+          n=$(cat digests/*.txt | sort -u | wc -l)
+          [ "$(find digests -name '*.txt' | wc -l)" = 5 ] || { echo "::error::expected five digests"; exit 1; }
+          [ "$n" = 1 ] || { echo "::error::the platforms wrote different spectra from the same .d"; exit 1; }
+          if [ -n "$PIN" ]; then [ "$(cat digests/*.txt | sort -u)" = "$PIN" ] || { echo "::error::digest differs from DIASPEXTRACT_TEST_D_DIGEST"; exit 1; }
+          else echo "::notice::set the repository variable DIASPEXTRACT_TEST_D_DIGEST=$(cat digests/*.txt | sort -u) to pin it"; fi
+
+  # -------------------------------------------------------------------------------------------------------- release
+  # One job attaches everything, after every leg and the identity check passed: no partially attached release, and
+  # SHA256SUMS covers the full set. A release the maintainer created first (notes, draft or not) is kept as it is;
+  # otherwise it is created from the tag's CHANGELOG section, as a draft until the assets are on it.
+  release:
+    needs: [preflight, build, identity]
+    if: needs.preflight.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.preflight.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: DIAspeXtract-*
+          path: assets
+          merge-multiple: true
+      - name: Attach the assets and SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd assets
+          for a in DIAspeXtract-linux-x64.tar.gz DIAspeXtract-linux-arm64.tar.gz DIAspeXtract-macos-arm64.tar.gz \
+                   DIAspeXtract-macos-arm64.dmg DIAspeXtract-macos-x64.tar.gz DIAspeXtract-macos-x64.dmg DIAspeXtract-windows-x64.zip; do
+            [ -s "$a" ] || { echo "::error::$a was not built"; exit 1; }
+          done
+          sha256sum DIAspeXtract-* > SHA256SUMS
+          cat SHA256SUMS
+          created=false
+          if ! gh release view "$TAG" > /dev/null 2>&1; then
+            awk -v h="## v$VERSION" 'index($0, h " ") == 1 || $0 == h {on=1; next} on && /^## v/ {exit} on {print}' ../CHANGELOG.md > ../notes.md
+            gh release create "$TAG" --verify-tag --draft --title "DIAspeXtract $VERSION" --notes-file ../notes.md
+            created=true
+          fi
+          gh release upload "$TAG" DIAspeXtract-* SHA256SUMS --clobber
+          if [ "$created" = true ]; then gh release edit "$TAG" --draft=false; fi
+
+  # A red run when the release lacks an asset, whatever happened upstream: always(), because a `needs:` job is SKIPPED
+  # when a leg fails, and a skipped gate is how a partial release goes unnoticed.
+  release-complete:
+    needs: [release]
+    if: always() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && endsWith(github.repository, '/diaspextract')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Every asset is on the release
+        run: |
+          set -euo pipefail
+          want="DIAspeXtract-linux-x64.tar.gz DIAspeXtract-linux-arm64.tar.gz DIAspeXtract-macos-arm64.tar.gz
+                DIAspeXtract-macos-arm64.dmg DIAspeXtract-macos-x64.tar.gz DIAspeXtract-macos-x64.dmg
+                DIAspeXtract-windows-x64.zip"
+          have=$(gh release view "$TAG" --json assets --jq '.assets[].name') || { echo "::error::no release for $TAG"; exit 1; }
+          missing=0
+          for a in $want SHA256SUMS; do grep -qx "$a" <<< "$have" || { echo "::error::MISSING: $a"; missing=1; }; done
+          [ "$missing" = 0 ] || exit 1
+          gh release download "$TAG" -p SHA256SUMS -D "$RUNNER_TEMP"
+          for a in $want; do grep -q "  $a\$" "$RUNNER_TEMP/SHA256SUMS" || { echo "::error::SHA256SUMS does not list $a"; exit 1; }; done
+          echo "release $TAG is complete"
+
+  # okohlbacher/homebrew-diaspextract rewrites its formula on a repository_dispatch (event `release`). GITHUB_TOKEN
+  # cannot dispatch in another repository, so this needs a fine-grained PAT (HOMEBREW_TAP_TOKEN, that repository
+  # only, Contents read/write). Without it the step says so and the tap's workflow can be run by hand.
+  homebrew-tap:
+    needs: [release-complete]
+    if: always() && needs.release-complete.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Tap token
+        id: tap
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -n "$HOMEBREW_TAP_TOKEN" ]; then echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice title=Homebrew tap not dispatched::HOMEBREW_TAP_TOKEN is not set; run the release workflow in okohlbacher/homebrew-diaspextract by hand with tag ${{ github.ref_name }}."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Ask the tap to publish this release
+        if: steps.tap.outputs.enabled == 'true'
+        env:
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          READ_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "$(GH_TOKEN=$READ_TOKEN gh release view "$TAG" --json isDraft --jq .isDraft)" = true ]; then
+            echo "::warning::$TAG is still a draft; its download URLs do not resolve yet. Publish it, then run the tap's workflow by hand."
+            exit 0
+          fi
+          GH_TOKEN=$READ_TOKEN gh release download "$TAG" -p SHA256SUMS -D "$RUNNER_TEMP"
+          sha() { awk -v f="DIAspeXtract-$1.tar.gz" '$2 == f {print $1}' "$RUNNER_TEMP/SHA256SUMS"; }
+          jq -n --arg tag "$TAG" --arg lx "$(sha linux-x64)" --arg la "$(sha linux-arm64)" \
+                --arg ma "$(sha macos-arm64)" --arg mx "$(sha macos-x64)" \
+            '{event_type: "release", client_payload: {tag: $tag,
+              sha256: {"linux-x64": $lx, "linux-arm64": $la, "macos-arm64": $ma, "macos-x64": $mx}}}' > "$RUNNER_TEMP/payload.json"
+          cat "$RUNNER_TEMP/payload.json"
+          if gh api repos/okohlbacher/homebrew-diaspextract/dispatches --input "$RUNNER_TEMP/payload.json"; then
+            echo "dispatched 'release' to okohlbacher/homebrew-diaspextract for $TAG"
+          else
+            echo "::warning title=Homebrew tap dispatch failed::(expired HOMEBREW_TAP_TOKEN?) run the tap's release workflow by hand with tag $TAG"
+          fi

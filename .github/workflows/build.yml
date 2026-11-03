@@ -1057,10 +1057,19 @@ jobs:
             codesign --force --timestamp --keychain "$KC" --sign "$ID" "$DMG"
             . "$RUNNER_TEMP/notarize.sh"
             notarize "$DMG"
-            # stapler (staple and validate both) can fail right after an Accepted notarization (CDN flake, Error 68 / -1005): retry, do not rebuild
-            for i in 1 2 3 4; do xcrun stapler staple "$DMG" && break; [ "$i" = 4 ] && exit 1; sleep $((i * 30)); done
-            for i in 1 2 3 4; do xcrun stapler validate "$DMG" && break; [ "$i" = 4 ] && exit 1; sleep $((i * 30)); done
-            spctl --assess --type open --context context:primary-signature -vv "$DMG"
+            # stapler reaches Apple's ticket server (CloudKit), which the macos-15-intel runner loses again and again
+            # (Error 68 / -1005, three release runs in a row). The image is notarized at this point; the staple only
+            # lets it open offline, as Gatekeeper fetches the ticket online otherwise. So retry, then ship it unstapled.
+            stapled=false
+            for i in 1 2 3 4; do
+              xcrun stapler staple "$DMG" && xcrun stapler validate "$DMG" && { stapled=true; break; }
+              [ "$i" = 4 ] || sleep $((i * 30))
+            done
+            if [ "$stapled" = true ]; then
+              spctl --assess --type open --context context:primary-signature -vv "$DMG"
+            else
+              echo "::warning title=dmg not stapled::$DMG is notarized, but Apple's ticket server was unreachable; Gatekeeper checks it online on first open"
+            fi
           fi
           ls -l assets
 

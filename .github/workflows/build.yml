@@ -645,25 +645,28 @@ jobs:
           grep -q 'PASS  a real diaPASEF .d' "$RT/e2e.log" || { echo "::error::the real .d check did not run"; exit 1; }
 
       # A crash on Windows prints nothing: rerun the synthetic case under cdb for the faulting stack.
-      - name: Crash stack (Windows)
-        if: failure() && runner.os == 'Windows'
+      # Every task of the injected site throws at once. OpenMS's exception constructor wrote five shared strings without
+      # a lock until openms-exception-threadsafe.patch, which corrupted the heap; the Windows heap noticed now and then
+      # (exit 0xC0000005), never under a debugger. 20 runs per site, and a crash leaves a WER dump and its stacks.
+      - name: Concurrent task exceptions (Windows)
+        if: (success() || failure()) && runner.os == 'Windows'
         run: |
           export PATH="$DLL_PATH:$PATH" OPENMS_DATA_PATH="$OMS_SHARE"
           CDB="/c/Program Files (x86)/Windows Kits/10/Debuggers/x64/cdb.exe"
-          # The task-exception crash does not happen under a debugger: let Windows Error Reporting write a dump instead.
           DUMPS="$(cygpath -w "$RT/dumps")"; mkdir -p "$RT/dumps"
           K='HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps'
           MSYS_NO_PATHCONV=1 reg add "$K" /v DumpFolder /t REG_EXPAND_SZ /d "$DUMPS" /f
           MSYS_NO_PATHCONV=1 reg add "$K" /v DumpType /t REG_DWORD /d 2 /f
           for site in ms1_band assemble; do
-            for i in $(seq 1 10); do
+            for i in $(seq 1 20); do
               rc=0; DIASPEXTRACT_TASK_THROW=$site "$BIN" -in "$RT/e2e/synth.mzML" -out "$RT/e2e/cdb.mzML" -threads 4 \
                 -assembly:min_fragments 2 -trace:ms2_min_length_sec 0 -trace:ms1_split_valleys 0 -trace:ms2_split_valleys 0 \
                 > "$RT/dumps/out.txt" 2>&1 || rc=$?
               echo "$site run $i: exit $rc"
-              [ "$rc" -lt 256 ] || { tail -5 "$RT/dumps/out.txt"; break; }
+              [ "$rc" -lt 256 ] || { tail -5 "$RT/dumps/out.txt"; echo "$site $i" >> "$RT/dumps/crashed"; break; }
             done
           done
+          [ -f "$RT/dumps/crashed" ] || { echo "40 runs, no crash"; exit 0; }
           sleep 10   # WER writes the dump asynchronously
           for d in "$RT"/dumps/*.dmp; do
             [ -f "$d" ] || { echo "no dump written"; break; }
@@ -671,6 +674,7 @@ jobs:
             "$CDB" -z "$(cygpath -w "$d")" -lines -y "$(cygpath -w "$WS/diaspextract/build")" -c ".ecxr;kn 60;~*kn 12;q" 2>&1 \
               | grep -v ModLoad | tail -150 || true
           done
+          exit 1
 
       # The digest of check 23's default-settings output: compared across platforms by the identity job, and against
       # the packaged binary's own run below.

@@ -1,0 +1,106 @@
+name: release
+
+# Rewrites Formula/diaspextract.rb for a DIAspeXtract release: version, the four URLs and their sha256 values.
+#
+# okohlbacher/diaspextract's build.yml sends a repository_dispatch (event `release`) once every asset is on the
+# release, with the tag and the sha256 of each tarball. The sha256 values are not taken on trust: they are compared
+# with the release's own SHA256SUMS, which this workflow downloads. Run it by hand (workflow_dispatch) when the
+# dispatch did not arrive, e.g. while HOMEBREW_TAP_TOKEN is unset in the source repository.
+
+on:
+  repository_dispatch:
+    types: [release]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'DIAspeXtract release tag, e.g. v1.8.1'
+        required: true
+        type: string
+
+# Releases are applied in order, never concurrently: two rewrites racing for one push would lose one.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  SOURCE_REPO: okohlbacher/diaspextract
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      # Everything from the payload goes through env and is validated: a tag is any Git ref, not only vX.Y.Z.
+      - name: Read the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.client_payload.tag || inputs.tag }}
+          PAYLOAD_SHA: ${{ toJSON(github.event.client_payload.sha256) }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::not a release tag: $TAG"; exit 1; }
+          gh release download "$TAG" -R "$SOURCE_REPO" -p SHA256SUMS -D "$RUNNER_TEMP"
+          for p in linux-x64 linux-arm64 macos-arm64 macos-x64; do
+            sha=$(awk -v f="DIAspeXtract-$p.tar.gz" '$2 == f {print $1}' "$RUNNER_TEMP/SHA256SUMS")
+            [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::SHA256SUMS of $TAG has no entry for $p"; exit 1; }
+            sent=$(jq -r --arg p "$p" '.[$p] // empty' <<< "$PAYLOAD_SHA" 2>/dev/null || true)
+            if [ -n "$sent" ] && [ "$sent" != "$sha" ]; then
+              echo "::error::the dispatch's sha256 for $p differs from the release's SHA256SUMS"; exit 1
+            fi
+            echo "SHA_${p//-/_}=$sha" >> "$GITHUB_ENV"
+          done
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+
+      - name: Rewrite the formula
+        run: |
+          set -euo pipefail
+          python3 - <<'EOF'
+          import os, pathlib, re
+          f = pathlib.Path("Formula/diaspextract.rb")
+          s = f.read_text()
+          tag = os.environ["TAG"]
+          s, n = re.subn(r'^(\s*version ")[^"]*(")', rf'\g<1>{tag[1:]}\g<2>', s, count=1, flags=re.M)
+          assert n == 1, "no version line"
+          for p in ("macos-arm64", "macos-x64", "linux-arm64", "linux-x64"):
+              sha = os.environ["SHA_" + p.replace("-", "_")]
+              pat = (r'(url "https://github\.com/okohlbacher/diaspextract/releases/download/)[^/]+'
+                     rf'(/DIAspeXtract-{p}\.tar\.gz"\s*\n\s*sha256 ")[0-9a-f]{{64}}(")')
+              s, n = re.subn(pat, rf'\g<1>{tag}\g<2>{sha}\g<3>', s)
+              assert n == 1, f"no url/sha256 pair for {p}"
+          f.write_text(s)
+          EOF
+          ruby -c Formula/diaspextract.rb
+          git diff
+
+      - name: Commit and push
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then echo "the formula already describes $TAG"; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "diaspextract ${TAG#v}"
+          git push
+
+  # The published formula, installed and tested the way a user would get it.
+  verify:
+    needs: update
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-14, ubuntu-24.04]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - name: Install and test
+        run: |
+          set -euo pipefail
+          eval "$(brew shellenv 2>/dev/null || /home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          brew tap "${GITHUB_REPOSITORY%%/*}/diaspextract"
+          brew install diaspextract
+          brew test diaspextract
+          diaspextract --help 2>&1 | grep '^Version:'

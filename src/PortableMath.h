@@ -83,7 +83,11 @@ namespace pmath
     const double c = x - t * (P1 + t * (P2 + t * (P3 + t * (P4 + t * P5))));
     if (k == 0) return 1.0 - ((x * c) / (c - 2.0) - x);
     const double y = 1.0 - ((lo_ - (x * c) / (2.0 - c)) - hi_);
-    return std::ldexp(y, k);   // exact for normal results, one IEEE rounding into the subnormals
+    // fdlibm's scaling, not std::ldexp: a normal result takes k into its exponent bits (exact); a subnormal one is
+    // scaled to a normal number first and rounded once by an IEEE multiplication. ldexp's rounding into the
+    // subnormals is the platform libm's, and macOS 14's differs from glibc's and macOS 26's.
+    if (k >= -1021) return detail::withHi(y, detail::hi(y) + (k << 20));
+    return detail::withHi(y, detail::hi(y) + ((k + 1000) << 20)) * 9.33263618503218878990e-302;   // * 2^-1000
   }
 
   /// natural logarithm (fdlibm e_log.c)

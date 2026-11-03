@@ -530,8 +530,10 @@ jobs:
             Linux)   cmake "${ARGS[@]}" ;;
             macOS)   cmake "${ARGS[@]}" -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOS_FLOOR" \
                        -DCMAKE_PREFIX_PATH="$BREW;$LIBOMP" -DOpenMP_ROOT="$LIBOMP" ;;
+            # /Z7 + /DEBUG: a PDB for the stack trace below; the code is the same.
             Windows) cmake "${ARGS[@]}" -DCMAKE_CXX_COMPILER="$CLANG_CL" -DEigen3_DIR="$EIGEN_DIR" \
-                       -DCMAKE_PREFIX_PATH="$QT_DIR;$CONDA_LIB;$WS/contrib-build" -DOpenMP_ROOT="$LLVM_DIR" ;;
+                       -DCMAKE_PREFIX_PATH="$QT_DIR;$CONDA_LIB;$WS/contrib-build" -DOpenMP_ROOT="$LLVM_DIR" \
+                       "-DCMAKE_CXX_FLAGS_RELEASE=/O2 /Ob2 /DNDEBUG /Z7" -DCMAKE_EXE_LINKER_FLAGS_RELEASE=/DEBUG ;;
           esac
           cmake --build diaspextract/build --parallel "$NPROC"
 
@@ -641,6 +643,16 @@ jobs:
           export OPENMS_DATA_PATH="$OMS_SHARE"
           "$PY" diaspextract/test/test_diaspextract.py "$BIN" "$RT/e2e" | tee "$RT/e2e.log"
           grep -q 'PASS  a real diaPASEF .d' "$RT/e2e.log" || { echo "::error::the real .d check did not run"; exit 1; }
+
+      # A crash on Windows prints nothing: rerun the synthetic case under cdb for the faulting stack.
+      - name: Crash stack (Windows)
+        if: failure() && runner.os == 'Windows'
+        run: |
+          export PATH="$DLL_PATH:$PATH" OPENMS_DATA_PATH="$OMS_SHARE"
+          CDB="/c/Program Files (x86)/Windows Kits/10/Debuggers/x64/cdb.exe"
+          "$CDB" -g -G -lines -y "$(cygpath -w "$WS/diaspextract/build")" -c ".ecxr;kn 60;q" "$(cygpath -w "$BIN")" \
+            -in "$RT/e2e/synth.mzML" -out "$RT/e2e/cdb.mzML" -threads 1 -assembly:min_fragments 2 \
+            -trace:ms2_min_length_sec 0 -trace:ms1_split_valleys 0 -trace:ms2_split_valleys 0 2>&1 | tail -90 || true
 
       # The digest of check 23's default-settings output: compared across platforms by the identity job, and against
       # the packaged binary's own run below.

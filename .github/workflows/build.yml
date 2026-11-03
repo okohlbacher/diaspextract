@@ -481,7 +481,8 @@ jobs:
                 -DARROW_USE_STATIC=OFF -DArrow_DIR="$CONDA_LIB/lib/cmake/Arrow" -DParquet_DIR="$CONDA_LIB/lib/cmake/Parquet" \
                 -DOpenMP_ROOT="$LLVM_DIR" ;;
           esac
-          cmake --build OpenMS/build --target OpenMS --parallel "$NPROC"
+          # -k 0: a failed build lists every failing file, not the first (each OpenMS round is an hour on Windows).
+          cmake --build OpenMS/build --target OpenMS --parallel "$NPROC" -- -k 0
           # Object files are not needed to link against the library; without them the cache is a fraction the size.
           find OpenMS/build \( -name '*.o' -o -name '*.obj' \) -delete
           du -sh OpenMS/build

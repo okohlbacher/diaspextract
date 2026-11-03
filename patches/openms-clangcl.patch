@@ -34,3 +34,13 @@
      {
          return data_ >= other.data_;
      }
+--- a/src/openms/include/OpenMS/DATASTRUCTURES/MassExplainer.h
++++ b/src/openms/include/OpenMS/DATASTRUCTURES/MassExplainer.h
+@@ -9,6 +9,7 @@
+ #pragma once
+ 
+ #include <OpenMS/DATASTRUCTURES/Adduct.h>
++#include <OpenMS/DATASTRUCTURES/Compomer.h> // complete type: clang-cl emits the dllexported class's implicit members
+ 
+ #include <OpenMS/CONCEPT/Types.h>
+ 

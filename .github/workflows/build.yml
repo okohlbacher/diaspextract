@@ -313,7 +313,14 @@ jobs:
 
       - name: Eigen and Ninja (Windows)
         if: runner.os == 'Windows'
-        run: choco install -y --no-progress eigen ninja
+        # choco exits 0 when its feed fails ("Unable to find package 'eigen'", run 41629773660): retry, then check.
+        run: |
+          for i in 1 2 3 4; do
+            choco install -y --no-progress eigen ninja || true
+            [ -f C:/ProgramData/chocolatey/lib/eigen/share/eigen3/cmake/Eigen3Config.cmake ] && command -v ninja && exit 0
+            sleep 30
+          done
+          echo "::error::choco could not install eigen and ninja"; exit 1
 
       - name: Qt (Windows)
         if: runner.os == 'Windows'

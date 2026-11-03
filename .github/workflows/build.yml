@@ -383,19 +383,29 @@ jobs:
           path: contrib-build
           key: contrib-${{ matrix.runner }}-${{ env.CONTRIB_REV }}-curl${{ env.CURL_VERSION }}-v1
 
-      - name: Build contrib and libcurl (Windows)
+      # pwsh, as in FASTag (37 min for ALL): under Git Bash, bjam hung in the Boost build for the whole 150 min (run 41601410280).
+      - name: Build contrib (Windows)
         if: runner.os == 'Windows' && steps.contrib.outputs.cache-hit != 'true'
-        timeout-minutes: 150
+        shell: pwsh
+        timeout-minutes: 90
         run: |
-          set -euo pipefail
+          $ErrorActionPreference = 'Stop'
           git init -q contrib-src
           git -C contrib-src remote add origin https://github.com/OpenMS/contrib.git
-          git -C contrib-src fetch -q --depth 1 origin "$CONTRIB_REV"
+          git -C contrib-src fetch -q --depth 1 origin $env:CONTRIB_REV
           git -C contrib-src checkout -q FETCH_HEAD
           # Only what OpenMS at the pin needs: ALL at this contrib commit also builds Arrow, curl, HDF5 and libzip from
           # source (run 41587712077 timed out after 2 h in it), and those come from conda / the curl step below.
           cmake -S contrib-src -B contrib-tmp -G "Visual Studio 17 2022" -A x64 "-DBUILD_TYPE=BOOST;XERCESC;COINOR;BZIP2;ZLIB;LIBSVM"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cmake --build contrib-tmp --config Release
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Build libcurl (Windows)
+        if: runner.os == 'Windows' && steps.contrib.outputs.cache-hit != 'true'
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
           mkdir -p contrib-build
           for d in lib bin include share; do [ -d "contrib-tmp/$d" ] && mv "contrib-tmp/$d" contrib-build/; done
           curl -fsSL --retry 3 -o curl-src.tar.gz "https://curl.se/download/curl-$CURL_VERSION.tar.gz"

@@ -20,6 +20,7 @@
 #include <OpenMS/FEATUREFINDER/Biosaur2Algorithm.h>
 #include <OpenMS/KERNEL/FeatureMap.h>
 #include "PortableMath.h"
+#include "OmsString.h"
 #include <omp.h>
 #include <algorithm>
 #include <chrono>
@@ -33,6 +34,7 @@
 
 namespace spx_noims
 {
+using diaspextract::String;
   using namespace OpenMS;
 
   struct Params

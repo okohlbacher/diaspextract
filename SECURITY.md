@@ -8,10 +8,13 @@ titled "security contact request" with no details in it, and we will arrange a p
 
 ## Scope
 
-DIAspeXtract is a batch command-line tool. It reads instrument data and writes mzML or mzPeak; it opens no
-sockets, runs no server, and requires no credentials. The realistic security surface is therefore
-**untrusted input files**: a malformed or hostile Bruker `.d`, `.mzML` or `.mzpeak` reaching the
-parser. Reports of crashes, out-of-bounds reads or unbounded allocation triggered by an input file
+DIAspeXtract is a batch command-line tool. It reads instrument data and writes mzML or mzPeak; it runs no server.
+It makes a network request only when `-in` is an `s3://` URI: it then reads that one object through Arrow's S3
+client, with the credentials of the usual AWS environment, into a temporary file, and logs the URI without any
+credentials it carries. The realistic security surface is therefore **untrusted input files**: a malformed or hostile
+Bruker `.d`, Thermo `.raw`, `.mzML` or `.mzpeak` reaching the parser. A `.raw` file is read by Thermo's
+RawFileReader, a .NET library hosted in the tool's process (on macOS the tool carries the `allow-jit` entitlement for
+it; library validation stays on). Reports of crashes, out-of-bounds reads or unbounded allocation triggered by an input file
 are in scope and welcome.
 
 Before the reader runs, the tool checks a `.d` itself: that it is diaPASEF, that every frame lies inside

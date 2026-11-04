@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The tool hosts .NET in-process to read Thermo .raw files (openms-thermo-bridge), and CoreCLR compiles code at run
+     time, which the hardened runtime allows only with allow-jit (MAP_JIT, W^X). Nothing else: library validation
+     stays on, as every bundled library, the .NET runtime's included, carries our Developer ID. -->
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+</dict>
+</plist>

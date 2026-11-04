@@ -82,12 +82,12 @@ export function args(values: Values): string[] {
 const quote = (s: string) => (s === '' ? "''" : /[^\w@%+=:,./\\-]/.test(s) ? `'${s.replace(/'/g, `'\\''`)}'` : s)
 export const commandLine = (values: Values) => ['diaspextract', ...args(values)].map(quote).join(' ')
 
-/** <input stem>.pseudo.mzML beside the input; a .d directory loses its .d. */
+/** <input stem>.pseudo.mzML beside the input; a .d directory loses its .d. Nothing for an s3:// input: the output is local. */
 export function suggestOutput(input: string): string {
   const t = input.replace(/[\\/]+$/, '')
-  if (!t) return ''
+  if (!t || /^s3:\/\//i.test(t)) return ''
   const cut = Math.max(t.lastIndexOf('/'), t.lastIndexOf('\\'))
-  return `${t.slice(0, cut + 1)}${t.slice(cut + 1).replace(/\.(d|mzml|mzpeak)$/i, '')}.pseudo.mzML`
+  return `${t.slice(0, cut + 1)}${t.slice(cut + 1).replace(/\.(d|mzml|mzpeak|raw)$/i, '')}.pseudo.mzML`
 }
 
 export interface Progress {

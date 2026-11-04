@@ -51,7 +51,7 @@ export async function tauriBridge(): Promise<Bridge> {
     cancel: () => invoke('cancel'),
     pickRunDir: async () => one(await open({ directory: true, title: 'Bruker .d run' })),
     pickRunFile: async () =>
-      one(await open({ filters: [{ name: 'Spectra', extensions: ['mzML', 'mzml', 'mzpeak'] }], title: 'mzML run' })),
+      one(await open({ filters: [{ name: 'Runs', extensions: ['mzML', 'mzml', 'mzpeak', 'raw', 'RAW'] }], title: 'mzML, mzPeak or Thermo .raw run' })),
     pickOutput: async (defaultPath) =>
       one(await save({ defaultPath, filters: [{ name: 'mzML', extensions: ['mzML'] }, { name: 'mzPeak', extensions: ['mzpeak'] }] })),
     reveal: (path) => revealItemInDir(path),

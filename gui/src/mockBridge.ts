@@ -29,7 +29,7 @@ export function mockBridge(): Bridge {
     stepMs: 60,
     exitCode: 0,
     runs: [],
-    picks: { dir: '/data/HeLa_5min.d', file: '/data/orbitrap.mzML', out: null },
+    picks: { dir: '/data/HeLa_5min.d', file: '/data/orbitrap.raw', out: null },
     revealed: []
   })
   const logs = new Set<(l: string) => void>()

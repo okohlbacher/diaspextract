@@ -4,7 +4,8 @@
 // a debugging port through WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS. macOS (WKWebView) and Linux (WebKitGTK) have no such
 // port; there CI runs the bundled CLI from inside the built app instead (build.yml, "desktop" job).
 //
-//   DX_E2E_APP=path/to/diaspextract-gui.exe DX_E2E_INPUT=synth.mzML DX_E2E_VERSION=1.9.0 npx playwright test --project=e2e
+//   DX_E2E_APP=path/to/diaspextract-gui.exe DX_E2E_INPUT=synth.mzML DX_E2E_VERSION=1.9.0 [DX_E2E_RAW=run.raw] \
+//     npx playwright test --project=e2e
 
 import { chromium, expect, test, type Browser, type Page } from '@playwright/test'
 import { spawn, type ChildProcess } from 'node:child_process'
@@ -57,6 +58,17 @@ test('a run writes spectra through the real CLI', async () => {
   await expect(page.getByTestId('status')).toContainText(' written to', { timeout: 120_000 })
   await expect(page.getByLabel('Log')).toContainText('window 1/1')
   expect(existsSync(out)).toBe(true)
+  expect(readFileSync(out, 'utf8')).toMatch(/<spectrum /)
+})
+
+test('a Thermo .raw run goes through the bundled .NET runtime', async () => {
+  test.skip(!process.env.DX_E2E_RAW, 'set DX_E2E_RAW to a Thermo .raw file')
+  const out = join(mkdtempSync(join(tmpdir(), 'dx-e2e-')), 'raw.pseudo.mzML')
+  await page.getByLabel('Input').fill(process.env.DX_E2E_RAW!)
+  await page.getByLabel('Output').fill(out)
+  await page.getByRole('button', { name: 'Run', exact: true }).click()
+  await expect(page.getByTestId('status')).toContainText(' written to', { timeout: 120_000 })
+  await expect(page.getByLabel('Log')).toContainText('[noims]')
   expect(readFileSync(out, 'utf8')).toMatch(/<spectrum /)
 })
 

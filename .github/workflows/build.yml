@@ -59,6 +59,9 @@ permissions:
 env:
   # The 5.6-minute HeLa diaPASEF run OpenMS publishes as test data for its Bruker reader (345 MB).
   TEST_D_URL: https://github.com/OpenMS/timsrust_cpp_bridge/releases/download/test-data-v1/DIA_HeLa_50ng_5_6min.d.zip
+  # OpenMS's Thermo test file (PNNL, BSD-2-Clause): 87 MS1 and the MS2 of one precursor window set
+  TEST_RAW_URL: http://archive.openms.de/openms/testfiles/Angiotensin_AllScans.raw
+  TEST_RAW_SHA256: 3a0236f719e7c91e3c958f57f4e66ae422803ec3e6a997b9af4d2af395332b9f
   # SignPath: the project and the organisation are not secrets; the API token is.
   SIGNPATH_PROJECT_SLUG: diaspextract
   SIGNPATH_ORG_ID_DEFAULT: 02cd3c85-b99a-4a78-bc04-b103eb1070c1
@@ -443,6 +446,12 @@ jobs:
           if [ "$OTHER" = true ]; then diaspextract/scripts/apply_openms_patches.sh "$WS/OpenMS" --other-commit
           else diaspextract/scripts/apply_openms_patches.sh "$WS/OpenMS"; fi
 
+      # The Thermo .raw reader (openms-thermo-bridge) hosts .NET in-process: building it needs the .NET SDK's nethost, and
+      # the bundle step below takes the .NET runtime it ships from the same install script.
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
       # Keyed on the runner, the resolved OpenMS commit, every input the patch script reads (patches/*, the script,
       # the two headers it installs), the dependency fingerprint and the macOS floor. The build tree, not an install:
       # the tool configures against OpenMS_DIR=<build> exactly as the README recipe does.
@@ -468,7 +477,7 @@ jobs:
         timeout-minutes: 240
         run: |
           set -euo pipefail
-          COMMON=(-G Ninja -DCMAKE_BUILD_TYPE=Release -DWITH_OPENTIMS=ON -DWITH_GUI=OFF -DHAS_XSERVER=OFF
+          COMMON=(-G Ninja -DCMAKE_BUILD_TYPE=Release -DWITH_OPENTIMS=ON -DWITH_THERMO_RAW=ON -DWITH_GUI=OFF -DHAS_XSERVER=OFF
                   -DENABLE_DOCS=OFF -DMT_ENABLE_OPENMP=ON -DCMAKE_INSTALL_PREFIX="$WS/openms-not-installed")
           case "$RUNNER_OS" in
             Linux)
@@ -488,8 +497,16 @@ jobs:
                 -DARROW_USE_STATIC=OFF -DArrow_DIR="$CONDA_LIB/lib/cmake/Arrow" -DParquet_DIR="$CONDA_LIB/lib/cmake/Parquet" \
                 -DOpenMP_ROOT="$LLVM_DIR" ;;
           esac
+          # s3:// input is a release feature: an OpenMS whose Arrow cannot link the S3 filesystem must not ship
+          grep -q '^OPENMS_ARROW_S3_LINKS:INTERNAL=1' OpenMS/build/CMakeCache.txt \
+            || { echo "::error::OpenMS was configured without Arrow S3 support"; exit 1; }
           # -k 0: a failed build lists every failing file, not the first (each OpenMS round is an hour on Windows).
-          cmake --build OpenMS/build --target OpenMS --parallel "$NPROC" -- -k 0
+          # OpenMS_CLI: TOPPBase lives there since OpenMS 3.7.
+          cmake --build OpenMS/build --target OpenMS OpenMS_CLI --parallel "$NPROC" -- -k 0
+          # Thermo .raw is a release feature too: the bridge library and its managed assemblies must have been built
+          find OpenMS/build -name '*openms_thermo_bridge*' \( -name '*.so' -o -name '*.dylib' -o -name '*.dll' \) | grep -q . \
+            || { echo "::error::OpenMS was built without the Thermo .raw reader (openms_thermo_bridge)"; exit 1; }
+          find OpenMS/build -type d -name managed | grep -q . || { echo "::error::the Thermo bridge's managed assemblies are missing"; exit 1; }
           # Object files are not needed to link against the library; without them the cache is a fraction the size.
           find OpenMS/build \( -name '*.o' -o -name '*.obj' \) -delete
           du -sh OpenMS/build
@@ -543,7 +560,10 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           p=""
-          for d in "$WS/OpenMS/build/bin" "$WS/contrib-build/bin" "$WS/contrib-build/lib" "$QT_DIR/bin" "$CONDA_LIB/bin" "$LLVM_DIR/bin"; do
+          # nethost.dll (openms_thermo_bridge.dll imports it) is in the .NET SDK's host pack, on no PATH
+          NETHOST=$(dirname "$(find "$(cygpath -u "$DOTNET_ROOT")/packs" -ipath '*win-x64/native/nethost.dll' | sort -V | tail -1)")
+          echo "NETHOST_DIR=$(cygpath -m "$NETHOST")" | tee -a "$GITHUB_ENV"
+          for d in "$WS/OpenMS/build/bin" "$WS/contrib-build/bin" "$WS/contrib-build/lib" "$QT_DIR/bin" "$CONDA_LIB/bin" "$LLVM_DIR/bin" "$NETHOST"; do
             [ -d "$d" ] && p="$p:$(cygpath -u "$d")"
           done
           echo "DLL_PATH=${p#:}" | tee -a "$GITHUB_ENV"
@@ -629,6 +649,10 @@ jobs:
           "$PY" -m zipfile -e "$RT/dia.zip" "$RT/dia"
           D=$("$PY" -c "import pathlib,sys; print(next(pathlib.Path(sys.argv[1]).rglob('analysis.tdf')).parent.as_posix())" "$RT/dia")
           echo "DIASPEXTRACT_TEST_D=$D" | tee -a "$GITHUB_ENV"
+          # a small Thermo DDA file (OpenMS's own test data): proves the packaged .raw reader and its bundled .NET
+          curl -fsSL --retry 3 -o "$RT/angiotensin.raw" "$TEST_RAW_URL"
+          echo "$TEST_RAW_SHA256  $RT/angiotensin.raw" | "$PY" -c "import hashlib,sys; h,f=sys.stdin.read().split(); sys.exit(hashlib.sha256(open(f,'rb').read()).hexdigest()!=h)" \
+            || { echo "::error::angiotensin.raw does not match its SHA-256"; exit 1; }
 
       # Check 23 runs the real .d through the default path (streaming loader, exact calibration, dnoise, tiles) five
       # times. With the repository variable DIASPEXTRACT_TEST_D_DIGEST set, its digest must equal it -- on all five
@@ -808,7 +832,7 @@ jobs:
           set -euo pipefail
           B="dist/$DIST/bin"
           dirs=""
-          for d in "$WS/OpenMS/build/bin" "$WS/contrib-build/bin" "$WS/contrib-build/lib" "$QT_DIR/bin" "$CONDA_LIB/bin" "$LLVM_DIR/bin" "C:/Windows/System32"; do
+          for d in "$WS/OpenMS/build/bin" "$WS/contrib-build/bin" "$WS/contrib-build/lib" "$QT_DIR/bin" "$CONDA_LIB/bin" "$LLVM_DIR/bin" "$NETHOST_DIR" "C:/Windows/System32"; do
             [ -d "$d" ] && dirs="$dirs;$d"
           done
           cat > "$RT/bundle-dlls.cmake" <<'EOF'
@@ -854,6 +878,33 @@ jobs:
           crts=("$crt"/Microsoft.VC*.CRT)
           cp "${crts[-1]}"/*.dll "$B/"
           ls "$B"; du -sh "dist/$DIST"
+
+      # The Thermo .raw reader: the bridge library came with libOpenMS above; its managed assemblies go next to the
+      # executable (where the bridge looks first), and the .NET runtime it hosts into dotnet/, which the tool selects
+      # itself (DOTNET_ROOT, unless the user set one), so a user installs nothing. .NET 10 LTS: the assemblies target
+      # net8.0 and roll forward to a newer major; .NET 8 reaches the end of its support on 2026-11-10.
+      - name: Bundle the Thermo reader and its .NET runtime
+        run: |
+          set -euo pipefail
+          D="dist/$DIST"
+          M=$(find OpenMS/build -type d -name managed -print -quit)
+          cp -R "$M" "$D/bin/managed"
+          rm -f "$D"/bin/managed/*.pdb
+          lic=$(find OpenMS/build -name 'ThermoRawFileReader-License.doc' -print -quit)
+          [ -n "$lic" ] || { echo "::error::the Thermo RawFileReader license is not in the OpenMS build"; exit 1; }
+          cp "$lic" "$D/LICENSES/third-party/"
+          case "$RUNNER_ARCH" in X64) arch=x64 ;; ARM64) arch=arm64 ;; *) echo "::error::arch $RUNNER_ARCH"; exit 1 ;; esac
+          if [ "$RUNNER_OS" = Windows ]; then
+            curl -fsSL --retry 3 -o "$RT/dotnet-install.ps1" https://dot.net/v1/dotnet-install.ps1
+            pwsh -NoProfile -File "$RT/dotnet-install.ps1" -Runtime dotnet -Channel 10.0 -Architecture "$arch" -InstallDir "$D/dotnet" -NoPath
+          else
+            curl -fsSL --retry 3 -o "$RT/dotnet-install.sh" https://dot.net/v1/dotnet-install.sh
+            bash "$RT/dotnet-install.sh" --runtime dotnet --channel 10.0 --architecture "$arch" --install-dir "$D/dotnet" --no-path
+          fi
+          ls "$D/dotnet/shared/Microsoft.NETCore.App"
+          [ -f "$D/dotnet/LICENSE.txt" ] && cp "$D/dotnet/LICENSE.txt" "$D/LICENSES/third-party/dotnet-runtime-LICENSE.txt"
+          [ -f "$D/dotnet/ThirdPartyNotices.txt" ] && cp "$D/dotnet/ThirdPartyNotices.txt" "$D/LICENSES/third-party/dotnet-runtime-ThirdPartyNotices.txt"
+          du -sh "$D/bin/managed" "$D/dotnet" "$D"
 
       # Static checks on what is about to ship, before any of it runs.
       - name: Check the bundle
@@ -945,10 +996,14 @@ jobs:
             case "$(file -b "$f")" in *executable*) exes+=("$f") ;; *) libs+=("$f") ;; esac
           done < <(find "dist/$DIST" -type f)
           for f in "${libs[@]}" "${exes[@]}"; do
-            codesign --force --options runtime --timestamp --keychain "$KC" --sign "$ID" "$f"
+            # allow-jit on the tool only: it hosts .NET for Thermo .raw (see the plist); every other Mach-O gets none
+            ent=(); [ "$f" = "dist/$DIST/bin/diaspextract" ] && ent=(--entitlements diaspextract/.github/scripts/diaspextract.entitlements.plist)
+            codesign --force --options runtime --timestamp --keychain "$KC" --sign "$ID" ${ent[@]+"${ent[@]}"} "$f"
           done
           for f in "${libs[@]}" "${exes[@]}"; do codesign --verify --strict "$f"; done
           codesign -dv --verbose=2 "dist/$DIST/bin/diaspextract" 2>&1 | grep -E 'Authority=Developer ID|TeamIdentifier|flags'
+          codesign -d --entitlements - --xml "dist/$DIST/bin/diaspextract" 2>/dev/null | grep -q 'com.apple.security.cs.allow-jit' \
+            || { echo "::error::the tool lacks the allow-jit entitlement that .raw input needs"; exit 1; }
 
       # ---- the regression guard: run the PACKAGED binary the way a user who only unpacked it would. env -i, a
       # directory outside the build, and the build tree renamed away, so neither the compiled-in share/OpenMS paths nor
@@ -978,6 +1033,39 @@ jobs:
                 "$WS/diaspextract/test" "$RT/pkg-real.mzML")
           [ "$got" = "$DIGEST" ] || { echo "::error::the packaged binary's spectra ($got) differ from the build's ($DIGEST)"; exit 1; }
           echo "packaged binary: starts with no environment, real .d digest $got equals the build's"
+          # Thermo .raw through the bundled .NET runtime: no DOTNET_ROOT, no installed .NET is used
+          bare "$B" -in "$RT/angiotensin.raw" -out "$RT/pkg-raw.mzML" -threads 2 > pkg-raw.log 2>&1 \
+            || { tail -40 pkg-raw.log; echo "::error::the packaged binary failed on a Thermo .raw file"; exit 1; }
+          grep -q '^Wrote 14 pseudo-MS2 spectra' pkg-raw.log || { tail -20 pkg-raw.log; echo "::error::the .raw run wrote other spectra than expected"; exit 1; }
+          echo "packaged binary: Thermo .raw read through the bundled .NET runtime"
+
+      # s3:// input end to end with the packaged binary: a local S3 server (moto) holds an mzML; the spectra read from its
+      # URI must equal those from the local file. Credentials and endpoint as a user would give them.
+      - name: The packaged binary reads s3:// input
+        if: runner.os != 'Windows'
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          "$PY" -m pip install -q "moto[server]" boto3
+          "$PY" -m moto.server -p 5055 > "$RT/moto.log" 2>&1 &
+          for _ in $(seq 1 60); do curl -s -o /dev/null localhost:5055 && break; sleep 1; done
+          B="$WS/dist/$DIST/bin/diaspextract"
+          export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1
+          in="$RT/e2e/synth.mzML"
+          "$B" -in "$in" -out "$RT/s3-local.mzML" -out_type mzML -threads 2 > /dev/null 2>&1
+          "$PY" -I -c "
+          import boto3, sys
+          c = boto3.client('s3', endpoint_url='http://localhost:5055')
+          c.create_bucket(Bucket='dxbucket')
+          c.upload_file(sys.argv[1], 'dxbucket', 'runs/synth.mzML')" "$in"
+          q='endpoint_override=localhost:5055&scheme=http'
+          env -i HOME="$HOME" PATH=/usr/bin:/bin AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1 \
+            "$B" -in "s3://dxbucket/runs/synth.mzML?$q" -out "$RT/s3-remote.mzML" -threads 2 > "$RT/s3.log" 2>&1 \
+            || { cat "$RT/s3.log"; echo "::error::the packaged binary failed on an s3:// input"; exit 1; }
+          grep -q '^Fetched s3://dxbucket/runs/synth.mzML' "$RT/s3.log"
+          d() { "$PY" -c "import sys; sys.path.insert(0, sys.argv[1]); from test_diaspextract import digest; print(digest(sys.argv[2]))" "$WS/diaspextract/test" "$1"; }
+          [ "$(d "$RT/s3-remote.mzML")" = "$(d "$RT/s3-local.mzML")" ] || { echo "::error::s3:// input gave other spectra than the local file"; exit 1; }
+          echo "packaged binary: s3:// input reads the same spectra as the local file"
 
       # The runner itself has every library installed, so a missing one could still hide. A minimal Debian 13 (glibc
       # 2.41, nothing of Qt, Boost, Arrow or libgomp) has none of them: --help loads every NEEDED library at startup.
@@ -1274,12 +1362,21 @@ jobs:
           set -euo pipefail
           mv src-tauri/resources src-tauri/resources.hidden
           D="$(cygpath -w "$RUNNER_TEMP")\\dxapp"
-          "../$ASSET" /S "/D=$D"
+          # Bounded, and through PowerShell: run from Git Bash the installer hung the step for its whole 20 minutes
+          # without a line of output (run 41820852503).
+          echo "installing $ASSET into $D"
+          pwsh -NoProfile -Command "\$p = Start-Process -FilePath '$(cygpath -w "../$ASSET")' -ArgumentList '/S','/D=$D' -PassThru;
+            if (-not \$p.WaitForExit(300000)) { \$p.Kill(); Write-Error 'the installer did not finish in 5 minutes'; exit 1 };
+            exit \$p.ExitCode"
+          test -f "$D\\diaspextract-gui.exe" || { echo "::error::the installer put no diaspextract-gui.exe into $D"; ls "$D" || true; exit 1; }
+          echo "installed: $(ls "$D" | tr '\n' ' ')"
           python -I -c "import sys; sys.path.insert(0, sys.argv[1]); import test_diaspextract as t; t.synth(sys.argv[2])" ../test "$RUNNER_TEMP/synth.mzML"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/angiotensin.raw" "$TEST_RAW_URL"
+          echo "running the Playwright end-to-end suite"
           DX_E2E_APP="$D\\diaspextract-gui.exe" DX_E2E_INPUT="$(cygpath -w "$RUNNER_TEMP/synth.mzML")" DX_E2E_VERSION="$VERSION" \
-            npx playwright test --project=e2e | tee "$RUNNER_TEMP/e2e.log"
+            DX_E2E_RAW="$(cygpath -w "$RUNNER_TEMP/angiotensin.raw")" timeout 600 npx playwright test --project=e2e | tee "$RUNNER_TEMP/e2e.log"
           # a skipped suite exits 0 too
-          grep -q ' 3 passed' "$RUNNER_TEMP/e2e.log" || { echo "::error::the end-to-end tests did not all run"; exit 1; }
+          grep -q ' 4 passed' "$RUNNER_TEMP/e2e.log" || { echo "::error::the end-to-end tests did not all run"; exit 1; }
 
       - uses: actions/upload-artifact@v7
         if: always()

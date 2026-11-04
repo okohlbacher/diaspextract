@@ -134,10 +134,10 @@ export default function App({ bridge }: { bridge: Bridge }) {
         <div className="row">
           <label htmlFor="in">Input</label>
           <input id="in" value={values.in} spellCheck={false} disabled={running}
-            placeholder="a Bruker .d folder or an mzML file"
+            placeholder="a Bruker .d folder, an mzML, mzPeak or Thermo .raw file, or s3://bucket/run.mzpeak"
             onChange={(e) => setInput(e.target.value)} />
           <button disabled={running} onClick={async () => { const p = await bridge.pickRunDir(); if (p) setInput(p) }}>.d folder…</button>
-          <button disabled={running} onClick={async () => { const p = await bridge.pickRunFile(); if (p) setInput(p) }}>mzML file…</button>
+          <button disabled={running} onClick={async () => { const p = await bridge.pickRunFile(); if (p) setInput(p) }}>Run file…</button>
         </div>
         <div className="row">
           <label htmlFor="out">Output</label>

@@ -1,14 +1,11 @@
 # DIAspeXtract: encode mzML spectra in parallel, write them in order.
-#
 # Serialising one spectrum is independent of every other spectrum; only the CONCATENATION is
 # ordered. The stock writer does both on one thread, and it is CPU-bound, not I/O-bound: measured,
 # it sustains ~400 MB/s while the filesystem underneath it does 4.0 GB/s. On a 2-hour diaPASEF
 # acquisition that phase is 92.9 s of an 822 s run (10.7%), entirely serial.
-#
 # This encodes chunks of spectra into per-chunk buffers in parallel and appends them to the output
 # stream in index order, which is byte-for-byte what the serial loop produced. Work proceeds in
 # waves (chunk x threads spectra) so the buffered text stays bounded instead of holding the file.
-#
 # The writer is NOT reentrant on a single handler, which is the whole difficulty: writeSpectrum_
 # and its helpers (writePrecursor_, writeSoftware_, writeSourceFile_, writeDataProcessing_) are
 # non-const, MzMLHandler::cached_terms_ is a mutable memo of CV-term validation written during
@@ -17,16 +14,12 @@
 # writePrecursor_'s allocation). So each thread is given its OWN handler and validator, built from
 # the same members and carrying the same PeakFileOptions -- the options decide the output, so they
 # must match exactly. Nothing is shared but the read-only experiment and the dataProcessing list.
-#
 # An exception must never escape an OpenMP region (that calls std::terminate), so the first one is
 # captured and rethrown on the writing thread.
-#
 # Measured on a 30-minute acquisition, 100 threads: WRITE(mzML) 20.1 s -> 5.9 s, parallelism
 # 1.0x -> 51.4x, spectrum list byte-identical.
-#
 # Base: OpenMS/OpenMS develop bd4b89555629d68b431b189a4c841efbcc4dfeea (2026-04-24).
 # Verified to reproduce the built tree byte-for-byte. Touches the .cpp only.
-#
 # 2026-09-09: INDEX REGRESSION FIXED. Each per-thread handler recorded its <spectrum> offsets
 # relative to its own chunk buffer and into its own spectra_offsets_, which nobody read, so every
 # file this patch wrote carried an EMPTY <indexList> (count="0", one dummy entry, offset -1) --
@@ -35,8 +28,8 @@
 # The chunk loop now collects each chunk's buffer-relative offsets and rebases them by the file
 # position the chunk is appended at; the spectrum bytes are unchanged.
 # Apply with: patch -p1 -d <OpenMS tree> < this file
---- a/src/openms/source/FORMAT/HANDLERS/MzMLHandler.cpp	2026-09-09 12:16:35
-+++ b/src/openms/source/FORMAT/HANDLERS/MzMLHandler.cpp	2026-09-09 12:16:38
+--- a/src/openms/source/FORMAT/HANDLERS/MzMLHandler.cpp
++++ b/src/openms/source/FORMAT/HANDLERS/MzMLHandler.cpp
 @@ -8,6 +8,13 @@
  
  #include <OpenMS/FORMAT/HANDLERS/MzMLHandler.h>
@@ -48,14 +41,19 @@
 +#include <omp.h>
 +#endif
 +
+ #include <OpenMS/FORMAT/DATAACCESS/HTTPInputSource.h>
  #include <OpenMS/CONCEPT/Exception.h>
  #include <OpenMS/CONCEPT/LogStream.h>
- #include <OpenMS/CONCEPT/VersionInfo.h>
-@@ -4070,12 +4077,87 @@
+@@ -4916,12 +4923,87 @@ namespace OpenMS::Internal
          }
  
          // write actual data
 -        for (Size s_idx = 0; s_idx < exp.size(); ++s_idx)
+-        {
+-          logger_.setProgress(progress++);
+-          const SpectrumType& spec = exp[s_idx];
+-          writeSpectrum_(os, spec, s_idx, validator, renew_native_ids, dps);
+-          ++stored_spectra;
 +        // [DIAspeXtract] Serialising one spectrum is independent of every other; only the
 +        // CONCATENATION is ordered. Encode in parallel into per-chunk buffers and append them in
 +        // index order -- byte-for-byte what the serial loop produced. Serial writing sustained
@@ -66,11 +64,7 @@
 +        // has its own. So each thread gets its OWN handler and validator, constructed from the same
 +        // members and carrying the same options, and touches nothing shared but the read-only
 +        // experiment and dps. Work proceeds in waves so buffered text stays bounded.
-         {
--          logger_.setProgress(progress++);
--          const SpectrumType& spec = exp[s_idx];
--          writeSpectrum_(os, spec, s_idx, validator, renew_native_ids, dps);
--          ++stored_spectra;
++        {
 +          const Size n_spec = exp.size();
 +          const Size CHUNK = 256;
 +#ifdef _OPENMP

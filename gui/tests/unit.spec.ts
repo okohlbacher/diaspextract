@@ -50,6 +50,8 @@ test('the suggested output sits beside the input', () => {
   expect(suggestOutput('/x/HeLa_5min.d/')).toBe('/x/HeLa_5min.pseudo.mzML')
   expect(suggestOutput('C:\\runs\\orbi.mzML')).toBe('C:\\runs\\orbi.pseudo.mzML')
   expect(suggestOutput('run.mzML')).toBe('run.pseudo.mzML')
+  expect(suggestOutput('/x/orbi.raw')).toBe('/x/orbi.pseudo.mzML')
+  expect(suggestOutput('s3://bucket/runs/a.mzpeak?region=eu-central-1')).toBe('')
   expect(suggestOutput('')).toBe('')
 })
 

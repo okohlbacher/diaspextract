@@ -2,15 +2,31 @@
 
 ## v1.9.0 — 2026-11-04
 
-**The spectra do not change**: the command-line tool is 1.8.4's.
+**The spectra do not change**: on the diaPASEF test run they are 1.8.4's, bit for bit, on the new OpenMS.
 
 ### Added
 
+- **Thermo `.raw` input.** `-in run.raw` reads the file with Thermo's RawFileReader (through OpenMS) and takes the path
+  for input without ion mobility; no conversion to mzML first. The release bundles carry the .NET runtime it needs
+  (`dotnet/`, .NET 10); nothing has to be installed. A FAIMS run is split by compensation voltage, each voltage is
+  extracted on its own, and its spectra carry their voltage.
+- **mzPeak input and output in the release builds.** `-out run.mzpeak` writes mzPeak, `-in run.mzpeak` reads it.
+- **`s3://` input.** `-in s3://bucket/run.mzpeak` (also mzML and `.raw`) reads the object from S3 or an S3-compatible
+  server; region, endpoint and scheme go into the URI's query, the credentials come from the usual AWS environment.
+  The object is copied to a temporary file for the run.
 - A desktop app for macOS, Windows and Linux (`DIAspeXtract-GUI-*` on the release page). It runs the bundled
   command-line tool: choose the input run and the output file, change options in a form built from the tool's own
   option list (defaults, limits and help texts included), and follow progress and log. The app shows the equivalent
   command line and remembers the settings. The macOS app is signed, notarized and stapled; the Windows installer is
   not signed yet.
+
+### Changed
+
+- **OpenMS 3.7.0-pre** (develop `d60780f6`, 2026-11-04) instead of the April commit. Two of the ten OpenMS patches are
+  upstream now (Biosaur2 speed, thread-safe exceptions) and are gone; the Bruker reader patch is rebuilt on the new
+  reader and keeps the tool's own exact m/z calibration, which is why the spectra stay the same.
+- macOS: the signed tool carries the `allow-jit` entitlement, which the .NET runtime needs to read `.raw` files.
+  Library validation stays on; the bundled .NET libraries are signed with the same Developer ID as the rest.
 
 ## v1.8.4 — 2026-11-04
 

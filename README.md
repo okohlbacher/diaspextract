@@ -3,7 +3,8 @@
 # DIAspeXtract
 
 DIAspeXtract turns DIA data into pseudo-MS/MS spectra that any DDA search engine can search. It reads Bruker
-timsTOF **diaPASEF** runs and, since 1.8.0, centroided DIA mzML **without ion mobility** (Orbitrap, SWATH). It finds
+timsTOF **diaPASEF** runs and DIA data **without ion mobility** (Orbitrap, SWATH): Thermo `.raw` files directly, or
+centroided mzML or mzPeak, also from S3 (`s3://`). It finds
 the precursor ions in the MS1 scans, collects the fragments that elute with each precursor (on diaPASEF data also at
 the same ion mobility), and writes one MS2 spectrum per precursor to mzML. It uses no spectral library, so an
 **open or blind search** of the output can find sequence variants and unexpected modifications. It is a standalone
@@ -60,7 +61,9 @@ flowchart TD
 
 ### Input without ion mobility
 
-An mzML without ion mobility at MS1 (centroided, one isolation window per MS2 scan) takes a separate path. Biosaur2
+An mzML or mzPeak without ion mobility at MS1 (centroided, one isolation window per MS2 scan), or a Thermo `.raw` file
+(read centroided), takes a separate path. A FAIMS run is split by compensation voltage, each voltage takes this path on
+its own, and its spectra carry their voltage. Biosaur2
 finds the precursors (averagine-checked isotope patterns, charge 1 to 4) in the whole run's MS1 scans; isotope
 envelopes of unfragmented precursors in a window's MS2 traces are added when MS1 lacks them. In each isolation window
 the MS2 peaks are traced over time, and a fragment joins a precursor when their elution profiles correlate (r ≥ 0.3,
@@ -72,7 +75,8 @@ mobility at MS2 but not at MS1, and MS2 scans with several isolation windows are
 
 | | |
 |---|---|
-| OpenMS | the development commit pinned in `patches/openms.lock`, patched by `scripts/apply_openms_patches.sh` and built `WITH_OPENTIMS` to read Bruker `.d`. A released OpenMS package does not work |
+| OpenMS | the development commit pinned in `patches/openms.lock` (3.7.0-pre), patched by `scripts/apply_openms_patches.sh` and built `WITH_OPENTIMS` (Bruker `.d`) and `WITH_THERMO_RAW` (Thermo `.raw`). A released OpenMS package does not work |
+| .NET | for Thermo `.raw` input only: the runtime, 8 or newer. The release bundles carry it |
 | Compiler | C++20 and OpenMP. CI builds with GCC on Linux, Apple clang with Homebrew's libomp on macOS and clang-cl on Windows |
 | CMake | 3.21+ for OpenMS (the tool itself needs 3.16) |
 | Platform | Linux or Windows. On macOS the tool cannot read the free memory and runs one isolation window at a time |
@@ -139,11 +143,11 @@ cd diaspextract
 # 1. OpenMS at the pinned commit, patched, then built. No released package works.
 git clone https://github.com/OpenMS/OpenMS.git /path/to/OpenMS
 git -C /path/to/OpenMS checkout $(sed -n 's/^OPENMS_BASE=//p' patches/openms.lock)
-scripts/apply_openms_patches.sh /path/to/OpenMS                 # installs two headers, applies ten patches
+scripts/apply_openms_patches.sh /path/to/OpenMS                 # installs two headers, applies eight patches
 cmake -S /path/to/OpenMS -B /path/to/OpenMS/build -DCMAKE_BUILD_TYPE=Release \
-      -DWITH_OPENTIMS=ON -DWITH_GUI=OFF -DHAS_XSERVER=OFF \
+      -DWITH_OPENTIMS=ON -DWITH_THERMO_RAW=ON -DWITH_GUI=OFF -DHAS_XSERVER=OFF \
       -DCMAKE_CXX_FLAGS=-ffp-contract=off   # same spectra on every platform (clang-cl: /clang:-ffp-contract=off)
-cmake --build /path/to/OpenMS/build --target OpenMS -j          # the library only, not every OpenMS tool
+cmake --build /path/to/OpenMS/build --target OpenMS OpenMS_CLI -j   # the libraries only, not every OpenMS tool
 
 # 2. The tool.
 cmake -B build -DOpenMS_DIR=/path/to/OpenMS/build
@@ -155,22 +159,23 @@ The binary is `build/diaspextract`; `cmake --install build` puts it under `<pref
 `.github/workflows/build.yml` runs the same recipe on Linux, macOS and Windows and is the reference. On Windows, build
 OpenMS and the tool with clang-cl, not cl.
 
-`scripts/apply_openms_patches.sh` applies the ten small OpenMS patches in `patches/`. They give the Bruker reader the
-acquisition's exact m/z calibration, let the tool set the scan time that peak splitting uses, make tracing and mzML
-writing faster on many threads, and let `--help` and the CTD and CWL export work for a tool outside OpenMS, so it can
-be wrapped for KNIME or Galaxy. Two make the spectra the same on every platform: the ion-mobility peak picker orders
-equal intensities by index (its `std::sort` left them to the standard library), and the trace detection and smoothing
-take `exp` and `log` from `src/PortableMath.h` instead of the platform's math library. One makes Biosaur2, the
-precursor finder for input without ion mobility, faster without changing its result, one lets clang-cl compile OpenMS
-on Windows, and one lets several threads throw OpenMS exceptions at once (they shared five unguarded strings). Apply
-all ten: leaving one out stops the build, changes the spectra, slows the run or can crash it on an error.
+The OpenMS build needs the .NET SDK (8 or newer) for the Thermo `.raw` reader, and an Arrow built with S3 support for
+`s3://` input. Running `.raw` input needs a .NET runtime, 8 or newer: a release bundle carries its own in `dotnet/`.
+
+`scripts/apply_openms_patches.sh` applies the eight small OpenMS patches in `patches/`. They give the Bruker reader the
+acquisition's exact m/z calibration and the run's DIA frame table, let the tool set the scan time that peak splitting
+uses, make tracing and mzML writing faster on many threads, and let `--help` point at this repository. Two make the
+spectra the same on every platform: the ion-mobility peak picker orders equal intensities by index (its `std::sort`
+left them to the standard library), and the trace detection and smoothing take `exp` and `log` from
+`src/PortableMath.h` instead of the platform's math library. One lets clang-cl compile OpenMS on Windows. Apply all
+eight: leaving one out stops the build, changes the spectra or slows the run.
 
 A normal run needs no environment variables; the ones a user may set are listed in [docs/options.md](docs/options.md).
 A leftover `SPEXTRACTOR_*` or `DIASPEXTRACTOR_*` variable from an earlier release makes the tool refuse to start and
 names the new spelling.
 
-**mzPeak.** mzPeak input and output need an OpenMS with mzPeak support, which the pinned commit lacks. Read the
-`.d` and write mzML.
+**mzPeak.** `-in` reads `.mzpeak` and `-out` writes it (`-out run.mzpeak`); search engines read mzML, so write mzML
+for a search. OpenMS cannot store a diaPASEF run (ion mobility per peak) as mzPeak yet, so diaPASEF input stays a `.d`.
 
 ## Run
 
@@ -180,10 +185,20 @@ diaspextract -in sample.d -out pseudo.mzML
 
 For diaPASEF, give the tool the `.d` itself. A diaPASEF mzML runs without MS1 noise removal and, because it carries no
 instrument calibration, with the `openms` detector on the whole run: it needs more memory and gives different spectra.
-An Orbitrap or SWATH run goes in as centroided mzML (for example from ThermoRawFileParser with peak picking):
+An Orbitrap run goes in as the Thermo `.raw` file itself, a SWATH run as centroided mzML:
 
 ```bash
-diaspextract -in orbitrap_dia.mzML -out pseudo.mzML
+diaspextract -in orbitrap_dia.raw -out pseudo.mzML
+diaspextract -in swath_dia.mzML -out pseudo.mzML
+```
+
+An mzML, mzPeak or `.raw` input can also come from S3. The tool copies the object to a temporary file, which needs that
+much free disk, and removes it at the end. Region, endpoint and scheme go into the URI's query, the credentials come
+from the usual AWS environment (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, a profile or an instance role):
+
+```bash
+diaspextract -in "s3://my-bucket/runs/orbitrap_dia.mzpeak?region=eu-central-1" -out pseudo.mzML
+diaspextract -in "s3://my-bucket/run.mzML?endpoint_override=minio.local:9000&scheme=http" -out pseudo.mzML   # S3-compatible
 ```
 
 Then search the output like any DDA file, for example with Sage (`bench/sage_closed.json` is a closed-search

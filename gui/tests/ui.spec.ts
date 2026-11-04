@@ -30,7 +30,7 @@ test('Run waits for an input and an output', async ({ page }) => {
 test('a new input replaces a suggested output, never a chosen one', async ({ page }) => {
   await page.getByLabel('Input').fill('/a/one.d')
   await expect(page.getByLabel('Output')).toHaveValue('/a/one.pseudo.mzML')
-  await page.getByRole('button', { name: 'mzML file…' }).click()
+  await page.getByRole('button', { name: 'Run file…' }).click()
   await expect(page.getByLabel('Output')).toHaveValue('/data/orbitrap.pseudo.mzML')
   await page.getByLabel('Output').fill('/mine/keep.mzML')
   await page.getByLabel('Input').fill('/a/two.d')

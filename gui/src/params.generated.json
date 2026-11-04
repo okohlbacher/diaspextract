@@ -43,7 +43,7 @@
       "section": "",
       "type": "string",
       "default": "",
-      "description": "Set the output format instead of taking it from the extension of -out. Empty (default) = follow the extension; an unknown extension gives mzPeak (mzML in a build without mzPeak support).",
+      "description": "Set the output format instead of taking it from the extension of -out. Empty (default) = follow the extension; an unknown extension gives mzPeak.",
       "advanced": false,
       "choices": [
         "",

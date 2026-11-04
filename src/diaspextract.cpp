@@ -8,9 +8,13 @@
 
 #include "MzPeakStreamLoad.h"   // [mzpeak] streaming .mzpeak input (DIASPEXTRACT_WITH_MZPEAK)
 #include <OpenMS/APPLICATIONS/TOPPBase.h>
+#include "OmsString.h"   // String(x) on top of std::string (OpenMS 3.7 has no OpenMS::String)
 
 #include <OpenMS/FORMAT/FileHandler.h>
 #include <OpenMS/FORMAT/BrukerTimsFile.h>
+#include <OpenMS/FORMAT/DATAACCESS/S3InputSource.h>   // [s3] -in s3://...
+#include <OpenMS/FORMAT/DATAACCESS/HTTPInputSource.h>   // redactURL: a URI may carry credentials
+#include <OpenMS/SYSTEM/File.h>
 #include <OpenMS/FORMAT/DATAACCESS/SwathFileConsumer.h>
 #include <OpenMS/FORMAT/DATAACCESS/MSDataWritingConsumer.h>
 #include <OpenMS/KERNEL/MSExperiment.h>
@@ -24,6 +28,8 @@
 #include <OpenMS/FEATUREFINDER/ElutionPeakDetection.h>
 #include <OpenMS/PROCESSING/CENTROIDING/PeakPickerIM.h>
 #include <OpenMS/IONMOBILITY/IMTypes.h>
+#include <OpenMS/IONMOBILITY/FAIMSHelper.h>       // [faims]
+#include <OpenMS/IONMOBILITY/IMDataConverter.h>   // [faims] splitByFAIMSCV
 #include <OpenMS/CONCEPT/Constants.h>
 #include <OpenMS/CONCEPT/VersionInfo.h>   // verboseVersion_ carries the OpenMS build alongside ours
 
@@ -93,6 +99,7 @@ static inline double spxFileTimeSec_(FILETIME a, FILETIME b)   // two FILETIMEs 
 
 using namespace OpenMS;
 using namespace std;
+using diaspextract::String;
 
 //-------------------------------------------------------------
 // Doxygen docu
@@ -2609,12 +2616,51 @@ namespace
   };
 }
 
+// [s3] An S3 object fetched to a temporary local file under the same name, removed again when the run ends.
+struct S3Copy
+{
+  std::filesystem::path dir;
+  ~S3Copy() { std::error_code ec; if (!dir.empty()) std::filesystem::remove_all(dir, ec); }
+
+  String fetch(const std::string& uri, const std::function<void(const String&)>& log)
+  {
+    if (!S3InputSource::isAvailable())
+      throw OpenMS::Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+            "this build of DIAspeXtract cannot read S3 (its OpenMS has no Arrow S3 support): " + uri);
+    const std::string key = uri.substr(0, uri.find('?'));   // query parameters configure the connection, not the name
+    const std::string name = key.substr(key.find_last_of('/') + 1);
+    const FileTypes::Type t = name.empty() ? FileTypes::UNKNOWN : FileHandler::getTypeByFileName(name);
+    if (t != FileTypes::MZML && t != FileTypes::MZPEAK && t != FileTypes::RAW)
+      throw OpenMS::Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+            "an S3 input must be one file (mzML, mzPeak or .raw); a Bruker .d folder has to be local: " + uri);
+    const Int64 size = S3InputSource::objectSize(uri);   // a missing object: OpenMS logs Arrow's reason
+    dir = std::filesystem::temp_directory_path() / ("diaspextract-s3-" + File::getUniqueName(false));
+    std::filesystem::create_directories(dir);
+    const std::filesystem::path local = dir / name;
+    std::ofstream os(local, std::ios::binary);
+    const auto t0 = std::chrono::steady_clock::now();
+    const Int64 chunk = Int64(64) << 20;
+    for (Int64 off = 0; off < size; off += chunk)
+    {
+      const std::string part = S3InputSource::readRange(uri, off, std::min(chunk, size - off));
+      os.write(part.data(), (std::streamsize)part.size());
+    }
+    os.close();
+    if (!os || (Int64)std::filesystem::file_size(local) != size)
+      throw OpenMS::Exception::UnableToCreateFile(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, local.string(),
+            "the copy of " + uri + " is incomplete (disk full?)");
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    log("Fetched " + HTTPInputSource::redactURL(uri) + " (" + String(size / 1e6, false) + " MB in " + String(secs, false) + " s) to " + local.string());
+    return local.string();
+  }
+};
+
 class TOPPDIAspeXtract : public TOPPBase
 {
 public:
   TOPPDIAspeXtract() :
-    // official=false: a standalone tool, absent from ToolHandler's official list (TOPPBase rejects an unregistered official name).
-    TOPPBase("DIAspeXtract", "Builds pseudo-MS/MS spectra from DIA data (diaPASEF, Orbitrap, SWATH) for DDA search engines.", false)
+    // toolhandler_test=false: a standalone tool, absent from OpenMS's tool registry (TOPPBase rejects an unregistered name).
+    TOPPBase("DIAspeXtract", "Builds pseudo-MS/MS spectra from DIA data (diaPASEF, Orbitrap, SWATH) for DDA search engines.", {}, false)
   {
     // Otherwise TOPPBase reports OpenMS's version as ours: version_ feeds the ini and the mzML software entry,
     // verboseVersion_ the --help Version line, which carries both numbers because a bug report needs the OpenMS build too.
@@ -2624,7 +2670,7 @@ public:
 
   // [docurl] patches/openms-topp-external.patch makes this virtual. TOPPBase's default is an OpenMS doxygen page that
   // does not exist for a tool outside the release; the first line of --help and every CTD's docurl point here instead.
-  String getDocumentationURL() const override { return "https://github.com/okohlbacher/diaspextract"; }
+  std::string getDocumentationURL() const override { return "https://github.com/okohlbacher/diaspextract"; }
 
 protected:
   // OpenMS's log streams are not thread-safe: two threads logging at once lose or repeat a line, or leave stray bytes.
@@ -2639,22 +2685,18 @@ protected:
     // a true/false option: a string option restricted to "true" and "false"
     auto regBool = [this](const String& name, const String& def, const String& desc, bool advanced = false)
     { registerStringOption_(name, "<true/false>", def, desc, false, advanced); setValidStrings_(name, {"true", "false"}); };
+    // skipexists, and no setValidFormats_: an s3:// URI is no local file, and with query parameters it has no extension
+    // TOPPBase recognises (it then sniffs the content as a local file). main_ checks the input itself.
     registerInputFile_("in", "<file>", "", "Input DIA run: a Bruker diaPASEF .d directory, an mzML (with ion mobility, or centroided Orbitrap/SWATH "
-                       "DIA without it, which takes the separate noims path), or mzPeak in a build that supports it.");
-#ifdef DIASPEXTRACT_WITH_MZPEAK
-    setValidFormats_("in", {"mzML", "mzpeak", "d"});
-#else
-    setValidFormats_("in", {"mzML", "d"});      // stock OpenMS does not know the mzpeak format
-#endif
-    registerOutputFile_("out", "<file>", "", "Output spectra. The format follows the extension: .mzML, or .mzpeak in a build with mzPeak support. "
+                       "DIA without it, which takes the separate noims path), a Thermo .raw file (noims path), or mzPeak. mzML and mzPeak "
+                       "can also be read from S3: s3://bucket/key, with region or endpoint_override as URI query parameters "
+                       "and the credentials from the usual AWS environment. (valid formats: 'mzML', 'mzpeak', 'd', 'raw')",
+                       true, false, {"skipexists"});
+    registerOutputFile_("out", "<file>", "", "Output spectra. The format follows the extension: .mzML or .mzpeak. "
                             "Search engines read mzML, so use .mzML if the next step is a search. mzPeak output runs as one tile and needs the whole run's memory.");
-#ifdef DIASPEXTRACT_WITH_MZPEAK
     setValidFormats_("out", {"mzpeak", "mzML"});
-#else
-    setValidFormats_("out", {"mzML"});
-#endif
     registerStringOption_("out_type", "<type>", "", "Set the output format instead of taking it from the extension of -out. Empty (default) = follow "
-                              "the extension; an unknown extension gives mzPeak (mzML in a build without mzPeak support).", false);
+                              "the extension; an unknown extension gives mzPeak.", false);
     setValidStrings_("out_type", {"", "mzpeak", "mzML"});
 
     registerTOPPSubsection_("gate", "Which fragments join a precursor's spectrum (diaPASEF input only)");
@@ -4329,7 +4371,39 @@ protected:
 
   /// [noims] input without ion mobility: the separate path of NoImsPath.h, written to <out>.part and committed like the
   /// IMS path's output. Centroided input only: profile spectra would make every profile sample a peak.
+  // [faims] A FAIMS run interleaves several compensation voltages; each is a run of its own for the non-IMS path, so each
+  // is extracted alone and its spectra carry their voltage. The merged result is in retention-time order.
+  ExitCodes runFaims_(PeakMap&& exp, const String& out, FileTypes::Type out_type)
+  {
+    PeakMap res;
+    auto parts = IMDataConverter::splitByFAIMSCV(std::move(exp));
+    writeLogInfo_("[faims] " + String(parts.size()) + " compensation voltages: each takes the non-IMS path on its own.");
+    for (auto& [cv, sub] : parts)
+    {
+      writeLogInfo_("[faims] CV " + String(cv) + " V: " + String(sub.size()) + " spectra");
+      PeakMap part;
+      if (const ExitCodes rc = noImsSpectra_(sub, part); rc != EXECUTION_OK) return rc;
+      for (MSSpectrum& sp : part)
+      {
+        sp.setDriftTime(cv);
+        sp.setDriftTimeUnit(DriftTimeUnit::FAIMS_COMPENSATION_VOLTAGE);
+        res.addSpectrum(std::move(sp));
+      }
+    }
+    std::stable_sort(res.getSpectra().begin(), res.getSpectra().end(),
+                     [](const MSSpectrum& a, const MSSpectrum& b) { return a.getRT() < b.getRT(); });
+    for (size_t i = 0; i < res.size(); ++i) res[i].setNativeID("index=" + String(i));
+    return writeNoIms_(res, out, out_type);
+  }
+
   ExitCodes runNoIms_(PeakMap& exp, const String& out, FileTypes::Type out_type)
+  {
+    PeakMap res;
+    if (const ExitCodes rc = noImsSpectra_(exp, res); rc != EXECUTION_OK) return rc;
+    return writeNoIms_(res, out, out_type);
+  }
+
+  ExitCodes noImsSpectra_(PeakMap& exp, PeakMap& res)
   {
     for (const MSSpectrum& s : exp)
     {
@@ -4358,8 +4432,12 @@ protected:
     spx_noims::Params P;
     P.min_corr = getDoubleOption_("noims:min_corr");
     P.ppm = getDoubleOption_("noims:ppm");
-    PeakMap res;
     spx_noims::run(exp, P, res, [this](const String& m) { writeLogInfo_(m); });   // moves the spectra out of exp
+    return EXECUTION_OK;
+  }
+
+  ExitCodes writeNoIms_(PeakMap& res, const String& out, FileTypes::Type out_type)
+  {
     const String part = out + ".part";
     FileHandler().storeExperiment(part, res, {out_type}, log_type_);
     if (out_type == FileTypes::MZML)   // FileHandler does not report a failed write: the file must end in its footer
@@ -4393,7 +4471,21 @@ protected:
                       "for example on a shared machine.");
       }
     }
-    const String in = getStringOption_("in");
+    // [s3] an s3:// input is copied to a local file once, then read like any other: the readers (mzPeak's libzip archive,
+    // the parallel mzML parser) all want a seekable local file. The copy costs the object's size in temporary disk.
+    // ponytail: whole-object fetch; range reads straight from S3 would need the mzPeak library's zip I/O reworked.
+    const String in_arg = getStringOption_("in");
+    S3Copy s3_copy;
+    const String in = S3InputSource::isS3URI(in_arg) ? s3_copy.fetch(in_arg, [this](const String& m) { writeLogInfo_(m); })
+                                                      : in_arg;
+    if (!S3InputSource::isS3URI(in_arg) && !File::exists(in))
+      throw OpenMS::Exception::FileNotFound(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, in);
+    {
+      const FileTypes::Type t = FileHandler::getTypeByFileName(in);
+      if (t != FileTypes::MZML && t != FileTypes::MZPEAK && t != FileTypes::BRUKER_TDF && t != FileTypes::RAW)
+        throw OpenMS::Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+              "-in must be an mzML, mzPeak or Thermo .raw file or a Bruker .d folder: " + in_arg);
+    }
     const String out = getStringOption_("out");
     const double delta_im = getDoubleOption_("gate:delta_im");
     // [frag-im] the gate's fragment-precursor 1/K0 window, apart from the tracing tolerance delta_im (negative = delta_im)
@@ -4474,7 +4566,6 @@ protected:
     // a user typing `-out pseudo.mzML` means; -out_type overrides it; mzPeak is the default when neither says.
     FileTypes::Type out_type = FileTypes::MZML;
     const String out_type_opt = getStringOption_("out_type");
-#ifdef DIASPEXTRACT_WITH_MZPEAK
     if (!out_type_opt.empty())
       out_type = (out_type_opt == "mzML") ? FileTypes::MZML : FileTypes::MZPEAK;
     else
@@ -4485,13 +4576,6 @@ protected:
     }
     if (out_type == FileTypes::MZPEAK)
       writeLogInfo_("Writing mzPeak. Search engines read mzML: for a search, name the output .mzML (or pass -out_type mzML).");
-#else
-    // Built without mzPeak support: mzML is the only container this binary can write. Refuse an
-    // explicit request for mzPeak rather than silently writing something else.
-    if (!out_type_opt.empty() && out_type_opt != "mzML")
-      throw OpenMS::Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-            "-out_type mzpeak needs a build with mzPeak support (-DMZPEAK_ROOT=...); this binary writes mzML only.");
-#endif
     // [preflight] what the .d loader would abort on, refused here with its cause and an exit code a caller can route on:
     // a ddaPASEF run (INCOMPATIBLE_INPUT_DATA) and a cut analysis.tdf_bin (INPUT_FILE_CORRUPT). First, before the
     // calibration and dnoise setups read the same tdf, so a broken file is named as such whatever it breaks there.
@@ -4735,13 +4819,7 @@ protected:
       ms1_prune.reset();
       dnoise.reset();   // [dnoise] counts and frame marks: the resident pick below filters every frame again
       Phase _ph("LOAD(full)");
-      FileHandler().loadExperiment(in, exp,
-#ifdef DIASPEXTRACT_WITH_MZPEAK
-                                   {FileTypes::MZML, FileTypes::MZPEAK, FileTypes::BRUKER_TDF},
-#else
-                                   {FileTypes::MZML, FileTypes::BRUKER_TDF},
-#endif
-                                   log_type_);
+      FileHandler().loadExperiment(in, exp, {FileTypes::MZML, FileTypes::MZPEAK, FileTypes::BRUKER_TDF, FileTypes::RAW}, log_type_);
     }
 
     // Input normalization / validation, resident load only (a streamed run leaves `exp` empty; ms1_map.empty() guards it
@@ -4749,6 +4827,7 @@ protected:
     // than the trace IM tolerance, and split MS1 vs MS2 into separate working maps.
     if (!streamed)
     {
+      if (!FAIMSHelper::getCompensationVoltages(exp).empty()) return runFaims_(std::move(exp), out, out_type);   // [faims]
       IMFormat imf = IMTypes::determineIMFormat(exp, 1);
       if (imf == IMFormat::NONE)
       {
@@ -6396,12 +6475,30 @@ int main(int argc, const char** argv)
   if (old_name) return TOPPBase::ILLEGAL_PARAMETERS;
   // TOPPBase's update check sends this tool's name and version to an OpenMS REST endpoint and, offline, prints Qt
   // QIODevice errors on the stderr the harness parses (build.yml asserts --help stays clean). Always off: the tool makes
-  // no network request (SECURITY.md), whatever the environment says.
+  // no network request of its own (only an s3:// -in is read over the network; SECURITY.md), whatever the environment says.
 #ifdef _WIN32
   _putenv_s("OPENMS_DISABLE_UPDATE_CHECK", "ON");
 #else
   ::setenv("OPENMS_DISABLE_UPDATE_CHECK", "ON", 1);
 #endif
+  // [raw] Thermo .raw is read through .NET (openms-thermo-bridge). A release bundle carries its own runtime in dotnet/ next
+  // to bin/, so nothing needs installing; DOTNET_ROOT, if the user set it, wins. Invariant globalization: the reader needs
+  // no culture data, and without it .NET on Linux would need the system's ICU.
+  {
+    const std::filesystem::path bundled = std::filesystem::path(File::getExecutablePath()) / ".." / "dotnet";
+    auto set_default = [](const char* k, const std::string& v) {
+      const char* cur = std::getenv(k);
+      if (cur && *cur) return;
+#ifdef _WIN32
+      _putenv_s(k, v.c_str());
+#else
+      ::setenv(k, v.c_str(), 1);
+#endif
+    };
+    std::error_code ec;
+    if (std::filesystem::is_directory(bundled, ec)) set_default("DOTNET_ROOT", std::filesystem::canonical(bundled, ec).string());
+    set_default("DOTNET_SYSTEM_GLOBALIZATION_INVARIANT", "1");
+  }
   TOPPDIAspeXtract tool;
   // TOPPBase catches OpenMS exceptions only; one from a library (SQLite, opentims) would otherwise abort with no exit code
   try { return tool.main(argc, argv); }

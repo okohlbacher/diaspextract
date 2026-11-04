@@ -72,7 +72,7 @@ endif()
 find_package(SQLite3 REQUIRED)   # analysis.tdf is read directly; a missing SQLite is a build error, not a fallback
 
 add_executable(diaspextract src/diaspextract.cpp)
-target_link_libraries(diaspextract PRIVATE OpenMS SQLite::SQLite3 OpenMP::OpenMP_CXX)
+target_link_libraries(diaspextract PRIVATE OpenMS OpenMS_CLI SQLite::SQLite3 OpenMP::OpenMP_CXX)   # OpenMS_CLI: TOPPBase
 target_compile_definitions(diaspextract PRIVATE DIASPEXTRACT_VERSION="${PROJECT_VERSION}")
 # Windows: a version resource with the product name and version. SignPath signs the release .exe only when both are
 # present and match its artifact configuration (.signpath/artifact-configurations/initial.xml).

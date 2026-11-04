@@ -1,0 +1,19 @@
+# DIAspeXtract: Percolator's Globals.cpp includes <windows.h> and <tchar.h> inside namespace
+# OpenMS::Internal::Percolator, so every Windows type they declare lands in that namespace. MSVC builds have the headers
+# included earlier, which makes the include a no-op; clang-cl does not, and the Windows SDK's own headers then fail
+# ("cannot convert ... 'const OpenMS::Internal::Percolator::_GUID'"). Nothing in the file uses either header: drop them.
+# Worth upstreaming.
+--- a/src/openms/thirdparty/percolator/Globals.cpp
++++ b/src/openms/thirdparty/percolator/Globals.cpp
+@@ -47,11 +47,6 @@
+   return glob;
+ }
+ 
+-#if defined (__WIN32__) || defined (__MINGW__) || defined (MINGW) || defined (_WIN32)
+-#include <windows.h>
+-#include <tchar.h>
+-#endif
+-
+ Logger* Globals::getLogger() {
+   if(buffer_redirected)
+   {

@@ -282,15 +282,18 @@ jobs:
           sudo apt-get update -q
           # Arrow's S3 filesystem (s3:// input) is a package of its own since Arrow 26
           sudo apt-get install -y -q --no-install-recommends libarrow-dev libparquet-dev libarrow-s3-dev
-          # OpenMS 3.7 parses XML with libxml2 >= 2.13; Ubuntu 24.04 has 2.9. Built here, into a prefix of its own (a
-          # minute), on a cache hit too: the bundle step copies it from there.
+          # OpenMS 3.7 parses XML with libxml2 >= 2.13; Ubuntu 24.04 has 2.9. Built here (a minute), on a cache hit too, and
+          # installed into /usr/local: the linker, ldd and the loader search it before /usr/lib, where the 2.9 stays (a
+          # prefix of its own let the tool's link resolve libOpenMS's libxml2.so.2 to 2.9, run 41867270682).
           curl -fsSL --retry 3 -o "$RT/libxml2.tar.xz" "https://download.gnome.org/sources/libxml2/${LIBXML2_VERSION%.*}/libxml2-$LIBXML2_VERSION.tar.xz"
           tar -C "$RT" -xJf "$RT/libxml2.tar.xz"
           cmake -S "$RT/libxml2-$LIBXML2_VERSION" -B "$RT/libxml2-build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="$WS/deps" -DBUILD_SHARED_LIBS=ON -DLIBXML2_WITH_PYTHON=OFF -DLIBXML2_WITH_ICU=OFF \
+            -DCMAKE_INSTALL_PREFIX=/usr/local -DBUILD_SHARED_LIBS=ON -DLIBXML2_WITH_PYTHON=OFF -DLIBXML2_WITH_ICU=OFF \
             -DLIBXML2_WITH_LZMA=OFF -DLIBXML2_WITH_TESTS=OFF -DLIBXML2_WITH_PROGRAMS=OFF > /dev/null
-          cmake --build "$RT/libxml2-build" > /dev/null && cmake --install "$RT/libxml2-build" > /dev/null
-          ls "$WS/deps/lib"
+          cmake --build "$RT/libxml2-build" > /dev/null && sudo cmake --install "$RT/libxml2-build" > /dev/null
+          sudo ldconfig
+          ldconfig -p | grep 'libxml2.so.2 ' | head -2
+          cp "$RT/libxml2-$LIBXML2_VERSION/Copyright" "$RT/libxml2-Copyright.txt"
           # shellcheck disable=SC2086
           fp=$( { lsb_release -rs; uname -m; echo "libxml2=$LIBXML2_VERSION"; dpkg-query -W -f='${Package}=${Version}\n' $PKGS libarrow-dev libparquet-dev libarrow-s3-dev | sort; } | sha256sum | cut -c1-16)
           echo "DEPS_FP=$fp" | tee -a "$GITHUB_ENV"
@@ -429,7 +432,7 @@ jobs:
                   -DENABLE_DOCS=OFF -DMT_ENABLE_OPENMP=ON -DCMAKE_INSTALL_PREFIX="$WS/openms-not-installed")
           case "$RUNNER_OS" in
             Linux)
-              cmake -S OpenMS -B OpenMS/build "${COMMON[@]}" -DCMAKE_CXX_FLAGS=-ffp-contract=off -DCMAKE_PREFIX_PATH="$WS/deps" ;;
+              cmake -S OpenMS -B OpenMS/build "${COMMON[@]}" -DCMAKE_CXX_FLAGS=-ffp-contract=off -DCMAKE_PREFIX_PATH=/usr/local ;;
             macOS)
               # BOOST_USE_STATIC=OFF as in OpenMS's macOS CI: Homebrew's static Boost is not what OpenMS is tested with.
               cmake -S OpenMS -B OpenMS/build "${COMMON[@]}" -DCMAKE_CXX_FLAGS=-ffp-contract=off \
@@ -491,7 +494,7 @@ jobs:
           set -euo pipefail
           ARGS=(-S diaspextract -B diaspextract/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DOpenMS_DIR="$WS/OpenMS/build")
           case "$RUNNER_OS" in
-            Linux)   cmake "${ARGS[@]}" -DCMAKE_PREFIX_PATH="$WS/deps" ;;
+            Linux)   cmake "${ARGS[@]}" -DCMAKE_PREFIX_PATH=/usr/local ;;
             macOS)   cmake "${ARGS[@]}" -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOS_FLOOR" \
                        -DCMAKE_PREFIX_PATH="$LIBXML2;$BREW;$LIBOMP" -DOpenMP_ROOT="$LIBOMP" ;;
             # /Z7 + /DEBUG: a PDB for the stack trace below; the code is the same.
@@ -741,6 +744,9 @@ jobs:
             pkg=${pkg%%:*}
             if [ -n "$pkg" ] && [ -f "/usr/share/doc/$pkg/copyright" ]; then cp "/usr/share/doc/$pkg/copyright" "dist/$DIST/LICENSES/third-party/$pkg.txt"; fi
           done
+          # libxml2 is built from source (/usr/local, no Debian package): its licence by hand
+          cp "$RT/libxml2-Copyright.txt" "dist/$DIST/LICENSES/third-party/libxml2.txt"
+          ls "$L" | grep -q '^libxml2.so' || { echo "::error::libxml2 is not in the bundle"; exit 1; }
           # shellcheck disable=SC2016  # $ORIGIN is for the loader, not the shell
           patchelf --set-rpath '$ORIGIN/../lib' "dist/$DIST/bin/diaspextract"
           for f in "$L"/*; do

@@ -23,7 +23,8 @@
 ### Changed
 
 - **OpenMS 3.7.0-pre** (develop `d60780f6`, 2026-11-04) instead of the April commit. Two of the ten OpenMS patches are
-  upstream now (Biosaur2 speed, thread-safe exceptions) and are gone; the Bruker reader patch is rebuilt on the new
+  upstream now (Biosaur2 speed, thread-safe exceptions) and are gone, one is new (Percolator's Windows includes, for
+  clang-cl); the Bruker reader patch is rebuilt on the new
   reader and keeps the tool's own exact m/z calibration, which is why the spectra stay the same.
 - macOS: the signed tool carries the `allow-jit` entitlement, which the .NET runtime needs to read `.raw` files.
   Library validation stays on; the bundled .NET libraries are signed with the same Developer ID as the rest.

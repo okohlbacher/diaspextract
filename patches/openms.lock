@@ -1,3 +1,3 @@
 OPENMS_BASE=d60780f6052e2b462fb8f263e0d718a8d2e82b76
-# OpenMS/OpenMS develop (3.7.0-pre), 2026-11-04. The commit all eight patches are cut against; on it the real diaPASEF
+# OpenMS/OpenMS develop (3.7.0-pre), 2026-11-04. The commit all nine patches are cut against; on it the real diaPASEF
 # test run gives the same spectra as on the previous pin (bd4b8955), digest d77f2a24. Regenerate the patches if you move it.

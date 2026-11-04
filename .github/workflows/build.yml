@@ -280,7 +280,8 @@ jobs:
           wget -q "https://packages.apache.org/artifactory/arrow/$(lsb_release --id --short | tr '[:upper:]' '[:lower:]')/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb"
           sudo apt-get install -y -q ./apache-arrow-apt-source-latest-*.deb
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends libarrow-dev libparquet-dev
+          # Arrow's S3 filesystem (s3:// input) is a package of its own since Arrow 26
+          sudo apt-get install -y -q --no-install-recommends libarrow-dev libparquet-dev libarrow-s3-dev
           # OpenMS 3.7 parses XML with libxml2 >= 2.13; Ubuntu 24.04 has 2.9. Built here, into a prefix of its own (a
           # minute), on a cache hit too: the bundle step copies it from there.
           curl -fsSL --retry 3 -o "$RT/libxml2.tar.xz" "https://download.gnome.org/sources/libxml2/${LIBXML2_VERSION%.*}/libxml2-$LIBXML2_VERSION.tar.xz"
@@ -291,7 +292,7 @@ jobs:
           cmake --build "$RT/libxml2-build" > /dev/null && cmake --install "$RT/libxml2-build" > /dev/null
           ls "$WS/deps/lib"
           # shellcheck disable=SC2086
-          fp=$( { lsb_release -rs; uname -m; echo "libxml2=$LIBXML2_VERSION"; dpkg-query -W -f='${Package}=${Version}\n' $PKGS libarrow-dev libparquet-dev | sort; } | sha256sum | cut -c1-16)
+          fp=$( { lsb_release -rs; uname -m; echo "libxml2=$LIBXML2_VERSION"; dpkg-query -W -f='${Package}=${Version}\n' $PKGS libarrow-dev libparquet-dev libarrow-s3-dev | sort; } | sha256sum | cut -c1-16)
           echo "DEPS_FP=$fp" | tee -a "$GITHUB_ENV"
 
       # The libraries OpenMS 3.7 links, from Homebrew (its own CI takes them from vcpkg). OpenMP comes from Homebrew's
@@ -355,8 +356,9 @@ jobs:
         shell: bash -el {0}
         run: |
           set -euo pipefail
-          conda install -q -y -c conda-forge 'libarrow>=23' libparquet libzip nlohmann_json sqlite \
-            'libboost-devel>=1.81' 'libxml2>=2.13' libsvm zlib bzip2 zstd eigen 'libcurl>=7.66' 
+          # libarrow-s3: Arrow's S3 filesystem (s3:// input), a package of its own since Arrow 26
+          conda install -q -y -c conda-forge 'libarrow>=23' libarrow-s3 libparquet libzip nlohmann_json sqlite \
+            'libboost-devel>=1.81' 'libxml2>=2.13' libsvm zlib bzip2 zstd eigen 'libcurl>=7.66'
           CONDA_LIB="$(cygpath -m "$CONDA_PREFIX")/Library"
           # clang-cl and the LLVM OpenMP runtime it links. Prefer Visual Studio's own LLVM (matched to this MSVC STL);
           # fall back to the standalone LLVM on the image. OpenMS and the tool must share ONE OpenMP runtime.
@@ -370,7 +372,7 @@ jobs:
           "$CLANG_CL" --version
           llvm_major=$("$CLANG_CL" --version | sed -n 's/.*clang version \([0-9]*\).*/\1/p' | head -1)
           fp=$( { echo "llvm=$llvm_major"
-                  conda list --json | python -c "import json,sys; [print(p['name'],p['version'],p['build_string']) for p in json.load(sys.stdin) if p['name'] in ('libarrow','libparquet','libzip','sqlite','libboost-devel','libxml2','libsvm','zlib','bzip2','zstd','eigen','libcurl')]"
+                  conda list --json | python -c "import json,sys; [print(p['name'],p['version'],p['build_string']) for p in json.load(sys.stdin) if p['name'] in ('libarrow','libarrow-s3','libparquet','libzip','sqlite','libboost-devel','libxml2','libsvm','zlib','bzip2','zstd','eigen','libcurl')]"
                 } | sha256sum | cut -c1-16)
           {
             echo "DEPS_FP=$fp"

@@ -101,6 +101,7 @@ jobs:
           set -euo pipefail
           eval "$(brew shellenv 2>/dev/null || /home/linuxbrew/.linuxbrew/bin/brew shellenv)"
           brew tap "${GITHUB_REPOSITORY%%/*}/diaspextract"
+          brew trust "${GITHUB_REPOSITORY%%/*}/diaspextract"   # Homebrew 7 refuses formulae from untrusted taps
           brew install diaspextract
           brew test diaspextract
           diaspextract --help 2>&1 | grep '^Version:'

@@ -10,6 +10,9 @@
 # Every Mach-O is then left with one LC_RPATH (dylibbundler rewrites each old rpath to the same value, and dyld refuses
 # duplicates) and an ad-hoc signature (install_name_tool invalidates signatures; arm64 runs nothing unsigned). The
 # Developer ID signature, when there is one, replaces it later. Finally every reference is checked.
+# Each library's own install name becomes @rpath/<name>: only the linker reads it, and Homebrew (with preserve_rpath in
+# the formula) leaves such a library untouched. Any other install name it rewrites and re-signs ad hoc, and the Developer
+# ID signed tool then refuses to load it (library validation: "different Team IDs").
 set -euo pipefail
 D=${1:?usage: bundle-macos.sh <bundle> <search dir>...}; shift
 EXE="$D/bin/diaspextract"; L="$D/lib"; P='@executable_path/../lib/'
@@ -58,6 +61,7 @@ while IFS= read -r f; do
   while [ "$(otool -l "$f" | awk '/LC_RPATH/{g=1;next} g&&/^ *path /{print $2; g=0}' | grep -cx "$P")" -gt 1 ]; do
     install_name_tool -delete_rpath "$P" "$f"
   done
+  case "$f" in "$L"/*) install_name_tool -id "@rpath/$(basename "$(otool -D "$f" | sed -n 2p)")" "$f" 2> /dev/null ;; esac
   codesign --force --sign - "$f" 2> /dev/null
 done < <(machos)
 
@@ -65,6 +69,7 @@ done < <(machos)
 bad=0
 while IFS= read -r f; do
   self=$(otool -D "$f" | grep -v ':$' | sort -u || true)
+  case "$f" in "$L"/*) case "$self" in @rpath/*) ;; *) echo "::error::$f has install name $self, not @rpath/" >&2; bad=1 ;; esac ;; esac
   while IFS= read -r ref; do
     [ "$ref" = "$self" ] && continue
     case "$ref" in

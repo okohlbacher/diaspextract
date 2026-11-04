@@ -8,6 +8,9 @@ class Diaspextract < Formula
   homepage "https://github.com/okohlbacher/diaspextract"
   version "1.8.0"
   license "BSD-3-Clause"
+  # The bundled libraries' install names are @rpath/<name>; this keeps Homebrew from rewriting them, which would break
+  # their Developer ID signatures on macOS and with them the tool's start.
+  preserve_rpath
 
   on_macos do
     on_arm do

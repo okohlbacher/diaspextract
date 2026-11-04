@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.8.4 — 2026-11-04
+
+The program is 1.8.1's; only the macOS packages changed.
+
+### Fixed
+
+- macOS: 1.8.3 installed with Homebrew did not start ("different Team IDs"). Homebrew rewrote the bundled libraries
+  and re-signed them, and macOS then refused to load them into the signed tool. The libraries now carry install names
+  that Homebrew leaves alone, so their signatures stay intact.
+
 ## v1.8.3 — 2026-11-04
 
 The program is 1.8.1's; only the release build changed. 1.8.1 and 1.8.2 were tagged but never published: the macOS x64

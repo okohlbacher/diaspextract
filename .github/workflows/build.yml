@@ -65,10 +65,8 @@ env:
   # SignPath: the project and the organisation are not secrets; the API token is.
   SIGNPATH_PROJECT_SLUG: diaspextract
   SIGNPATH_ORG_ID_DEFAULT: 02cd3c85-b99a-4a78-bc04-b103eb1070c1
-  # Windows only: Qt for OpenMS's QtCore/QtNetwork (the version OpenMS's own CI uses with MSVC 2022), and libcurl,
-  # which OpenMS needs and contrib does not build (OpenMS's CI builds it the same way).
-  QT_VERSION: '6.8.3'
-  CURL_VERSION: '8.12.1'
+  # Linux: OpenMS 3.7 needs libxml2 >= 2.13, Ubuntu 24.04 ships 2.9 (built from source in "Dependencies (Linux)")
+  LIBXML2_VERSION: '2.13.8'
 
 jobs:
   # ------------------------------------------------------------------------------------------------------- preflight
@@ -274,9 +272,8 @@ jobs:
         run: |
           set -euo pipefail
           PKGS="build-essential cmake ninja-build patch patchelf ca-certificates lsb-release wget
-            qt6-base-dev libqt6svg6-dev libboost-all-dev libeigen3-dev libxerces-c-dev libbz2-dev zlib1g-dev
-            libsvm-dev libhdf5-dev libsqlite3-dev libzip-dev liblzma-dev libcurl4-openssl-dev
-            coinor-libcbc-dev coinor-libcgl-dev coinor-libclp-dev coinor-libcoinutils-dev coinor-libosi-dev"
+            libboost-all-dev libeigen3-dev libbz2-dev zlib1g-dev
+            libsvm-dev libhdf5-dev libsqlite3-dev libzip-dev liblzma-dev libzstd-dev libcurl4-openssl-dev"
           sudo apt-get update -q
           # shellcheck disable=SC2086
           sudo apt-get install -y -q --no-install-recommends $PKGS
@@ -284,17 +281,34 @@ jobs:
           sudo apt-get install -y -q ./apache-arrow-apt-source-latest-*.deb
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends libarrow-dev libparquet-dev
+          # OpenMS 3.7 parses XML with libxml2 >= 2.13; Ubuntu 24.04 has 2.9. Built here, into a prefix of its own (a
+          # minute), on a cache hit too: the bundle step copies it from there.
+          curl -fsSL --retry 3 -o "$RT/libxml2.tar.xz" "https://download.gnome.org/sources/libxml2/${LIBXML2_VERSION%.*}/libxml2-$LIBXML2_VERSION.tar.xz"
+          tar -C "$RT" -xJf "$RT/libxml2.tar.xz"
+          cmake -S "$RT/libxml2-$LIBXML2_VERSION" -B "$RT/libxml2-build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$WS/deps" -DBUILD_SHARED_LIBS=ON -DLIBXML2_WITH_PYTHON=OFF -DLIBXML2_WITH_ICU=OFF \
+            -DLIBXML2_WITH_LZMA=OFF -DLIBXML2_WITH_TESTS=OFF -DLIBXML2_WITH_PROGRAMS=OFF > /dev/null
+          cmake --build "$RT/libxml2-build" > /dev/null && cmake --install "$RT/libxml2-build" > /dev/null
+          ls "$WS/deps/lib"
           # shellcheck disable=SC2086
-          fp=$( { lsb_release -rs; uname -m; dpkg-query -W -f='${Package}=${Version}\n' $PKGS libarrow-dev libparquet-dev | sort; } | sha256sum | cut -c1-16)
+          fp=$( { lsb_release -rs; uname -m; echo "libxml2=$LIBXML2_VERSION"; dpkg-query -W -f='${Package}=${Version}\n' $PKGS libarrow-dev libparquet-dev | sort; } | sha256sum | cut -c1-16)
           echo "DEPS_FP=$fp" | tee -a "$GITHUB_ENV"
 
-      # OpenMS's tools/ci/deps-macos.sh at the pin (qtbase instead of its GUI set). OpenMP comes from Homebrew's
+      # The libraries OpenMS 3.7 links, from Homebrew (its own CI takes them from vcpkg). OpenMP comes from Homebrew's
       # libomp: Apple's clang ships no runtime. dylibbundler is the bundling tool, not a build dependency.
       - name: Dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
           set -euo pipefail
-          FORMULAE="ninja libomp libsvm xerces-c boost eigen sqlite coinutils cbc cgl clp apache-arrow libzip zstd qtbase"
+          # OpenMS 3.7 wants Apple Clang 16 (C++23): the macos-14 image defaults to Xcode 15, the newest Xcode 16 is there too
+          xc=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ "$(xcrun clang --version | sed -n 's/.*clang version \([0-9]*\).*/\1/p')" -lt 16 ]; then
+            [ -n "$xc" ] || { echo "::error::no Xcode 16 on this runner"; exit 1; }
+            sudo xcode-select -s "$xc"; echo "DEVELOPER_DIR=$xc/Contents/Developer" >> "$GITHUB_ENV"
+          fi
+          xcrun clang --version | head -1
+          # libxml2 >= 2.13 (OpenMS 3.7): Homebrew's, keg-only; the SDK's is 2.9
+          FORMULAE="ninja libomp libsvm libxml2 boost eigen sqlite apache-arrow libzip zstd"
           # shellcheck disable=SC2086
           brew install --overwrite $FORMULAE dylibbundler
           # shellcheck disable=SC2086
@@ -303,36 +317,27 @@ jobs:
             echo "DEPS_FP=$fp"
             echo "BREW=$(brew --prefix)"
             echo "LIBOMP=$(brew --prefix libomp)"
+            echo "LIBXML2=$(brew --prefix libxml2)"
           } | tee -a "$GITHUB_ENV"
 
-      # Windows follows OpenMS's own CI and FASTag's windows.yml: MSVC environment, contrib (built with MSVC, cached),
-      # Eigen and Ninja from choco, Qt from install-qt-action, Arrow/Parquet/libzip from conda-forge, curl from source.
-      # OpenMS and the tool are then compiled with clang-cl (MSVC ABI): cl's OpenMP lacks taskloop, and the
-      # cross-platform identity was verified with a clang-cl OpenMS.
+      # Windows: MSVC environment, Ninja from choco, every library from conda-forge (OpenMS 3.7 has no contrib, and
+      # needs no Qt without its GUI tools). OpenMS and the tool are compiled with clang-cl (MSVC ABI): cl's OpenMP lacks
+      # taskloop, and the cross-platform identity was verified with a clang-cl OpenMS.
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
         with:
           arch: amd64
 
-      - name: Eigen and Ninja (Windows)
+      - name: Ninja (Windows)
         if: runner.os == 'Windows'
-        # choco exits 0 when its feed fails ("Unable to find package 'eigen'", run 41629773660): retry, then check.
+        # choco exits 0 when its feed fails ("Unable to find package", run 41629773660): retry, then check.
         run: |
           for i in 1 2 3 4; do
-            choco install -y --no-progress eigen ninja || true
-            [ -f C:/ProgramData/chocolatey/lib/eigen/share/eigen3/cmake/Eigen3Config.cmake ] && command -v ninja && exit 0
+            choco install -y --no-progress ninja || true
+            command -v ninja && exit 0
             sleep 30
           done
-          echo "::error::choco could not install eigen and ninja"; exit 1
-
-      - name: Qt (Windows)
-        if: runner.os == 'Windows'
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: ${{ env.QT_VERSION }}
-          arch: 'win64_msvc2022_64'
-          cache: 'false'
-          archives: 'qtbase'
+          echo "::error::choco could not install ninja"; exit 1
 
       - name: conda (Windows)
         if: runner.os == 'Windows'
@@ -343,14 +348,15 @@ jobs:
           python-version: '3.11'
           use-mamba: true
 
-      # Arrow >= 23 is what OpenMS at the pin requires. No libarrow-dataset/acero: they make OpenMS require a libxml2
-      # that conda's MSVC layout does not satisfy (FASTag). sqlite is the tool's own SQLite (OpenMS vendors its own).
+      # OpenMS 3.7 has no contrib any more: every library from conda-forge (its own CI uses vcpkg), Arrow with S3. sqlite
+      # is the tool's own SQLite (OpenMS vendors its own).
       - name: Dependencies (Windows)
         if: runner.os == 'Windows'
         shell: bash -el {0}
         run: |
           set -euo pipefail
-          conda install -q -y -c conda-forge 'libarrow>=23' libparquet libzip nlohmann_json sqlite
+          conda install -q -y -c conda-forge 'libarrow>=23' libparquet libzip nlohmann_json sqlite \
+            'libboost-devel>=1.81' 'libxml2>=2.13' libsvm zlib bzip2 zstd eigen 'libcurl>=7.66' 
           CONDA_LIB="$(cygpath -m "$CONDA_PREFIX")/Library"
           # clang-cl and the LLVM OpenMP runtime it links. Prefer Visual Studio's own LLVM (matched to this MSVC STL);
           # fall back to the standalone LLVM on the image. OpenMS and the tool must share ONE OpenMP runtime.
@@ -363,77 +369,17 @@ jobs:
           CLANG_CL=$(cygpath -m "$LLVM/bin/clang-cl.exe")
           "$CLANG_CL" --version
           llvm_major=$("$CLANG_CL" --version | sed -n 's/.*clang version \([0-9]*\).*/\1/p' | head -1)
-          eigen=$(choco list --limit-output eigen || true)
-          fp=$( { echo "qt=$QT_VERSION llvm=$llvm_major $eigen"
-                  conda list --json | python -c "import json,sys; [print(p['name'],p['version'],p['build_string']) for p in json.load(sys.stdin) if p['name'] in ('libarrow','libparquet','libzip','sqlite')]"
+          fp=$( { echo "llvm=$llvm_major"
+                  conda list --json | python -c "import json,sys; [print(p['name'],p['version'],p['build_string']) for p in json.load(sys.stdin) if p['name'] in ('libarrow','libparquet','libzip','sqlite','libboost-devel','libxml2','libsvm','zlib','bzip2','zstd','eigen','libcurl')]"
                 } | sha256sum | cut -c1-16)
           {
             echo "DEPS_FP=$fp"
             echo "CONDA_LIB=$CONDA_LIB"
             echo "LLVM_DIR=$(cygpath -m "$LLVM")"
             echo "CLANG_CL=$CLANG_CL"
-            echo "QT_DIR=$(cygpath -m "$QT_ROOT_DIR")"
-            echo "EIGEN_DIR=C:/ProgramData/chocolatey/lib/eigen/share/cmake"
             # clang-cl -fopenmp links libomp.lib by name: put LLVM's lib directory on the linker's search path.
             echo "LIB=$(cygpath -w "$LLVM/lib");$LIB"
           } | tee -a "$GITHUB_ENV"
-
-      # contrib (Boost, Xerces-C, libsvm, COIN-OR, ...) at the commit the OpenMS pin records as its submodule, read from
-      # the tree rather than assumed (FASTag broke twice on a stale contrib pin). Saved right after it is built, with
-      # curl installed into the same prefix; only lib/, bin/ and include/ are kept, as OpenMS's CI does.
-      - name: contrib revision (Windows)
-        if: runner.os == 'Windows'
-        run: echo "CONTRIB_REV=$(git -C OpenMS ls-tree HEAD contrib | awk '{print $3}')" | tee -a "$GITHUB_ENV"
-
-      - name: Restore contrib (Windows)
-        id: contrib
-        if: runner.os == 'Windows'
-        uses: actions/cache/restore@v6
-        with:
-          path: contrib-build
-          key: contrib-${{ matrix.runner }}-${{ env.CONTRIB_REV }}-curl${{ env.CURL_VERSION }}-v1
-
-      # pwsh, as in FASTag (37 min for ALL): under Git Bash, bjam hung in the Boost build for the whole 150 min (run 41601410280).
-      - name: Build contrib (Windows)
-        if: runner.os == 'Windows' && steps.contrib.outputs.cache-hit != 'true'
-        shell: pwsh
-        timeout-minutes: 90
-        run: |
-          $ErrorActionPreference = 'Stop'
-          git init -q contrib-src
-          git -C contrib-src remote add origin https://github.com/OpenMS/contrib.git
-          git -C contrib-src fetch -q --depth 1 origin $env:CONTRIB_REV
-          git -C contrib-src checkout -q FETCH_HEAD
-          # Only what OpenMS at the pin needs: ALL at this contrib commit also builds Arrow, curl, HDF5 and libzip from
-          # source (run 41587712077 timed out after 2 h in it), and those come from conda / the curl step below.
-          cmake -S contrib-src -B contrib-tmp -G "Visual Studio 17 2022" -A x64 "-DBUILD_TYPE=BOOST;XERCESC;COINOR;BZIP2;ZLIB;LIBSVM"
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          cmake --build contrib-tmp --config Release
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-
-      - name: Build libcurl (Windows)
-        if: runner.os == 'Windows' && steps.contrib.outputs.cache-hit != 'true'
-        timeout-minutes: 30
-        run: |
-          set -euo pipefail
-          mkdir -p contrib-build
-          for d in lib bin include share; do [ -d "contrib-tmp/$d" ] && mv "contrib-tmp/$d" contrib-build/; done
-          curl -fsSL --retry 3 -o curl-src.tar.gz "https://curl.se/download/curl-$CURL_VERSION.tar.gz"
-          tar xzf curl-src.tar.gz
-          cmake -S "curl-$CURL_VERSION" -B curl-build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="$WS/contrib-build" -DBUILD_SHARED_LIBS=ON -DCURL_USE_SCHANNEL=ON \
-            -DBUILD_CURL_EXE=OFF -DBUILD_TESTING=OFF -DCURL_DISABLE_LDAP=ON -DCURL_USE_LIBPSL=OFF
-          cmake --build curl-build
-          cmake --install curl-build
-          rm -rf contrib-tmp contrib-src curl-build "curl-$CURL_VERSION" curl-src.tar.gz
-          du -sh contrib-build
-
-      - name: Save contrib (Windows)
-        if: runner.os == 'Windows' && steps.contrib.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
-        with:
-          path: contrib-build
-          key: contrib-${{ matrix.runner }}-${{ env.CONTRIB_REV }}-curl${{ env.CURL_VERSION }}-v1
 
       # ---- OpenMS. The script installs src/TdfMzCalibration.h and src/PortableMath.h into the tree and applies the
       # patches; it refuses another commit than the pin unless openms_ref asked for one. It runs on a cache hit too:
@@ -481,19 +427,18 @@ jobs:
                   -DENABLE_DOCS=OFF -DMT_ENABLE_OPENMP=ON -DCMAKE_INSTALL_PREFIX="$WS/openms-not-installed")
           case "$RUNNER_OS" in
             Linux)
-              cmake -S OpenMS -B OpenMS/build "${COMMON[@]}" -DCMAKE_CXX_FLAGS=-ffp-contract=off ;;
+              cmake -S OpenMS -B OpenMS/build "${COMMON[@]}" -DCMAKE_CXX_FLAGS=-ffp-contract=off -DCMAKE_PREFIX_PATH="$WS/deps" ;;
             macOS)
               # BOOST_USE_STATIC=OFF as in OpenMS's macOS CI: Homebrew's static Boost is not what OpenMS is tested with.
               cmake -S OpenMS -B OpenMS/build "${COMMON[@]}" -DCMAKE_CXX_FLAGS=-ffp-contract=off \
                 -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOS_FLOOR" -DBOOST_USE_STATIC=OFF \
-                -DCMAKE_PREFIX_PATH="$BREW;$LIBOMP" -DOpenMP_ROOT="$LIBOMP" ;;
+                -DCMAKE_PREFIX_PATH="$LIBXML2;$BREW;$LIBOMP" -DOpenMP_ROOT="$LIBOMP" ;;
             Windows)
               # CXXFLAGS, not CMAKE_CXX_FLAGS: CMake combines the variable with its own defaults (/DWIN32 /D_WINDOWS
               # /EHsc ...), where the cache variable would replace them. clang-cl needs the /clang: spelling.
               CXXFLAGS=/clang:-ffp-contract=off cmake -S OpenMS -B OpenMS/build "${COMMON[@]}" \
                 -DCMAKE_C_COMPILER="$CLANG_CL" -DCMAKE_CXX_COMPILER="$CLANG_CL" \
-                -DOPENMS_CONTRIB_LIBS="$WS/contrib-build" -DUSE_EXTERNAL_JSON=OFF \
-                -DEigen3_DIR="$EIGEN_DIR" -DCMAKE_PREFIX_PATH="$QT_DIR;$CONDA_LIB;$WS/contrib-build" \
+                -DUSE_EXTERNAL_JSON=OFF -DBOOST_USE_STATIC=OFF -DCMAKE_PREFIX_PATH="$CONDA_LIB" \
                 -DARROW_USE_STATIC=OFF -DArrow_DIR="$CONDA_LIB/lib/cmake/Arrow" -DParquet_DIR="$CONDA_LIB/lib/cmake/Parquet" \
                 -DOpenMP_ROOT="$LLVM_DIR" ;;
           esac
@@ -544,12 +489,12 @@ jobs:
           set -euo pipefail
           ARGS=(-S diaspextract -B diaspextract/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DOpenMS_DIR="$WS/OpenMS/build")
           case "$RUNNER_OS" in
-            Linux)   cmake "${ARGS[@]}" ;;
+            Linux)   cmake "${ARGS[@]}" -DCMAKE_PREFIX_PATH="$WS/deps" ;;
             macOS)   cmake "${ARGS[@]}" -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOS_FLOOR" \
-                       -DCMAKE_PREFIX_PATH="$BREW;$LIBOMP" -DOpenMP_ROOT="$LIBOMP" ;;
+                       -DCMAKE_PREFIX_PATH="$LIBXML2;$BREW;$LIBOMP" -DOpenMP_ROOT="$LIBOMP" ;;
             # /Z7 + /DEBUG: a PDB for the stack trace below; the code is the same.
-            Windows) cmake "${ARGS[@]}" -DCMAKE_CXX_COMPILER="$CLANG_CL" -DEigen3_DIR="$EIGEN_DIR" \
-                       -DCMAKE_PREFIX_PATH="$QT_DIR;$CONDA_LIB;$WS/contrib-build" -DOpenMP_ROOT="$LLVM_DIR" \
+            Windows) cmake "${ARGS[@]}" -DCMAKE_CXX_COMPILER="$CLANG_CL" \
+                       -DCMAKE_PREFIX_PATH="$CONDA_LIB" -DOpenMP_ROOT="$LLVM_DIR" \
                        "-DCMAKE_CXX_FLAGS_RELEASE=-O2 -Ob2 -DNDEBUG -Z7" -DCMAKE_EXE_LINKER_FLAGS_RELEASE=-DEBUG ;;   # dashes: Git Bash rewrites /O2 into a path
           esac
           cmake --build diaspextract/build --parallel "$NPROC"
@@ -563,7 +508,7 @@ jobs:
           # nethost.dll (openms_thermo_bridge.dll imports it) is in the .NET SDK's host pack, on no PATH
           NETHOST=$(dirname "$(find "$(cygpath -u "$DOTNET_ROOT")/packs" -ipath '*win-x64/native/nethost.dll' | sort -V | tail -1)")
           echo "NETHOST_DIR=$(cygpath -m "$NETHOST")" | tee -a "$GITHUB_ENV"
-          for d in "$WS/OpenMS/build/bin" "$WS/contrib-build/bin" "$WS/contrib-build/lib" "$QT_DIR/bin" "$CONDA_LIB/bin" "$LLVM_DIR/bin" "$NETHOST"; do
+          for d in "$WS/OpenMS/build/bin" "$CONDA_LIB/bin" "$LLVM_DIR/bin" "$NETHOST"; do
             [ -d "$d" ] && p="$p:$(cygpath -u "$d")"
           done
           echo "DLL_PATH=${p#:}" | tee -a "$GITHUB_ENV"
@@ -810,7 +755,7 @@ jobs:
           set -euo pipefail
           L="dist/$DIST/lib"
           diaspextract/.github/scripts/bundle-macos.sh "dist/$DIST" \
-            "$WS/OpenMS/build/lib" "$LIBOMP/lib" "$BREW/lib" "$BREW/opt/qtbase/lib"
+            "$WS/OpenMS/build/lib" "$LIBXML2/lib" "$LIBOMP/lib" "$BREW/lib"
           # third-party licence texts: the keg each bundled library came from
           for f in "$L"/*; do
             src=$(find "$BREW/Cellar" -name "$(basename "$f")" -path '*/lib/*' -print -quit 2>/dev/null || true)
@@ -832,7 +777,7 @@ jobs:
           set -euo pipefail
           B="dist/$DIST/bin"
           dirs=""
-          for d in "$WS/OpenMS/build/bin" "$WS/contrib-build/bin" "$WS/contrib-build/lib" "$QT_DIR/bin" "$CONDA_LIB/bin" "$LLVM_DIR/bin" "$NETHOST_DIR" "C:/Windows/System32"; do
+          for d in "$WS/OpenMS/build/bin" "$CONDA_LIB/bin" "$LLVM_DIR/bin" "$NETHOST_DIR" "C:/Windows/System32"; do
             [ -d "$d" ] && dirs="$dirs;$d"
           done
           cat > "$RT/bundle-dlls.cmake" <<'EOF'
@@ -847,7 +792,7 @@ jobs:
             PRE_EXCLUDE_REGEXES "^[Aa][Pp][Ii]-[Mm][Ss]-.*" "^[Ee][Xx][Tt]-[Mm][Ss]-.*"
             POST_EXCLUDE_REGEXES "^[A-Za-z]:[/\\\\][Ww][Ii][Nn][Dd][Oo][Ww][Ss][/\\\\].*"
             CONFLICTING_DEPENDENCIES_PREFIX dup)
-          # One DLL name, two copies (zlib.dll: contrib's for OpenMS, conda's for Arrow): Windows loads one per process,
+          # One DLL name, two copies (e.g. zlib.dll from two directories): Windows loads one per process,
           # the first on the search path. Ship that one -- the directory order here is the tests' PATH order.
           foreach(name IN LISTS dup_FILENAMES)
             set(pick "")

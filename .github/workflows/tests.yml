@@ -197,3 +197,39 @@ jobs:
       - name: Analysis and test scripts parse cleanly
         shell: bash
         run: python3 -m py_compile $(git ls-files '*.py')
+
+  # The desktop app (gui/) without the CLI: typecheck, the Playwright unit and UI suites (Chromium against the mock
+  # backend) and the Rust backend's unit tests. Cheap, so on every push in both repositories; the app itself is built,
+  # signed and tested end to end around the packaged CLI in build.yml's desktop job.
+  gui:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: gui
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Versions agree with CMakeLists.txt
+        run: |
+          v=$(sed -n 's/^project(DIAspeXtract VERSION \([0-9.]*\).*/\1/p' ../CMakeLists.txt)
+          for f in package.json src-tauri/tauri.conf.json; do grep -q "\"version\": \"$v\"" "$f" || { echo "::error::gui/$f is not $v"; exit 1; }; done
+          grep -q "^version = \"$v\"" src-tauri/Cargo.toml || { echo "::error::gui/src-tauri/Cargo.toml is not $v"; exit 1; }
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npx playwright install --with-deps chromium
+      - name: Playwright unit and UI tests
+        run: npm test
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: playwright-report
+          path: gui/playwright-report
+          retention-days: 7
+      - name: Backend unit tests
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q libwebkit2gtk-4.1-dev librsvg2-dev
+          # tauri-build insists the bundled resource exists; the tests never run the CLI
+          mkdir -p src-tauri/resources/diaspextract
+          cd src-tauri && cargo test --lib

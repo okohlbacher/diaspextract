@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.9.0 — 2026-11-04
+
+**The spectra do not change**: the command-line tool is 1.8.4's.
+
+### Added
+
+- A desktop app for macOS, Windows and Linux (`DIAspeXtract-GUI-*` on the release page). It runs the bundled
+  command-line tool: choose the input run and the output file, change options in a form built from the tool's own
+  option list (defaults, limits and help texts included), and follow progress and log. The app shows the equivalent
+  command line and remembers the settings. The macOS app is signed, notarized and stapled; the Windows installer is
+  not signed yet.
+
 ## v1.8.4 — 2026-11-04
 
 The program is 1.8.1's; only the macOS packages changed.

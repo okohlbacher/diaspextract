@@ -1,0 +1,709 @@
+{
+  "sections": [
+    {
+      "name": "gate",
+      "description": "Which fragments join a precursor's spectrum (diaPASEF input only)"
+    },
+    {
+      "name": "assembly",
+      "description": "Building the spectra (diaPASEF input only)"
+    },
+    {
+      "name": "trace",
+      "description": "Mass-trace detection (diaPASEF input only)"
+    },
+    {
+      "name": "tile",
+      "description": "Retention-time cells and tiles (diaPASEF input only)"
+    },
+    {
+      "name": "diag",
+      "description": "Diagnostics"
+    },
+    {
+      "name": "perf",
+      "description": "Speed and memory, diaPASEF input only (the output does not change unless an option says so)"
+    },
+    {
+      "name": "charge",
+      "description": "Isotopes, charge and monoisotope (diaPASEF input only)"
+    },
+    {
+      "name": "dnoise",
+      "description": "MS1 denoising before peak picking (Bruker .d only)"
+    },
+    {
+      "name": "noims",
+      "description": "Input without ion mobility (Orbitrap, SWATH): a separate extraction path; the other sections do not apply to it"
+    }
+  ],
+  "params": [
+    {
+      "name": "out_type",
+      "section": "",
+      "type": "string",
+      "default": "",
+      "description": "Set the output format instead of taking it from the extension of -out. Empty (default) = follow the extension; an unknown extension gives mzPeak (mzML in a build without mzPeak support).",
+      "advanced": false,
+      "choices": [
+        "",
+        "mzpeak",
+        "mzML"
+      ]
+    },
+    {
+      "name": "max_charge",
+      "section": "",
+      "type": "int",
+      "default": "5",
+      "description": "Highest precursor charge considered (diaPASEF input only).",
+      "advanced": false,
+      "min": 1
+    },
+    {
+      "name": "gate:delta_im",
+      "section": "gate",
+      "type": "double",
+      "default": "0.01",
+      "description": "Largest ion-mobility (1/K0) difference between a precursor and a fragment. It also sets the 1/K0 tolerance of peak picking and tracing; to widen only the fragment match, use gate:fragment_delta_im.",
+      "advanced": false,
+      "min": 0
+    },
+    {
+      "name": "gate:delta_rt",
+      "section": "gate",
+      "type": "double",
+      "default": "4.0",
+      "description": "Largest apex retention-time difference (seconds) between a precursor and a fragment.",
+      "advanced": false,
+      "min": 0
+    },
+    {
+      "name": "gate:min_correlation",
+      "section": "gate",
+      "type": "double",
+      "default": "0.3",
+      "description": "Least correlation between the elution profiles of a precursor and a fragment. Raise it for cleaner but sparser spectra.",
+      "advanced": false,
+      "min": -1,
+      "max": 1
+    },
+    {
+      "name": "gate:min_correlation_points",
+      "section": "gate",
+      "type": "int",
+      "default": "3",
+      "description": "Fewest shared points a fragment's correlation needs. Where gate:shrinkage applies, gate:shrink_min_points is used instead.",
+      "advanced": true
+    },
+    {
+      "name": "gate:short_traces",
+      "section": "gate",
+      "type": "string",
+      "default": "concentric",
+      "description": "Fragment traces too short for a correlation: 'concentric' (default) keeps one whose retention-time span lies inside the precursor's (one frame of slack) and is centred on it; 'off' drops them. Applies to the precursors gate:adaptive selects.",
+      "advanced": true,
+      "choices": [
+        "off",
+        "concentric"
+      ]
+    },
+    {
+      "name": "gate:short_center_tol",
+      "section": "gate",
+      "type": "double",
+      "default": "0.5",
+      "description": "gate:short_traces concentric: how far the fragment's span centre may lie from the precursor's, as a fraction of the precursor's half-span (at least one cycle).",
+      "advanced": true,
+      "min": 0
+    },
+    {
+      "name": "gate:short_min_points",
+      "section": "gate",
+      "type": "int",
+      "default": "1",
+      "description": "gate:short_traces concentric: fewest points a short fragment trace needs.",
+      "advanced": true,
+      "min": 1
+    },
+    {
+      "name": "gate:fragment_delta_im",
+      "section": "gate",
+      "type": "double",
+      "default": "-1.0",
+      "description": "Largest precursor-fragment 1/K0 difference for the fragment match only, leaving the tracing tolerance unchanged. Negative (default) = gate:delta_im. Experimental.",
+      "advanced": true
+    },
+    {
+      "name": "gate:adaptive",
+      "section": "gate",
+      "type": "string",
+      "default": "faint",
+      "description": "Which precursors get the extra gate rules (gate:shrinkage, gate:colocation, gate:short_traces). 'faint' (default): only faint precursors, which also use gate:faint_delta_rt and gate:faint_corr_power. 'auto': 'faint' on runs with many faint precursors (gate:auto_faint_fraction), otherwise no extra rules; 'off': the rules apply to every precursor.",
+      "advanced": true,
+      "choices": [
+        "off",
+        "faint",
+        "auto"
+      ]
+    },
+    {
+      "name": "gate:auto_faint_fraction",
+      "section": "gate",
+      "type": "double",
+      "default": "0.45",
+      "description": "gate:adaptive auto: use the faint gate when at least this fraction of the run's precursors are faint.",
+      "advanced": true,
+      "min": 0,
+      "max": 1
+    },
+    {
+      "name": "gate:faint_max_frames",
+      "section": "gate",
+      "type": "int",
+      "default": "4",
+      "description": "gate:adaptive: a precursor with signal in at most this many frames counts as faint.",
+      "advanced": true,
+      "min": 1
+    },
+    {
+      "name": "gate:faint_delta_rt",
+      "section": "gate",
+      "type": "double",
+      "default": "6.0",
+      "description": "gate:adaptive faint: gate:delta_rt for faint precursors.",
+      "advanced": true,
+      "min": 0
+    },
+    {
+      "name": "gate:faint_corr_power",
+      "section": "gate",
+      "type": "double",
+      "default": "1.0",
+      "description": "gate:adaptive faint: assembly:corr_power for faint precursors.",
+      "advanced": true,
+      "min": 0
+    },
+    {
+      "name": "gate:colocation",
+      "section": "gate",
+      "type": "string",
+      "default": "ranges",
+      "description": "'ranges' (default): keep a fragment only if its apex lies inside the precursor's retention-time span, the precursor's apex inside the fragment's (each with one frame of slack), and the spans overlap by at least gate:colocation_overlap. 'off' skips this test.",
+      "advanced": true,
+      "choices": [
+        "off",
+        "ranges"
+      ]
+    },
+    {
+      "name": "gate:colocation_overlap",
+      "section": "gate",
+      "type": "double",
+      "default": "0.3",
+      "description": "gate:colocation ranges: least overlap of the two spans, as a fraction of the shorter one.",
+      "advanced": true,
+      "min": 0,
+      "max": 1
+    },
+    {
+      "name": "gate:shrinkage",
+      "section": "gate",
+      "type": "string",
+      "default": "fisher",
+      "description": "'fisher' (default): pull the correlation of a fragment with few shared points toward a prior (gate:shrink_prior_r, gate:shrink_prior_sd) before the gate:min_correlation test, instead of requiring gate:min_correlation_points points. 'off' uses the plain point count. At the defaults a fragment with at most 4 shared points passes whatever its correlation (docs/options.md, Faint precursors).",
+      "advanced": true,
+      "choices": [
+        "off",
+        "fisher"
+      ]
+    },
+    {
+      "name": "gate:shrink_prior_r",
+      "section": "gate",
+      "type": "double",
+      "default": "0.6",
+      "description": "gate:shrinkage fisher: prior mean correlation.",
+      "advanced": true
+    },
+    {
+      "name": "gate:shrink_prior_sd",
+      "section": "gate",
+      "type": "double",
+      "default": "0.3",
+      "description": "gate:shrinkage fisher: prior standard deviation in Fisher-z units; smaller pulls harder.",
+      "advanced": true,
+      "min": 0.01
+    },
+    {
+      "name": "gate:shrink_min_points",
+      "section": "gate",
+      "type": "int",
+      "default": "1",
+      "description": "gate:shrinkage fisher: fewest shared points to compute a correlation (replaces gate:min_correlation_points).",
+      "advanced": true,
+      "min": 1
+    },
+    {
+      "name": "assembly:min_fragments",
+      "section": "assembly",
+      "type": "int",
+      "default": "3",
+      "description": "Write a spectrum only if it has at least this many fragments.",
+      "advanced": false,
+      "min": 1
+    },
+    {
+      "name": "assembly:max_fragments",
+      "section": "assembly",
+      "type": "int",
+      "default": "500",
+      "description": "Keep at most this many fragments per spectrum, best-ranked first. The twin fold can exceed it. At least assembly:min_fragments.",
+      "advanced": false,
+      "min": 1
+    },
+    {
+      "name": "assembly:im_weight_sigma",
+      "section": "assembly",
+      "type": "double",
+      "default": "0.005",
+      "description": "Weight each fragment's intensity by a Gaussian of its 1/K0 distance to the precursor (sigma in 1/K0), before the fragment cap. 0 = off.",
+      "advanced": false
+    },
+    {
+      "name": "assembly:corr_power",
+      "section": "assembly",
+      "type": "double",
+      "default": "2.0",
+      "description": "Weight each fragment's intensity by corr^k, corr its elution correlation with the precursor. 0 = off.",
+      "advanced": false
+    },
+    {
+      "name": "assembly:twin_im_tolerance",
+      "section": "assembly",
+      "type": "double",
+      "default": "0.005",
+      "description": "Fold spectra that claim the same precursor twice (same charge, m/z within 20 ppm, 1/K0 within this tolerance) into one spectrum with the fragments of both. Negative = off; 0 folds only twins of identical 1/K0.",
+      "advanced": false,
+      "min": -1
+    },
+    {
+      "name": "assembly:twin_rt_frames",
+      "section": "assembly",
+      "type": "int",
+      "default": "0",
+      "description": "Also fold twins whose apexes are up to n + 0.5 MS1 cycles apart and in the same retention-time cell, when their precursor m/z lie within 0.05 ppm (one flight-time bin) and charge:mono_profile_check v2 moved one of the two monoisotopes. 0 (default) = auto, from the run's MS1 peak width; -1 = the same MS1 frame only.",
+      "advanced": false,
+      "min": -1
+    },
+    {
+      "name": "assembly:merge_same_bin",
+      "section": "assembly",
+      "type": "string",
+      "default": "true",
+      "description": "Merge a spectrum's fragments at the same m/z (one flight-time bin) into one peak before the fragment cap. Two peaks at one m/z break the fragment matching of OpenMS-based search engines.",
+      "advanced": true,
+      "choices": [
+        "true",
+        "false"
+      ]
+    },
+    {
+      "name": "assembly:foreign_precursor_weight",
+      "section": "assembly",
+      "type": "double",
+      "default": "0.0",
+      "description": "Multiply fragments that lie on the isotope envelope of another precursor isolated in the same window by this weight. 0 (default) removes them; 1 = off. The precursor's own envelope is never touched.",
+      "advanced": false,
+      "min": 0,
+      "max": 1
+    },
+    {
+      "name": "assembly:foreign_precursor_ppm",
+      "section": "assembly",
+      "type": "double",
+      "default": "10.0",
+      "description": "assembly:foreign_precursor_weight: m/z tolerance (ppm) between a foreign envelope position and a fragment.",
+      "advanced": true,
+      "min": 0
+    },
+    {
+      "name": "assembly:foreign_precursor_dim",
+      "section": "assembly",
+      "type": "double",
+      "default": "0.015",
+      "description": "assembly:foreign_precursor_weight: largest 1/K0 difference between this precursor and a foreign one.",
+      "advanced": true,
+      "min": 0
+    },
+    {
+      "name": "assembly:foreign_precursor_min_iso",
+      "section": "assembly",
+      "type": "int",
+      "default": "2",
+      "description": "assembly:foreign_precursor_weight: how many of a foreign envelope's four positions (M to M+3) must carry a fragment.",
+      "advanced": true,
+      "min": 1,
+      "max": 4
+    },
+    {
+      "name": "assembly:fragment_fuse_ppm",
+      "section": "assembly",
+      "type": "double",
+      "default": "25.0",
+      "description": "Fuse a spectrum's fragments within this many ppm into one peak (summed intensity, intensity-weighted m/z) before the fragment cap: one fragment ion often shows up as several peaks a few ppm apart. 0 = off.",
+      "advanced": false,
+      "min": 0,
+      "max": 50
+    },
+    {
+      "name": "trace:mass_error_ppm",
+      "section": "trace",
+      "type": "double",
+      "default": "15.0",
+      "description": "m/z tolerance (ppm) of mass-trace detection.",
+      "advanced": false,
+      "min": 0
+    },
+    {
+      "name": "trace:noise_threshold_int",
+      "section": "trace",
+      "type": "double",
+      "default": "100.0",
+      "description": "MS1 (precursor) noise level: peaks at or below it are not traced.",
+      "advanced": false,
+      "min": 0
+    },
+    {
+      "name": "trace:ms2_noise_threshold_int",
+      "section": "trace",
+      "type": "double",
+      "default": "10.0",
+      "description": "MS2 (fragment) noise level: peaks at or below it are not traced.",
+      "advanced": false,
+      "min": 0
+    },
+    {
+      "name": "trace:min_length_sec",
+      "section": "trace",
+      "type": "double",
+      "default": "-1.0",
+      "description": "Shortest MS1 trace kept (seconds, first to last point). Negative (default) = auto: trace:min_length_fwhm times the run's median MS1 peak width, at least half an MS1 cycle; 3 s when the run has too few bright traces to measure the width. 0 = no filter.",
+      "advanced": false
+    },
+    {
+      "name": "trace:min_length_fwhm",
+      "section": "trace",
+      "type": "double",
+      "default": "0.4",
+      "description": "Auto trace:min_length_sec: the shortest MS1 trace as this fraction of the run's median MS1 peak width.",
+      "advanced": true,
+      "min": 0
+    },
+    {
+      "name": "trace:ms1_chrom_peak_snr",
+      "section": "trace",
+      "type": "double",
+      "default": "3.0",
+      "description": "An MS1 trace's apex must exceed this times trace:noise_threshold_int.",
+      "advanced": true,
+      "min": 0
+    },
+    {
+      "name": "trace:ms2_chrom_peak_snr",
+      "section": "trace",
+      "type": "double",
+      "default": "1.0",
+      "description": "A fragment trace's apex must exceed this times trace:ms2_noise_threshold_int. Lower it to keep weaker fragments.",
+      "advanced": false,
+      "min": 0
+    },
+    {
+      "name": "trace:ms2_min_length_sec",
+      "section": "trace",
+      "type": "double",
+      "default": "0.0",
+      "description": "Shortest fragment trace kept (seconds). 0 = no filter.",
+      "advanced": false
+    },
+    {
+      "name": "trace:detector",
+      "section": "trace",
+      "type": "string",
+      "default": "integer",
+      "description": "'integer' (default) traces on the instrument's flight-time bins and needs the Bruker calibration; without it the run falls back to 'openms' with a warning. 'openms' uses OpenMS MassTraceDetection. The two find partly different peptides; integer uses much less memory.",
+      "advanced": false,
+      "choices": [
+        "openms",
+        "integer"
+      ]
+    },
+    {
+      "name": "trace:ms2_split_valleys",
+      "section": "trace",
+      "type": "double",
+      "default": "7.0",
+      "description": "Split fragment traces at chromatographic valleys; the value is the expected peak width (seconds). 0 = off.",
+      "advanced": false
+    },
+    {
+      "name": "trace:ms1_split_valleys",
+      "section": "trace",
+      "type": "double",
+      "default": "7.0",
+      "description": "Split precursor traces at chromatographic valleys, so two peptides that elute apart at the same m/z stay separate; the value is the expected peak width (seconds). 0 = off.",
+      "advanced": false
+    },
+    {
+      "name": "trace:max_span_sec",
+      "section": "trace",
+      "type": "double",
+      "default": "120.0",
+      "description": "Trim each trace to at most this many seconds around its apex. 0 = no limit.",
+      "advanced": false,
+      "min": 0
+    },
+    {
+      "name": "trace:native_ms1_neighbors",
+      "section": "trace",
+      "type": "int",
+      "default": "0",
+      "description": "Add n neighbouring MS1 frames on each side to every MS1 frame before peak picking (Bruker .d with perf:stream_load true). 0 = off. Needs -dnoise:ms1 false.",
+      "advanced": true
+    },
+    {
+      "name": "trace:im_slice_merge",
+      "section": "trace",
+      "type": "double",
+      "default": "0.015",
+      "description": "Integer detector: before tracing, merge a frame's fragment peaks in one flight-time bin whose 1/K0 values lie within this distance, so one ion does not become several traces. Negative = off.",
+      "advanced": true,
+      "max": 1
+    },
+    {
+      "name": "tile:rt_sec",
+      "section": "tile",
+      "type": "double",
+      "default": "600.0",
+      "description": "Width (seconds) of the fixed retention-time cells the integer detector traces in; a trace that crosses a cell edge is cut there. 0 or negative = the whole run as one cell. Changes the output.",
+      "advanced": true
+    },
+    {
+      "name": "tile:cells_per_tile",
+      "section": "tile",
+      "type": "int",
+      "default": "1",
+      "description": "Process the run in tiles of this many retention-time cells to bound memory; fewer cells per tile use less memory. 0 = the whole run as one tile, at several times the memory. mzPeak output always runs as one tile.",
+      "advanced": true
+    },
+    {
+      "name": "diag:spectrum_meta",
+      "section": "diag",
+      "type": "bool",
+      "default": "false",
+      "description": "Write per-spectrum userParams for diagnosis: spx_p_frames (window frames with precursor signal), spx_faint (1: at most gate:faint_max_frames of them), spx_p_apex (precursor apex intensity).",
+      "advanced": true
+    },
+    {
+      "name": "diag:dump_ms1_tsv",
+      "section": "diag",
+      "type": "string",
+      "default": "",
+      "description": "Write the MS1 traces and the precursors inferred from them to <prefix>.traces.tsv and <prefix>.precursors.tsv, to see where a precursor was lost. Empty = off.",
+      "advanced": true
+    },
+    {
+      "name": "perf:malloc_trim",
+      "section": "perf",
+      "type": "string",
+      "default": "true",
+      "description": "Return freed memory to the system between phases and tiles (Linux/glibc only). Lowers peak memory at some extra run time; set false when run time matters more.",
+      "advanced": false,
+      "choices": [
+        "true",
+        "false"
+      ]
+    },
+    {
+      "name": "perf:stream_load",
+      "section": "perf",
+      "type": "string",
+      "default": "true",
+      "description": "Read the input frame by frame (Bruker .d, or mzPeak in a build that supports it; mzML is always read whole). false loads the whole run first: much more memory and a longer run. Changes the output.",
+      "advanced": false,
+      "choices": [
+        "true",
+        "false"
+      ]
+    },
+    {
+      "name": "perf:ms1_trace_bands",
+      "section": "perf",
+      "type": "int",
+      "default": "48",
+      "description": "Trace MS1 in this many m/z bands in parallel. Changes the output slightly. 1 = off; 0 is read as 1.",
+      "advanced": false,
+      "min": 0
+    },
+    {
+      "name": "perf:ms1_prune",
+      "section": "perf",
+      "type": "string",
+      "default": "true",
+      "description": "Drop MS1 peaks at or below trace:noise_threshold_int while loading, which saves memory. false keeps every peak.",
+      "advanced": false,
+      "choices": [
+        "true",
+        "false"
+      ]
+    },
+    {
+      "name": "perf:trace_bands",
+      "section": "perf",
+      "type": "int",
+      "default": "12",
+      "description": "Trace each window's fragments in this many m/z bands in parallel, for more parallelism than the window count gives. Changes the output. 1 = off; 0 = auto (the output then depends on the thread count; the integer detector refuses it with tile:rt_sec > 0 or a streamed .d).",
+      "advanced": false,
+      "min": 0
+    },
+    {
+      "name": "perf:mem_fraction",
+      "section": "perf",
+      "type": "double",
+      "default": "0.75",
+      "description": "Fraction of free memory the window loop may use, re-checked for every window: MemAvailable, or the headroom under a cgroup limit when lower. Linux and Windows; on macOS windows run one at a time. One window always runs, however large.",
+      "advanced": false,
+      "min": 0.05,
+      "max": 0.95
+    },
+    {
+      "name": "perf:max_concurrent_windows",
+      "section": "perf",
+      "type": "int",
+      "default": "0",
+      "description": "Most isolation windows processed at once; fewer use less memory but take longer. 0 = no cap (free memory still limits them).",
+      "advanced": false
+    },
+    {
+      "name": "charge:min_charge",
+      "section": "charge",
+      "type": "int",
+      "default": "1",
+      "description": "Lowest precursor charge written. Default 1: singly charged precursors are real 1+ ions but carry a higher FDR, so control FDR per charge downstream. 2 writes only 2+ and higher, the same spectra as at 1.",
+      "advanced": false,
+      "min": 1
+    },
+    {
+      "name": "charge:im_charge_veto",
+      "section": "charge",
+      "type": "string",
+      "default": "true",
+      "description": "Use ion mobility to correct charge calls: a 1+ call on the run's 2+ mobility trend is re-called 2+, one on the 3+ trend is dropped. Genuine 1+ ions keep their charge.",
+      "advanced": false,
+      "choices": [
+        "true",
+        "false"
+      ]
+    },
+    {
+      "name": "charge:im_veto_band",
+      "section": "charge",
+      "type": "double",
+      "default": "2.5",
+      "description": "charge:im_charge_veto: half-width of the 2+ and 3+ mobility bands, in robust standard deviations of the fit.",
+      "advanced": false
+    },
+    {
+      "name": "charge:mono_profile_check",
+      "section": "charge",
+      "type": "string",
+      "default": "v2",
+      "description": "Check each precursor's monoisotope against the summed MS1 intensity at its isotope positions and move it by one isotope when averagine disagrees. 'v2' (default) = on; 'false' = off; 'v3' (experimental) = the monoisotope position with the best averagine cosine x observed fraction (Dinosaur/Monocle shift test).",
+      "advanced": false,
+      "choices": [
+        "false",
+        "v2",
+        "v3"
+      ]
+    },
+    {
+      "name": "charge:mono_position_min_ratio",
+      "section": "charge",
+      "type": "double",
+      "default": "0.2",
+      "description": "charge:mono_profile_check v2: reject the lightest isotope when its averagine-scaled intensity ratio is below this; the monoisotope then moves one isotope heavier.",
+      "advanced": true,
+      "min": 0
+    },
+    {
+      "name": "charge:mono_position_im_box",
+      "section": "charge",
+      "type": "double",
+      "default": "0.0",
+      "description": "charge:mono_profile_check v2: 1/K0 half-width of the isotope intensity sums. 0 = auto (per run, 0.01 to 0.03).",
+      "advanced": true,
+      "min": 0
+    },
+    {
+      "name": "charge:mono_position_extend",
+      "section": "charge",
+      "type": "double",
+      "default": "0.6",
+      "description": "charge:mono_profile_check v2: when nothing was rejected, move the monoisotope one isotope lighter if that position's ratio is at least this. 0 = off.",
+      "advanced": true,
+      "min": 0
+    },
+    {
+      "name": "charge:mono_position_iterate",
+      "section": "charge",
+      "type": "string",
+      "default": "true",
+      "description": "charge:mono_profile_check v2: after a rejection, test the new lightest isotope too, and repeat. false tests once.",
+      "advanced": true,
+      "choices": [
+        "true",
+        "false"
+      ]
+    },
+    {
+      "name": "charge:iso_im_tolerance",
+      "section": "charge",
+      "type": "double",
+      "default": "0.0",
+      "description": "1/K0 tolerance for matching isotope partners. 0 (default) = measured per run (0.01 to 0.05); a value above 0 fixes it.",
+      "advanced": false,
+      "min": 0
+    },
+    {
+      "name": "dnoise:ms1",
+      "section": "dnoise",
+      "type": "string",
+      "default": "true",
+      "description": "Denoise every MS1 frame before peak picking, with a port of dnoise v0.1.0 (Garrett, Diedrich & Yates III, bioRxiv 2026.08.27.747603). Bruker .d input only; other inputs pass through. Lowers peak memory; false turns it off.",
+      "advanced": false,
+      "choices": [
+        "true",
+        "false"
+      ]
+    },
+    {
+      "name": "noims:min_corr",
+      "section": "noims",
+      "type": "double",
+      "default": "0.3",
+      "description": "Non-IMS path: minimum fragment-precursor profile correlation.",
+      "advanced": true,
+      "min": 0,
+      "max": 1
+    },
+    {
+      "name": "noims:ppm",
+      "section": "noims",
+      "type": "double",
+      "default": "10.0",
+      "description": "Non-IMS path: mass-trace and isotope m/z tolerance.",
+      "advanced": true,
+      "min": 0
+    }
+  ]
+}

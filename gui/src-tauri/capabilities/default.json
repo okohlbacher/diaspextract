@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The main window: run the CLI, pick files, reveal the output",
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:default", "opener:default", "opener:allow-reveal-item-in-dir"]
+}

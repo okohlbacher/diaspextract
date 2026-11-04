@@ -1001,24 +1001,7 @@ jobs:
           MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
         run: |
           set -euo pipefail
-          # notarytool takes the app-specific password only as an argument: it is in that process's argv on this
-          # throwaway runner for the duration of the call, and masked in the log.
-          cat > "$RUNNER_TEMP/notarize.sh" <<'EOF'
-          notarize() {
-            local out id status
-            out=$(xcrun notarytool submit "$1" --apple-id "$MACOS_APPLE_ID" --team-id "$MACOS_TEAM_ID" \
-                    --password "$MACOS_NOTARY_PASSWORD" --wait --timeout 80m --output-format json) || true
-            id=$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)
-            status=$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status",""))' 2>/dev/null || true)
-            echo "notarization of $(basename "$1"): ${status:-no answer} (submission ${id:-none})"
-            if [ "$status" != Accepted ]; then
-              # a rejection names only the submission; the log names the offending file
-              [ -z "$id" ] || xcrun notarytool log "$id" --apple-id "$MACOS_APPLE_ID" --team-id "$MACOS_TEAM_ID" --password "$MACOS_NOTARY_PASSWORD"
-              echo "::error::notarization of $(basename "$1") was not accepted"; return 1
-            fi
-          }
-          EOF
-          . "$RUNNER_TEMP/notarize.sh"
+          . diaspextract/.github/scripts/notarize.sh
           ditto -c -k --keepParent "dist/$DIST" "$RUNNER_TEMP/notarize.zip"
           notarize "$RUNNER_TEMP/notarize.zip"
 
@@ -1055,21 +1038,9 @@ jobs:
           hdiutil create -volname "DIAspeXtract $VERSION" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
           if [ "$ENABLED" = true ]; then
             codesign --force --timestamp --keychain "$KC" --sign "$ID" "$DMG"
-            . "$RUNNER_TEMP/notarize.sh"
+            . diaspextract/.github/scripts/notarize.sh
             notarize "$DMG"
-            # stapler reaches Apple's ticket server (CloudKit), which the macos-15-intel runner loses again and again
-            # (Error 68 / -1005, three release runs in a row). The image is notarized at this point; the staple only
-            # lets it open offline, as Gatekeeper fetches the ticket online otherwise. So retry, then ship it unstapled.
-            stapled=false
-            for i in 1 2 3 4; do
-              xcrun stapler staple "$DMG" && xcrun stapler validate "$DMG" && { stapled=true; break; }
-              [ "$i" = 4 ] || sleep $((i * 30))
-            done
-            if [ "$stapled" = true ]; then
-              spctl --assess --type open --context context:primary-signature -vv "$DMG"
-            else
-              echo "::warning title=dmg not stapled::$DMG is notarized, but Apple's ticket server was unreachable; Gatekeeper checks it online on first open"
-            fi
+            if staple "$DMG"; then spctl --assess --type open --context context:primary-signature -vv "$DMG"; fi
           fi
           ls -l assets
 
@@ -1081,6 +1052,240 @@ jobs:
         with:
           name: DIAspeXtract-${{ matrix.name }}
           path: assets/*
+          if-no-files-found: error
+          retention-days: ${{ needs.preflight.outputs.sign == 'true' && 30 || 7 }}
+
+  # -------------------------------------------------------------------------------------------------------- desktop
+  # The desktop app (gui/, Tauri 2): a window around the CLI that the build job packaged, which the app carries as a
+  # resource and runs as a child process. Built from that job's artifact, so the app ships exactly the tested, signed
+  # CLI. macOS: Tauri signs the .app with the Developer ID (the CLI and its libraries inside keep the signatures the
+  # build job gave them, so library validation holds without any entitlement), notarizes and staples it; the disk image
+  # around it is made, signed, notarized and stapled here. Windows: an NSIS installer (unsigned until SignPath is set
+  # up), and the Playwright end-to-end test drives the installed app over WebView2's DevTools port. Linux: a .deb.
+  desktop:
+    name: desktop ${{ matrix.name }}
+    needs: [preflight, build]
+    if: needs.preflight.outputs.heavy == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macos-arm64, runner: macos-14,       cli: tar.gz, ext: .dmg,       macos_floor: '14.0' }
+          - { name: macos-x64,   runner: macos-15-intel, cli: tar.gz, ext: .dmg,       macos_floor: '15.0' }
+          - { name: windows-x64, runner: windows-2022,   cli: zip,    ext: -setup.exe }
+          - { name: linux-x64,   runner: ubuntu-24.04,   cli: tar.gz, ext: .deb }
+    defaults:
+      run:
+        shell: bash
+    env:
+      SIGN: ${{ needs.preflight.outputs.sign }}
+      RELEASE: ${{ needs.preflight.outputs.release }}
+      VERSION: ${{ needs.preflight.outputs.version }}
+      ASSET: DIAspeXtract-GUI-${{ matrix.name }}${{ matrix.ext }}
+      R: gui/src-tauri/resources/diaspextract
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      # Same gate as the build job: a release never ships an unsigned app; a dry run without the secrets builds one.
+      - name: Signing material (macOS)
+        id: macsign
+        if: runner.os == 'macOS' && env.SIGN == 'true'
+        env:
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_APPLE_ID: ${{ secrets.MACOS_APPLE_ID }}
+          MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+          MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+        run: |
+          missing=""
+          for v in MACOS_CERTIFICATE_BASE64 MACOS_CERTIFICATE_PASSWORD MACOS_SIGNING_IDENTITY MACOS_APPLE_ID MACOS_TEAM_ID MACOS_NOTARY_PASSWORD; do
+            [ -n "${!v}" ] || missing="$missing $v"
+          done
+          if [ -z "$missing" ]; then echo "enabled=true" >> "$GITHUB_OUTPUT"
+          elif [ "$RELEASE" = true ]; then echo "::error::$missing missing -- a release is never shipped unsigned"; exit 1
+          else echo "::warning title=Unsigned macOS app::missing:$missing"; echo "enabled=false" >> "$GITHUB_OUTPUT"; fi
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: DIAspeXtract-${{ matrix.name }}
+          path: cli
+
+      # The packaged CLI becomes the app's resource, dereferenced: Tauri's resource bundler silently skips symlinked
+      # directories. Then it must run from there with no environment, and report this version.
+      - name: Stage the packaged CLI as the app's resource
+        run: |
+          set -euo pipefail
+          mkdir -p cli/x
+          if [ "${{ matrix.cli }}" = zip ]; then python -m zipfile -e "cli/DIAspeXtract-${{ matrix.name }}.zip" cli/x
+          else tar -C cli/x -xzf "cli/DIAspeXtract-${{ matrix.name }}.tar.gz"; fi
+          rm -rf "$R"; mkdir -p "$(dirname "$R")"
+          cp -RL "cli/x/DIAspeXtract-${{ matrix.name }}" "$R"
+          B="$R/bin/diaspextract"; [ "$RUNNER_OS" != Windows ] || B="$B.exe"
+          echo "B=$B" >> "$GITHUB_ENV"
+          case "$RUNNER_OS" in
+            Windows) out=$("$B" --help 2>&1) ;;
+            *)       out=$(env -i HOME="$HOME" PATH=/usr/bin:/bin "$B" --help 2>&1) ;;
+          esac || { echo "$out"; echo "::error::the staged CLI does not start"; exit 1; }
+          grep -qE "^Version: ${VERSION//./\\.} " <<< "$out" || { echo "$out" | grep Version; echo "::error::the staged CLI is not $VERSION"; exit 1; }
+          du -sh "$R"
+
+      - name: Versions agree, and the form matches the CLI's options
+        working-directory: gui
+        run: |
+          set -euo pipefail
+          for f in package.json src-tauri/tauri.conf.json; do grep -q "\"version\": \"$VERSION\"" "$f" || { echo "::error::$f is not $VERSION"; exit 1; }; done
+          grep -q "^version = \"$VERSION\"" src-tauri/Cargo.toml || { echo "::error::Cargo.toml is not $VERSION"; exit 1; }
+          npm ci --ignore-scripts
+          node scripts/gen-params.mjs "../$B" > "$RUNNER_TEMP/params.json"
+          sed -i.bak 's/\r$//' "$RUNNER_TEMP/params.json"
+          diff -u src/params.generated.json "$RUNNER_TEMP/params.json" \
+            || { echo "::error::src/params.generated.json differs from the CLI's -write_ini: run npm run params"; exit 1; }
+
+      - name: Tauri build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libwebkit2gtk-4.1-dev librsvg2-dev
+
+      # The credentials reach Tauri only when signing is enabled: Tauri treats a set-but-empty APPLE_CERTIFICATE as a
+      # certificate and fails the unsigned build on it.
+      - name: Build the app
+        working-directory: gui
+        timeout-minutes: 90
+        env:
+          ENABLED: ${{ steps.macsign.outputs.enabled }}
+          FLOOR: ${{ matrix.macos_floor }}
+          C: ${{ steps.macsign.outputs.enabled == 'true' && secrets.MACOS_CERTIFICATE_BASE64 || '' }}
+          CP: ${{ steps.macsign.outputs.enabled == 'true' && secrets.MACOS_CERTIFICATE_PASSWORD || '' }}
+          ID: ${{ steps.macsign.outputs.enabled == 'true' && secrets.MACOS_SIGNING_IDENTITY || '' }}
+          AID: ${{ steps.macsign.outputs.enabled == 'true' && secrets.MACOS_APPLE_ID || '' }}
+          AP: ${{ steps.macsign.outputs.enabled == 'true' && secrets.MACOS_NOTARY_PASSWORD || '' }}
+          AT: ${{ steps.macsign.outputs.enabled == 'true' && secrets.MACOS_TEAM_ID || '' }}
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS" in
+            macOS)
+              if [ "$ENABLED" = true ]; then
+                export APPLE_CERTIFICATE="$C" APPLE_CERTIFICATE_PASSWORD="$CP" APPLE_SIGNING_IDENTITY="$ID"
+                export APPLE_ID="$AID" APPLE_PASSWORD="$AP" APPLE_TEAM_ID="$AT"
+              fi
+              # the app may not claim an older macOS than the CLI inside it runs on
+              export MACOSX_DEPLOYMENT_TARGET="$FLOOR"
+              npx tauri build --bundles app --config "{\"bundle\":{\"macOS\":{\"minimumSystemVersion\":\"$FLOOR\"}}}" ;;
+            Windows) npx tauri build --bundles nsis ;;
+            Linux)   npx tauri build --bundles deb ;;
+          esac
+
+      # Tauri staples the .app but ignores a failed staple, so check it here; then the CLI inside the finished app must
+      # start, which is where a broken signature or library path shows.
+      - name: Check the app (macOS)
+        if: runner.os == 'macOS'
+        env:
+          ENABLED: ${{ steps.macsign.outputs.enabled }}
+          MACOS_APPLE_ID: ${{ secrets.MACOS_APPLE_ID }}
+          MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+          MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          APP=gui/src-tauri/target/release/bundle/macos/DIAspeXtract.app
+          echo "APP=$APP" >> "$GITHUB_ENV"
+          if [ "$ENABLED" = true ]; then
+            # (an unsigned build is only linker-signed and seals no resources, so this holds for a signed one only)
+            codesign --verify --deep --strict --verbose=2 "$APP"
+            codesign -dv --verbose=2 "$APP" 2>&1 | grep -E 'Authority=Developer ID Application|TeamIdentifier'
+            codesign -dv --verbose=2 "$APP/Contents/Resources/diaspextract/bin/diaspextract" 2>&1 | grep -E 'flags=.*runtime'
+            . .github/scripts/notarize.sh
+            xcrun stapler validate "$APP" || staple "$APP" || true
+            spctl --assess --type execute -vv "$APP"
+          fi
+          env -i HOME="$HOME" PATH=/usr/bin:/bin "$APP/Contents/Resources/diaspextract/bin/diaspextract" --help 2>&1 | grep -E "^Version: ${VERSION//./\\.} "
+
+      - name: Disk image (macOS)
+        if: runner.os == 'macOS'
+        timeout-minutes: 90
+        env:
+          ENABLED: ${{ steps.macsign.outputs.enabled }}
+          ID: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          C: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          CP: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_APPLE_ID: ${{ secrets.MACOS_APPLE_ID }}
+          MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+          MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          STAGE="$RUNNER_TEMP/dmg"; rm -rf "$STAGE"; mkdir -p "$STAGE"
+          ditto "$APP" "$STAGE/DIAspeXtract.app"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create -volname "DIAspeXtract $VERSION" -srcfolder "$STAGE" -ov -format UDZO "$ASSET"
+          if [ "$ENABLED" = true ]; then
+            # Tauri's keychain is gone by now: a throwaway one for the image's signature
+            KC="$RUNNER_TEMP/dmg.keychain-db"; KCPW=$(uuidgen); echo "::add-mask::$KCPW"
+            printf '%s' "$C" | base64 --decode > "$RUNNER_TEMP/c.p12"
+            security create-keychain -p "$KCPW" "$KC"; security unlock-keychain -p "$KCPW" "$KC"
+            security import "$RUNNER_TEMP/c.p12" -P "$CP" -k "$KC" -T /usr/bin/codesign; rm -f "$RUNNER_TEMP/c.p12"
+            security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KCPW" "$KC" > /dev/null
+            codesign --force --timestamp --keychain "$KC" --sign "$ID" "$ASSET"
+            security delete-keychain "$KC"
+            . .github/scripts/notarize.sh
+            notarize "$ASSET"
+            if staple "$ASSET"; then spctl --assess --type open --context context:primary-signature -vv "$ASSET"; fi
+          fi
+          ls -l "$ASSET"
+
+      - name: Installer (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          set -euo pipefail
+          cp gui/src-tauri/target/release/bundle/nsis/*-setup.exe "$ASSET"
+          ls -l "$ASSET"
+          [ "$SIGN" != true ] || echo "::warning title=Unsigned Windows installer::$ASSET ships unsigned until the SignPath project exists; SmartScreen warns on first run"
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          cp gui/src-tauri/target/release/bundle/deb/*.deb "$ASSET"
+          dpkg-deb -I "$ASSET"
+          dpkg-deb -x "$ASSET" "$RUNNER_TEMP/deb"
+          b=$(find "$RUNNER_TEMP/deb" -path '*diaspextract/bin/diaspextract' -type f)
+          env -i HOME="$HOME" PATH=/usr/bin:/bin "$b" --help 2>&1 | grep -E "^Version: ${VERSION//./\\.} "
+
+      # The real thing on Windows: install silently, hide the build tree's copy of the CLI (a dev build falls back to
+      # it), then Playwright drives the installed app through a run on a synthetic mzML and a run that must fail.
+      - name: End-to-end test of the installed app (Windows)
+        if: runner.os == 'Windows'
+        timeout-minutes: 20
+        working-directory: gui
+        run: |
+          set -euo pipefail
+          mv src-tauri/resources src-tauri/resources.hidden
+          D="$(cygpath -w "$RUNNER_TEMP")\\dxapp"
+          "../$ASSET" /S "/D=$D"
+          python -I -c "import sys; sys.path.insert(0, sys.argv[1]); import test_diaspextract as t; t.synth(sys.argv[2])" ../test "$RUNNER_TEMP/synth.mzML"
+          DX_E2E_APP="$D\\diaspextract-gui.exe" DX_E2E_INPUT="$(cygpath -w "$RUNNER_TEMP/synth.mzML")" DX_E2E_VERSION="$VERSION" \
+            npx playwright test --project=e2e | tee "$RUNNER_TEMP/e2e.log"
+          # a skipped suite exits 0 too
+          grep -q ' 3 passed' "$RUNNER_TEMP/e2e.log" || { echo "::error::the end-to-end tests did not all run"; exit 1; }
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: playwright-${{ matrix.name }}
+          path: gui/playwright-report
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: DIAspeXtract-GUI-${{ matrix.name }}
+          path: ${{ env.ASSET }}
           if-no-files-found: error
           retention-days: ${{ needs.preflight.outputs.sign == 'true' && 30 || 7 }}
 
@@ -1116,7 +1321,7 @@ jobs:
   # SHA256SUMS covers the full set. A release the maintainer created first (notes, draft or not) is kept as it is;
   # otherwise it is created from the tag's CHANGELOG section, as a draft until the assets are on it.
   release:
-    needs: [preflight, build, identity]
+    needs: [preflight, build, identity, desktop]
     if: needs.preflight.outputs.release == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -1139,7 +1344,9 @@ jobs:
           set -euo pipefail
           cd assets
           for a in DIAspeXtract-linux-x64.tar.gz DIAspeXtract-linux-arm64.tar.gz DIAspeXtract-macos-arm64.tar.gz \
-                   DIAspeXtract-macos-arm64.dmg DIAspeXtract-macos-x64.tar.gz DIAspeXtract-macos-x64.dmg DIAspeXtract-windows-x64.zip; do
+                   DIAspeXtract-macos-arm64.dmg DIAspeXtract-macos-x64.tar.gz DIAspeXtract-macos-x64.dmg DIAspeXtract-windows-x64.zip \
+                   DIAspeXtract-GUI-macos-arm64.dmg DIAspeXtract-GUI-macos-x64.dmg DIAspeXtract-GUI-windows-x64-setup.exe \
+                   DIAspeXtract-GUI-linux-x64.deb; do
             [ -s "$a" ] || { echo "::error::$a was not built"; exit 1; }
           done
           sha256sum DIAspeXtract-* > SHA256SUMS
@@ -1170,7 +1377,8 @@ jobs:
           set -euo pipefail
           want="DIAspeXtract-linux-x64.tar.gz DIAspeXtract-linux-arm64.tar.gz DIAspeXtract-macos-arm64.tar.gz
                 DIAspeXtract-macos-arm64.dmg DIAspeXtract-macos-x64.tar.gz DIAspeXtract-macos-x64.dmg
-                DIAspeXtract-windows-x64.zip"
+                DIAspeXtract-windows-x64.zip DIAspeXtract-GUI-macos-arm64.dmg DIAspeXtract-GUI-macos-x64.dmg
+                DIAspeXtract-GUI-windows-x64-setup.exe DIAspeXtract-GUI-linux-x64.deb"
           have=$(gh release view "$TAG" --json assets --jq '.assets[].name') || { echo "::error::no release for $TAG"; exit 1; }
           missing=0
           for a in $want SHA256SUMS; do grep -qx "$a" <<< "$have" || { echo "::error::MISSING: $a"; missing=1; }; done

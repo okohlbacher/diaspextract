@@ -107,9 +107,25 @@ With Homebrew, on macOS or Linux:
 brew install okohlbacher/diaspextract/diaspextract
 ```
 
+### Desktop app
+
+For those who would rather not use a terminal, each release also carries a desktop app with the same tool inside:
+
+| platform | asset |
+|---|---|
+| macOS, Apple silicon | `DIAspeXtract-GUI-macos-arm64.dmg` (macOS 14 or newer) |
+| macOS, Intel | `DIAspeXtract-GUI-macos-x64.dmg` (macOS 15 or newer) |
+| Windows x64 | `DIAspeXtract-GUI-windows-x64-setup.exe` |
+| Linux x86-64 | `DIAspeXtract-GUI-linux-x64.deb` |
+
+Choose a `.d` folder or an mzML file, check the output name, change any option, and press Run. The app lists every
+option the tool has, with its default, limits and help text; it passes only the ones you changed, shows the equivalent
+command line to copy into a script, and follows the run's progress and log. Settings are kept between sessions.
+
 **Signing.** The macOS binaries are signed with a Developer ID and notarized by Apple. The disk image carries its
 notarization ticket and opens offline; the tarball is checked online the first time it runs. The Windows executable is
-not signed yet (signing through SignPath Foundation is prepared), so SmartScreen warns the first time it runs.
+not signed yet (signing through SignPath Foundation is prepared), so SmartScreen warns the first time it runs; the same
+holds for the Windows installer of the desktop app. The macOS app is signed, notarized and stapled.
 
 ### Build from source
 
@@ -235,6 +251,7 @@ grep -a 'spx:' pseudo.mzML
 ## Layout
 
 ```
+gui/        the desktop app (Tauri): React front end, Rust backend, Playwright tests
 src/        the tool and its headers: m/z calibration, .d metadata reader, MS1 denoiser, mzPeak loader, the path for input without ion mobility
 patches/    the eight OpenMS patches, the pinned OpenMS commit (openms.lock) and mzPeak build helpers
 scripts/    OpenMS patch application, mzPeak library build, option-name check

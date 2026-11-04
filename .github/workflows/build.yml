@@ -494,7 +494,9 @@ jobs:
           set -euo pipefail
           ARGS=(-S diaspextract -B diaspextract/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DOpenMS_DIR="$WS/OpenMS/build")
           case "$RUNNER_OS" in
-            Linux)   cmake "${ARGS[@]}" -DCMAKE_PREFIX_PATH=/usr/local ;;
+            # rpath-link: ld resolves libOpenMS's libxml2.so.2 through its built-in directories (Ubuntu's 2.9 in
+            # /lib/x86_64-linux-gnu) before ld.so.conf (2.13 in /usr/local/lib); the loader's cache has /usr/local first
+            Linux)   cmake "${ARGS[@]}" -DCMAKE_PREFIX_PATH=/usr/local -DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath-link,/usr/local/lib ;;
             macOS)   cmake "${ARGS[@]}" -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOS_FLOOR" \
                        -DCMAKE_PREFIX_PATH="$LIBXML2;$BREW;$LIBOMP" -DOpenMP_ROOT="$LIBOMP" ;;
             # /Z7 + /DEBUG: a PDB for the stack trace below; the code is the same.

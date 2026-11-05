@@ -90,6 +90,9 @@ static inline double spxFileTimeSec_(FILETIME a, FILETIME b)   // two FILETIMEs 
 #else
 #include <sys/resource.h>
 #endif
+#ifdef __APPLE__
+#include <mach/mach.h>   // host_statistics64, task_info: procKb_'s stand-ins for /proc on macOS
+#endif
 
 // The release version. The standalone CMake build passes it from project(VERSION); the in-tree
 // OpenMS build does not, so the fallback here is the same number.
@@ -414,6 +417,25 @@ namespace
     PROCESS_MEMORY_COUNTERS pm{};
     if (!GetProcessMemoryInfo(GetCurrentProcess(), &pm, sizeof pm)) return -1;
     return k == "VmRSS:" ? (long long)(pm.WorkingSetSize / 1024) : k == "VmHWM:" ? (long long)(pm.PeakWorkingSetSize / 1024) : -1;
+#elif defined(__APPLE__)
+    // [mac] no /proc: answered from Mach. Without this MemAvailable read as 0 and the window loop admitted one window
+    // at a time (admission high-water 1 of 64). MemAvailable = free + inactive pages (psutil's "available" on macOS);
+    // VmRSS = resident size; VmHWM = getrusage's ru_maxrss, in bytes on Darwin.
+    (void)path; const std::string k(key);
+    if (k == "MemAvailable:")
+    {
+      vm_statistics64_data_t vs{}; mach_msg_type_number_t n = HOST_VM_INFO64_COUNT; vm_size_t page = 0;
+      if (host_page_size(mach_host_self(), &page) != KERN_SUCCESS
+          || host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&vs, &n) != KERN_SUCCESS) return -1;
+      return (long long)(((unsigned long long)vs.free_count + vs.inactive_count) * page / 1024);
+    }
+    if (k == "VmRSS:")
+    {
+      mach_task_basic_info_data_t ti{}; mach_msg_type_number_t n = MACH_TASK_BASIC_INFO_COUNT;
+      return task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&ti, &n) == KERN_SUCCESS ? (long long)(ti.resident_size / 1024) : -1;
+    }
+    if (k == "VmHWM:") { struct rusage ru; return getrusage(RUSAGE_SELF, &ru) == 0 ? (long long)(ru.ru_maxrss / 1024) : -1; }
+    return -1;
 #else
     std::ifstream f(path); std::string k;
     while (f >> k) { if (k == key) { long long v = -1; f >> v; return v; } f.ignore(1 << 20, '\n'); }

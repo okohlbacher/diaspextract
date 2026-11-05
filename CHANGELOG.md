@@ -29,6 +29,13 @@
 - macOS: the signed tool carries the `allow-jit` entitlement, which the .NET runtime needs to read `.raw` files.
   Library validation stays on; the bundled .NET libraries are signed with the same Developer ID as the rest.
 
+### Fixed
+
+- **macOS: isolation windows run in parallel.** macOS has no `/proc`, so the free-memory probe read 0 and the
+  window loop admitted one window at a time ("admission high-water 1 of 64"), which cost about half the speed at
+  every thread count. Free memory, RSS and peak RSS now come from Mach (`host_statistics64`, `task_info`,
+  `getrusage`); the phase table's RSS column is no longer 0 on macOS. The spectra do not change.
+
 ## v1.8.4 — 2026-11-04
 
 The program is 1.8.1's; only the macOS packages changed.

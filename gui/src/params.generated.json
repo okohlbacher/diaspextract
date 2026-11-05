@@ -571,7 +571,7 @@
       "section": "perf",
       "type": "double",
       "default": "0.75",
-      "description": "Fraction of free memory the window loop may use, re-checked for every window: MemAvailable, or the headroom under a cgroup limit when lower. Linux and Windows; on macOS windows run one at a time. One window always runs, however large.",
+      "description": "Fraction of free memory the window loop may use, re-checked for every window: MemAvailable, or the headroom under a cgroup limit when lower (macOS: free plus inactive memory). One window always runs, however large.",
       "advanced": false,
       "min": 0.05,
       "max": 0.95

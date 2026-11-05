@@ -2862,7 +2862,7 @@ protected:
                            "the window count gives. Changes the output. 1 = off; 0 = auto (the output then depends on the thread count; the integer "
                            "detector refuses it with tile:rt_sec > 0 or a streamed .d).", false);
     registerDoubleOption_("perf:mem_fraction", "<f>", 0.75, "Fraction of free memory the window loop may use, re-checked for every window: MemAvailable, "
-                              "or the headroom under a cgroup limit when lower. Linux and Windows; on macOS windows run one at a time. One window always runs, however large.", false);
+                              "or the headroom under a cgroup limit when lower (macOS: free plus inactive memory). One window always runs, however large.", false);
     registerIntOption_("perf:max_concurrent_windows", "<n>", 0, "Most isolation windows processed at once; fewer use less memory but take longer. 0 = "
                            "no cap (free memory still limits them).", false);
 

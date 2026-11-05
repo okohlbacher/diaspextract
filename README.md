@@ -79,7 +79,7 @@ mobility at MS2 but not at MS1, and MS2 scans with several isolation windows are
 | .NET | for Thermo `.raw` input only: the runtime, 8 or newer. The release bundles carry it |
 | Compiler | C++20 and OpenMP. CI builds with GCC on Linux, Apple clang with Homebrew's libomp on macOS and clang-cl on Windows |
 | CMake | 3.21+ for OpenMS (the tool itself needs 3.16) |
-| Platform | Linux or Windows. On macOS the tool cannot read the free memory and runs one isolation window at a time |
+| Platform | Linux, macOS or Windows |
 | Memory | about 5–20 GB for the HeLa runs of PXD017703 and 25–32 GB for the 130-minute tissue runs of PXD047793 (1.6.0 at the defaults with 100 threads, 43 public runs; see [CHANGELOG.md](CHANGELOG.md)) |
 | Disk | the mzML output is large |
 

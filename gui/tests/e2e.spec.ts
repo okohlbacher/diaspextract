@@ -53,7 +53,7 @@ test('a run writes spectra through the real CLI', async () => {
   const out = join(mkdtempSync(join(tmpdir(), 'dx-e2e-')), 'synth.pseudo.mzML')
   await page.getByLabel('Input').fill(process.env.DX_E2E_INPUT!)
   await page.getByLabel('Output').fill(out)
-  await page.getByLabel('Threads').fill('2')
+  await page.getByLabel('Threads', { exact: true }).fill('2')
   await page.getByRole('button', { name: 'Run', exact: true }).click()
   await expect(page.getByTestId('status')).toContainText(' written to', { timeout: 120_000 })
   await expect(page.getByLabel('Log')).toContainText('window 1/1')

@@ -79,7 +79,7 @@ test('advanced options are hidden until asked for, and the filter searches names
 test('a run shows progress, the log and the result, and can reveal the output', async ({ page }) => {
   await mock(page, { windows: 5, spectra: 4321, stepMs: 150 })
   await page.getByLabel('Input').fill('/a/r.d')
-  await page.getByLabel('Threads').fill('8')
+  await page.getByLabel('Threads', { exact: true }).fill('8')
   await run(page).click()
   await expect(page.getByRole('button', { name: 'Cancel' })).toBeVisible()
   await expect(page.getByLabel('Input')).toBeDisabled()

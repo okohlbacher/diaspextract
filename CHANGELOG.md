@@ -31,6 +31,10 @@
 
 ### Fixed
 
+- **Windows: 1.6 times faster at 12 threads.** The tool allocates through mimalloc instead of the Windows heap,
+  whose locks stalled the threads: on a 12-core Ryzen the HeLa diaPASEF run takes 4:58 instead of 8:07 min, as fast
+  as the Linux build on the same machine. The bundle carries `mimalloc.dll` and `mimalloc-redirect.dll` (MIT). The
+  spectra do not change.
 - **Bruker diaPASEF input: the MS2 frames are read in parallel again, as in 1.8.4.** The Bruker reader of the new
   OpenMS decodes them one after the other; a tenth OpenMS patch decodes them and slices them into their windows in
   parallel, with the window team's free threads while a tile is read. `-perf:decode_threads` sets the threads; the

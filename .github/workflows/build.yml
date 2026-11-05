@@ -787,7 +787,8 @@ jobs:
           set -euo pipefail
           B="dist/$DIST/bin"
           dirs=""
-          for d in "$WS/OpenMS/build/bin" "$CONDA_LIB/bin" "$LLVM_DIR/bin" "$NETHOST_DIR" "C:/Windows/System32"; do
+          # diaspextract/build: mimalloc.dll and mimalloc-redirect.dll, which the build copies beside the exe
+          for d in "$WS/diaspextract/build" "$WS/OpenMS/build/bin" "$CONDA_LIB/bin" "$LLVM_DIR/bin" "$NETHOST_DIR" "C:/Windows/System32"; do
             [ -d "$d" ] && dirs="$dirs;$d"
           done
           cat > "$RT/bundle-dlls.cmake" <<'EOF'
@@ -832,6 +833,15 @@ jobs:
           crt="$(cygpath -u "$VCToolsRedistDir")/x64"
           crts=("$crt"/Microsoft.VC*.CRT)
           cp "${crts[-1]}"/*.dll "$B/"
+          # mimalloc replaces the Windows heap (CMakeLists.txt): it must be the exe's first import, both DLLs must ship,
+          # and the bundled exe must run on it -- a silently dropped DLL would only make Windows 1.6x slower again
+          cp diaspextract/build/_deps/mimalloc-src/LICENSE "dist/$DIST/LICENSES/third-party/mimalloc-LICENSE"
+          first=$(dumpbin -nologo -imports "$B/diaspextract.exe" | grep -im1 "\.dll[[:space:]]*$" | tr -d " \r")
+          [ "${first,,}" = mimalloc.dll ] || { echo "::error::the first import of diaspextract.exe is $first, not mimalloc.dll"; exit 1; }
+          for f in mimalloc.dll mimalloc-redirect.dll; do [ -f "$B/$f" ] || { echo "::error::$f is not in the bundle"; exit 1; }; done
+          MIMALLOC_VERBOSE=1 "$B/diaspextract.exe" --help > /dev/null 2> "$RT/mimalloc.txt" || true
+          grep -q "mimalloc: process init" "$RT/mimalloc.txt" || { echo "::error::the bundled exe does not run on mimalloc"; head -20 "$RT/mimalloc.txt"; exit 1; }
+          grep -m1 "^v[0-9]" "$RT/mimalloc.txt" || true
           ls "$B"; du -sh "dist/$DIST"
 
       # The Thermo .raw reader: the bridge library came with libOpenMS above; its managed assemblies go next to the

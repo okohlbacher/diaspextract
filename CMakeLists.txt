@@ -72,6 +72,29 @@ endif()
 find_package(SQLite3 REQUIRED)   # analysis.tdf is read directly; a missing SQLite is a build error, not a fallback
 
 add_executable(diaspextract src/diaspextract.cpp)
+# Windows: allocate through mimalloc instead of the Windows heap, whose locks cost 1.6x at 12 threads (Ryzen 9 7900X,
+# HeLa diaPASEF: 8:07 -> 4:58 min, the spectra unchanged). mimalloc.dll is linked first and referenced
+# (/INCLUDE:mi_version), so it is the exe's first import, and mimalloc-redirect.dll (which mimalloc.dll imports) sends
+# every malloc of the process -- libOpenMS and the CRT included -- to it. Both DLLs go beside the exe.
+option(DIASPEXTRACT_MIMALLOC "Windows: use mimalloc for every allocation of the process" ON)
+if(WIN32 AND DIASPEXTRACT_MIMALLOC)
+  include(FetchContent)
+  set(MI_BUILD_SHARED ON CACHE BOOL "" FORCE)
+  set(MI_BUILD_STATIC OFF CACHE BOOL "" FORCE)
+  set(MI_BUILD_OBJECT OFF CACHE BOOL "" FORCE)
+  set(MI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  FetchContent_Declare(mimalloc
+    URL https://github.com/microsoft/mimalloc/archive/refs/tags/v3.6.1.tar.gz
+    URL_HASH SHA256=2672e6a99d4579fb4bb32d9de0d63aa424ce600d31fbfaf06eb74d940d2e07a6)
+  FetchContent_MakeAvailable(mimalloc)
+  target_link_libraries(diaspextract PRIVATE mimalloc)   # before every other library
+  target_link_options(diaspextract PRIVATE /INCLUDE:mi_version)
+  add_custom_command(TARGET diaspextract POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:mimalloc> ${mimalloc_SOURCE_DIR}/bin/mimalloc-redirect.dll
+            $<TARGET_FILE_DIR:diaspextract>)
+  install(FILES $<TARGET_FILE:mimalloc> ${mimalloc_SOURCE_DIR}/bin/mimalloc-redirect.dll DESTINATION bin)
+  install(FILES ${mimalloc_SOURCE_DIR}/LICENSE DESTINATION LICENSES/third-party RENAME mimalloc-LICENSE)
+endif()
 target_link_libraries(diaspextract PRIVATE OpenMS OpenMS_CLI SQLite::SQLite3 OpenMP::OpenMP_CXX)   # OpenMS_CLI: TOPPBase
 target_compile_definitions(diaspextract PRIVATE DIASPEXTRACT_VERSION="${PROJECT_VERSION}")
 # Windows: a version resource with the product name and version. SignPath signs the release .exe only when both are

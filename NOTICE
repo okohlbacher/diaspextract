@@ -27,6 +27,13 @@ Ported code, used under its own licence (full text in LICENSES/):
   src/PortableMath.h ports its exp and log and follows its atanh and tanh, so these give the
   same bits on every platform (the platform math libraries do not).
 
+Bundled with the Windows release, used under its own licence:
+
+  mimalloc 3.6.1 -- https://github.com/microsoft/mimalloc
+  MIT License, Copyright (c) 2018-2025 Microsoft Corporation, Daan Leijen --
+  LICENSES/third-party/mimalloc-LICENSE in the bundle. It replaces the Windows heap
+  (mimalloc.dll, mimalloc-redirect.dll).
+
 Algorithmic ideas were reviewed against, but no code was taken from:
 
   the reference implementation (Nesvizhskii Lab)     -- pseudo-MS/MS extraction from diaPASEF

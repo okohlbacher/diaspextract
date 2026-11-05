@@ -1,0 +1,113 @@
+Decode the DIA-PASEF MS2 frames of BrukerTimsFile::loadDIAStreaming() in parallel batches (Config::dia_ms2_decode_threads,
+0 = up to 4 threads), like RawFrameReader does for the other loaders: the reader of the 3.7 pin decodes them serially,
+which starved DIAspeXtract's pipelined tile reads at high thread counts. Same spectra, same order.
+
+--- a/src/openms/include/OpenMS/FORMAT/BrukerTimsFile.h
++++ b/src/openms/include/OpenMS/FORMAT/BrukerTimsFile.h
+@@ -117,6 +117,11 @@
+                                            ///< not decoded and, for DDA, the precursor table is not read.
+                                            ///< Affects all export modes.
+ 
++      /// Threads that decode the DIA-PASEF MS2 frames of loadDIAStreaming() ahead, in parallel (each with its
++      /// own decompression context). 0: up to 4, as the other parallel loaders; 1: serial. The spectra and
++      /// their order do not depend on it. Called from a parallel region, the threads form a nested team.
++      int dia_ms2_decode_threads = 0;
++
+       /// Frame ID range filter (inclusive). Only frames with
+       /// frame_id_min <= Id <= frame_id_max are read; all peak data for frames
+       /// outside the range is skipped, so memory and I/O scale with the range,
+--- a/src/openms/source/FORMAT/BrukerTimsFile.cpp
++++ b/src/openms/source/FORMAT/BrukerTimsFile.cpp
+@@ -3208,8 +3208,38 @@
+ 
+     startProgress(0, total_work, "Streaming DIA-PASEF MS2 frames");
+     Size progress_count = 0;
+-    DecodedFrame decoded;
+     std::vector<char> in_window; // per scan of the frame: within the ion mobility limits of the window?
++
++    // The frames are decoded ahead in batches, in parallel, each thread with its own decompression context and
++    // buffer (as RawFrameReader does), and split into the windows in frame order afterwards: the spectra and
++    // their order are those of decoding one frame after the other. Not with the converters of the Bruker SDK,
++    // which are called by one thread at a time.
++    const bool sdk = dynamic_cast< ::BrukerTof2MzConverter*>(handle->tof2mz_converter.get()) != nullptr
++                  || dynamic_cast< ::BrukerScan2InvIonMobilityConverter*>(handle->scan2inv_ion_mobility_converter.get()) != nullptr;
++    int n_dec = 1;
++#ifdef _OPENMP
++    if (!sdk) n_dec = eff.dia_ms2_decode_threads > 0 ? eff.dia_ms2_decode_threads : std::min(4, std::max(1, omp_get_max_threads()));
++#endif
++    struct DecodeSlot
++    {
++      struct FreeContext
++      {
++        void operator()(ZSTD_DCtx* context) const { ZSTD_freeDCtx(context); }
++      };
++      std::unique_ptr<ZSTD_DCtx, FreeContext> context;
++      std::vector<char> buffer;
++    };
++    std::vector<DecodeSlot> slots(static_cast<size_t>(n_dec));
++    if (n_dec > 1)
++    {
++      for (DecodeSlot& s : slots)
++      {
++        s.context.reset(ZSTD_createDCtx());
++        s.buffer.resize(handle->get_decomp_buffer_size());
++      }
++    }
++    const size_t batch = n_dec > 1 ? 8 * static_cast<size_t>(n_dec) : 1;
++    std::vector<DecodedFrame> decoded_batch(batch);
+ 
+     for (const auto& [group, frame_ids] : group_to_frames)
+     {
+@@ -3219,10 +3249,42 @@
+ 
+       // Every frame is decoded once and split into the windows of its group. Each window still gets
+       // its spectra in the order of the frames.
+-      for (size_t i = 0; i < frame_ids.size(); ++i)
++      for (size_t b0 = 0; b0 < frame_ids.size(); b0 += batch)
+       {
++      const size_t b1 = std::min(b0 + batch, frame_ids.size());
++      if (n_dec > 1)
++      {
++        // every thread has its own slot; exceptions must not leave the parallel region
++        std::exception_ptr error = nullptr;
++        const auto& ids = frame_ids;   // OpenMP cannot capture a structured binding
++#pragma omp parallel for schedule(dynamic, 1) num_threads(n_dec)
++        for (SignedSize k = static_cast<SignedSize>(b0); k < static_cast<SignedSize>(b1); ++k)
++        {
++          try
++          {
++            TimsFrame& frame = handle->get_frame(ids[static_cast<size_t>(k)]);
++            int thread = 0;
++#ifdef _OPENMP
++            thread = omp_get_thread_num();
++#endif
++            DecodeSlot& s = slots[static_cast<size_t>(thread)];
++            if (frame.num_peaks > 0) decoded_batch[static_cast<size_t>(k) - b0].decode(*handle, frame, /*order_by_mz=*/true, s.context.get(), s.buffer.data());
++          }
++          catch (...)
++          {
++#pragma omp critical (BrukerTimsFile_DIAStreamingDecode)
++            {
++              if (!error) error = std::current_exception();
++            }
++          }
++        }
++        if (error) std::rethrow_exception(error);
++      }
++      for (size_t i = b0; i < b1; ++i)
++      {
+         TimsFrame& frame = handle->get_frame(frame_ids[i]);
+-        if (frame.num_peaks > 0) decoded.decode(*handle, frame, /*order_by_mz=*/true);
++        DecodedFrame& decoded = decoded_batch[i - b0];
++        if (n_dec <= 1 && frame.num_peaks > 0) decoded.decode(*handle, frame, /*order_by_mz=*/true);
+ 
+         for (const DIAWindow* win : dia_windows)
+         {
+@@ -3249,6 +3311,7 @@
+           }
+         }
+       }
++      } // the batch
+     }
+     endProgress();
+   }

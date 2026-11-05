@@ -57,6 +57,7 @@ These options trade run time against memory. They do not change the spectra, exc
 | `-perf:trace_bands` | 12 | Trace each isolation window's fragments in this many m/z bands in parallel. 1 turns it off. 0 picks the count automatically, which makes the output depend on the thread count; the integer detector refuses 0 when `-tile:rt_sec` is above 0 or a `.d` is streamed, as at the defaults. At least 0. **Changes the output.** |
 | `-perf:mem_fraction` | 0.75 | Share of the free memory that the isolation windows may use, checked again before each window starts. Free memory is the kernel's MemAvailable, or the headroom under a cgroup limit (Slurm `--mem`, a container; page cache counts as free) when that is lower; on macOS, free plus inactive memory. One window always runs, however large. 0.05 to 0.95. |
 | `-perf:max_concurrent_windows` | 0 | Most isolation windows processed at once. Fewer use less memory but take longer. 0: no cap (free memory still limits them). |
+| `-perf:decode_threads` | 0 | Threads that decode the Bruker MS2 frames ahead while a tile or the run is read (diaPASEF). 0: the reader's default; 1: serial. The spectra do not depend on it. |
 
 **Short of memory?** Keep `-tile:cells_per_tile 1`, lower `-perf:max_concurrent_windows` or `-perf:mem_fraction`, set
 `DIASPEXTRACT_PIPE_TILES=1` (see [Environment variables](#environment-variables)), and write `.mzML`, not `.mzpeak`.

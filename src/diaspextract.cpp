@@ -2866,6 +2866,8 @@ protected:
                               "or the headroom under a cgroup limit when lower (macOS: free plus inactive memory). One window always runs, however large.", false);
     registerIntOption_("perf:max_concurrent_windows", "<n>", 0, "Most isolation windows processed at once; fewer use less memory but take longer. 0 = "
                            "no cap (free memory still limits them).", false);
+    registerIntOption_("perf:decode_threads", "<n>", 0, "Threads that decode the Bruker MS2 frames ahead while a tile or the run is read "
+                           "(diaPASEF). 0 = the reader's default (up to 4); 1 = serial. The spectra do not depend on it.", false);
 
     registerTOPPSubsection_("diag", "Diagnostics");
     registerStringOption_("diag:dump_ms1_tsv", "<prefix>", "", "Write the MS1 traces and the precursors inferred from them to <prefix>.traces.tsv and "
@@ -4658,6 +4660,7 @@ protected:
     // the .d loader's configuration; set here because the dnoise setup below predicts the loader's m/z model from it
     BrukerTimsFile::Config cfg;
     cfg.ms1_n_neighbors     = getIntOption_("trace:native_ms1_neighbors");
+    cfg.dia_ms2_decode_threads = std::max(0, getIntOption_("perf:decode_threads"));   // [pipe] the tile reads copy cfg
     // [dnoise] dnoise v0.1.0's MS1 path on the raw frames (DnoiseRun), set up once for the run: every refusal the options
     // and the tdf can decide comes here, in milliseconds, before the load
     DnoiseRun dnoise;

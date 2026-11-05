@@ -585,6 +585,14 @@
       "advanced": false
     },
     {
+      "name": "perf:decode_threads",
+      "section": "perf",
+      "type": "int",
+      "default": "0",
+      "description": "Threads that decode the Bruker MS2 frames ahead while a tile or the run is read (diaPASEF). 0 = the reader's default (up to 4); 1 = serial. The spectra do not depend on it.",
+      "advanced": false
+    },
+    {
       "name": "charge:min_charge",
       "section": "charge",
       "type": "int",

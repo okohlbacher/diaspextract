@@ -2866,8 +2866,9 @@ protected:
                               "or the headroom under a cgroup limit when lower (macOS: free plus inactive memory). One window always runs, however large.", false);
     registerIntOption_("perf:max_concurrent_windows", "<n>", 0, "Most isolation windows processed at once; fewer use less memory but take longer. 0 = "
                            "no cap (free memory still limits them).", false);
-    registerIntOption_("perf:decode_threads", "<n>", 0, "Threads that decode the Bruker MS2 frames ahead while a tile or the run is read "
-                           "(diaPASEF). 0 = the reader's default (up to 4); 1 = serial. The spectra do not depend on it.", false);
+    registerIntOption_("perf:decode_threads", "<n>", 0, "Threads that decode the Bruker MS2 frames and slice them into the windows while "
+                           "the run or a tile is read (diaPASEF). 0 = all threads on the first read and the window team's free threads "
+                           "on the tile reads; n = a team of n threads for both; 1 = serial. The spectra do not depend on it.", false);
 
     registerTOPPSubsection_("diag", "Diagnostics");
     registerStringOption_("diag:dump_ms1_tsv", "<prefix>", "", "Write the MS1 traces and the precursors inferred from them to <prefix>.traces.tsv and "
@@ -4660,7 +4661,9 @@ protected:
     // the .d loader's configuration; set here because the dnoise setup below predicts the loader's m/z model from it
     BrukerTimsFile::Config cfg;
     cfg.ms1_n_neighbors     = getIntOption_("trace:native_ms1_neighbors");
-    cfg.dia_ms2_decode_threads = std::max(0, getIntOption_("perf:decode_threads"));   // [pipe] the tile reads copy cfg
+    // [pipe] the reader's own decode team: on the first pass nothing else runs, so all threads (perf:decode_threads 0);
+    // the pipelined tile reads below hand it the window team instead (dia_ms2_parallel_for)
+    cfg.dia_ms2_decode_threads = getIntOption_("perf:decode_threads") > 0 ? getIntOption_("perf:decode_threads") : n_threads_req;
     // [dnoise] dnoise v0.1.0's MS1 path on the raw frames (DnoiseRun), set up once for the run: every refusal the options
     // and the tdf can decide comes here, in milliseconds, before the load
     DnoiseRun dnoise;
@@ -5761,6 +5764,14 @@ protected:
         return t; };
       BrukerTimsFile::Config c2 = cfg;
       c2.load_ms1 = false; c2.dia_ms2_rt_lo = tile.lo; c2.dia_ms2_rt_hi = tile.hi;
+      // [pipe] On the pipelined driver the frames are decoded and sliced by the window team (teamFor_: free threads and
+      // windows at their break points help), not by a nested team that would put more threads than cores on the
+      // machine (libomp spins then: Windows, 12 threads, 4/8 nested decode threads: 8:33/10:19 instead of 7:58 min).
+      if (omp_in_parallel() && getIntOption_("perf:decode_threads") <= 0)
+      {
+        c2.dia_ms2_parallel_for = [](long n, const std::function<void(long, int)>& body) { teamFor_(n, 1, body); };
+        c2.dia_ms2_parallel_for_slots = omp_get_num_threads();
+      }
       BrukerTimsFile().loadDIAStreaming(in, tc, c2);   // a failure here is fatal: no fallback onto a half-read tile
       tc.finish();
       size_t n_del = 0, n_pad = 0, n_absent = 0, n_peaks = 0;

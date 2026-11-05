@@ -31,6 +31,10 @@
 
 ### Fixed
 
+- **Bruker diaPASEF input: the MS2 frames are read in parallel again, as in 1.8.4.** The Bruker reader of the new
+  OpenMS decodes them one after the other; a tenth OpenMS patch decodes them and slices them into their windows in
+  parallel, with the window team's free threads while a tile is read. `-perf:decode_threads` sets the threads; the
+  spectra do not change.
 - **`-threads` is at most the number of physical cores, and that is the default.** More threads only competed for the
   cores: at 64 threads on a 32-core Mac a run took 4 hours instead of 7 minutes, the threads spinning on a lock or in
   the OpenMP task scheduler. Hardware threads (SMT) count once, so a 64-core Linux node now runs 64 threads, not 128.

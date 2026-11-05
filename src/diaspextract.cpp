@@ -15,6 +15,7 @@
 #include <OpenMS/FORMAT/DATAACCESS/S3InputSource.h>   // [s3] -in s3://...
 #include <OpenMS/FORMAT/DATAACCESS/HTTPInputSource.h>   // redactURL: a URI may carry credentials
 #include <OpenMS/SYSTEM/File.h>
+#include <OpenMS/SYSTEM/SysInfo.h>   // getAvailablePhysicalCores: -threads default and cap
 #include <OpenMS/FORMAT/DATAACCESS/SwathFileConsumer.h>
 #include <OpenMS/FORMAT/DATAACCESS/MSDataWritingConsumer.h>
 #include <OpenMS/KERNEL/MSExperiment.h>
@@ -4485,12 +4486,26 @@ protected:
     {
       bool given = false;
       for (int i = 1; i < argc && !given; ++i) given = (String(argv[i]) == "-threads");
+      // the physical cores this process may use: affinity mask and cgroup quota (Linux), hw.physicalcpu (macOS),
+      // the affinity mask (Windows); SMT siblings count once
+      const int phys = (int)SysInfo::getAvailablePhysicalCores();
       if (!given && n_threads_req == 1)
       {
-        n_threads_req = std::max(1, (int)std::thread::hardware_concurrency());
+        n_threads_req = phys;
         omp_set_num_threads(n_threads_req);
         writeLogInfo_("-threads not given: using all " + String(n_threads_req) + " cores. Pass -threads <n> to use fewer, "
                       "for example on a shared machine.");
+      }
+      // [threads] More threads than physical cores only add SMT siblings and oversubscription: with libomp (macOS,
+      // Windows) an oversubscribed team stalls in lock hand-offs to descheduled threads (64 on 32 cores: 4 h instead of
+      // 7 min). Clamped, with a warning; the output does not depend on the thread count.
+      if (n_threads_req < 1) n_threads_req = phys;   // -threads 0 (the GUI's "all cores"): TOPPBase set the same count
+      if (n_threads_req > phys)
+      {
+        writeLogWarn_("-threads " + String(n_threads_req) + " is more than the " + String(phys) + " physical cores here: using "
+                      + String(phys) + ".");
+        n_threads_req = phys;
+        omp_set_num_threads(n_threads_req);
       }
     }
     // [s3] an s3:// input is copied to a local file once, then read like any other: the readers (mzPeak's libzip archive,

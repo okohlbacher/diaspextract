@@ -31,6 +31,10 @@
 
 ### Fixed
 
+- **`-threads` is at most the number of physical cores, and that is the default.** More threads only competed for the
+  cores: at 64 threads on a 32-core Mac a run took 4 hours instead of 7 minutes, the threads spinning on a lock or in
+  the OpenMP task scheduler. Hardware threads (SMT) count once, so a 64-core Linux node now runs 64 threads, not 128.
+  A larger `-threads` is lowered with a warning. The spectra do not change.
 - **macOS: isolation windows run in parallel.** macOS has no `/proc`, so the free-memory probe read 0 and the
   window loop admitted one window at a time ("admission high-water 1 of 64"), which cost about half the speed at
   every thread count. Free memory, RSS and peak RSS now come from Mach (`host_statistics64`, `task_info`,

@@ -230,7 +230,7 @@ apply to diaPASEF input only; input without ion mobility reads `-threads`, `-noi
 
 | setting | default | what it does |
 |---|---|---|
-| `-threads <n>` | all cores | worker threads; set it on a shared machine |
+| `-threads <n>` | all physical cores | worker threads, at most the physical cores; set it on a shared machine |
 | `-charge:min_charge` | 1 | lowest precursor charge written; 2 leaves out singly charged precursors |
 | `-tile:cells_per_tile` | 1 | 10-minute cells per tile; 0 processes the whole run as one tile, at several times the memory. The spectra do not change |
 | `-perf:max_concurrent_windows` | 0 (no cap) | most isolation windows processed at once; fewer use less memory and take longer |

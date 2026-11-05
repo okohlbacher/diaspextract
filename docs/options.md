@@ -35,7 +35,9 @@ Sections: [Input and output](#input-and-output) · [Speed and memory](#speed-and
 | `-out_type` | (empty) | Sets the output format instead of the `-out` extension. Values: empty, `mzML`, `mzpeak`. Empty follows the extension; an unknown extension gives mzPeak (mzML in a build without mzPeak support). |
 
 The standard OpenMS options work as usual: `-threads`, `-ini`, `-write_ini`, `-log`, `-no_progress` and `-debug`.
-If `-threads` is not on the command line, the tool uses every core; pass `-threads <n>` on a shared machine. A
+If `-threads` is not on the command line, the tool uses every physical core (hardware threads of one core, SMT, count
+once; a taskset, cpuset or cgroup quota is respected); pass `-threads <n>` on a shared machine. A value above the
+physical cores is lowered to them, with a warning: more threads only compete for the cores. A
 `threads` value above 1 in an ini file still applies, but `threads 1` in an ini file counts as unset. To run on one
 core, pass `-threads 1` on the command line.
 

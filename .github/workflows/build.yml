@@ -500,9 +500,11 @@ jobs:
             macOS)   cmake "${ARGS[@]}" -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOS_FLOOR" \
                        -DCMAKE_PREFIX_PATH="$LIBXML2;$BREW;$LIBOMP" -DOpenMP_ROOT="$LIBOMP" ;;
             # /Z7 + /DEBUG: a PDB for the stack trace below; the code is the same.
-            Windows) cmake "${ARGS[@]}" -DCMAKE_CXX_COMPILER="$CLANG_CL" \
+            # C too: mimalloc is a C project, and CMake would otherwise pick clang.exe, which rejects MSVC flags
+            Windows) cmake "${ARGS[@]}" -DCMAKE_CXX_COMPILER="$CLANG_CL" -DCMAKE_C_COMPILER="$CLANG_CL" \
                        -DCMAKE_PREFIX_PATH="$CONDA_LIB" -DOpenMP_ROOT="$LLVM_DIR" \
-                       "-DCMAKE_CXX_FLAGS_RELEASE=-O2 -Ob2 -DNDEBUG -Z7" -DCMAKE_EXE_LINKER_FLAGS_RELEASE=-DEBUG ;;   # dashes: Git Bash rewrites /O2 into a path
+                       "-DCMAKE_CXX_FLAGS_RELEASE=-O2 -Ob2 -DNDEBUG -Z7" "-DCMAKE_C_FLAGS_RELEASE=-O2 -Ob2 -DNDEBUG -Z7" \
+                       -DCMAKE_EXE_LINKER_FLAGS_RELEASE=-DEBUG -DCMAKE_SHARED_LINKER_FLAGS_RELEASE=-DEBUG ;;   # dashes: Git Bash rewrites /O2 into a path
           esac
           cmake --build diaspextract/build --parallel "$NPROC"
 

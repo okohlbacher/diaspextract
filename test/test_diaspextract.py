@@ -261,12 +261,24 @@ def synth_fake_d(d, calib_sql=None):
     return d
 
 
+RUN_TIMEOUT = int(os.environ.get("DIASPEXTRACT_TEST_RUN_TIMEOUT", "900"))
+
+
 def run(binary, inp, out, extra=(), threads=1, expect_fail=False, env=None):
     cmd = [binary, "-in", inp, "-out", out, "-threads", str(threads),
            "-assembly:min_fragments", "2",
            "-trace:ms2_min_length_sec", "0", "-trace:ms1_split_valleys", "0",
            "-trace:ms2_split_valleys", "0"] + list(extra)
-    r = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    # a hung run fails after RUN_TIMEOUT seconds with its log tail and, on macOS, a stack sample of the process
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env) as p:
+        try:
+            out_, err_ = p.communicate(timeout=RUN_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            if sys.platform == "darwin":
+                print(subprocess.run(["sample", str(p.pid), "5"], capture_output=True, text=True).stdout[-20000:])
+            p.kill(); out_, err_ = p.communicate()
+            raise AssertionError(f"run hung for {RUN_TIMEOUT} s: {' '.join(cmd)}\n" + out_[-3000:] + "\n--- stderr:\n" + err_[-1500:])
+    r = subprocess.CompletedProcess(cmd, p.returncode, out_, err_)
     if expect_fail:
         assert r.returncode != 0, "expected a non-zero exit, got success:\n" + r.stdout[-800:]
         return r

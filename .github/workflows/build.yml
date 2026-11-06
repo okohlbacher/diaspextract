@@ -619,7 +619,7 @@ jobs:
           set -euo pipefail
           [ "$RUNNER_OS" != Windows ] || export PATH="$DLL_PATH:$PATH"
           export OPENMS_DATA_PATH="$OMS_SHARE"
-          "$PY" diaspextract/test/test_diaspextract.py "$BIN" "$RT/e2e" | tee "$RT/e2e.log"
+          "$PY" -u diaspextract/test/test_diaspextract.py "$BIN" "$RT/e2e" | tee "$RT/e2e.log"
           grep -q 'PASS  a real diaPASEF .d' "$RT/e2e.log" || { echo "::error::the real .d check did not run"; exit 1; }
 
       # A crash on Windows prints nothing: rerun the synthetic case under cdb for the faulting stack.

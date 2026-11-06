@@ -44,6 +44,7 @@
 #include <cstdio>
 #include <fstream>
 #include <atomic>
+#include <deque>
 #include <mutex>
 #include <thread>
 #include <map>
@@ -2866,8 +2867,8 @@ protected:
                               "or the headroom under a cgroup limit when lower (macOS: free plus inactive memory). One window always runs, however large.", false);
     registerIntOption_("perf:max_concurrent_windows", "<n>", 0, "Most isolation windows processed at once; fewer use less memory but take longer. 0 = "
                            "no cap (free memory still limits them).", false);
-    registerIntOption_("perf:decode_threads", "<n>", 0, "Threads that decode the Bruker MS2 frames and slice them into the windows while "
-                           "the run or a tile is read (diaPASEF). 0 = all threads on the first read and the window team's free threads "
+    registerIntOption_("perf:decode_threads", "<n>", 0, "Threads that decode the Bruker frames (MS1 on the first read; MS2, sliced into the windows, "
+                           "when the run or a tile is read; diaPASEF). 0 = all threads on the first read and the window team's free threads "
                            "on the tile reads; n = a team of n threads for both; 1 = serial. The spectra do not depend on it.", false);
 
     registerTOPPSubsection_("diag", "Diagnostics");
@@ -4664,6 +4665,7 @@ protected:
     // [pipe] the reader's own decode team: on the first pass nothing else runs, so all threads (perf:decode_threads 0);
     // the pipelined tile reads below hand it the window team instead (dia_ms2_parallel_for)
     cfg.dia_ms2_decode_threads = getIntOption_("perf:decode_threads") > 0 ? getIntOption_("perf:decode_threads") : n_threads_req;
+    cfg.ms1_decode_threads = cfg.dia_ms2_decode_threads;   // the first pass reads the MS1 frames; the reader's own default is 4
     // [dnoise] dnoise v0.1.0's MS1 path on the raw frames (DnoiseRun), set up once for the run: every refusal the options
     // and the tdf can decide comes here, in milliseconds, before the load
     DnoiseRun dnoise;
@@ -5734,7 +5736,17 @@ protected:
       vector<vector<MSSpectrum>> win_out;
       Size win_done = 0;
       std::atomic<size_t> left{0};
+      size_t claim_next = 0, claim_end = 0;   // [pipe] its windows' claims in `claims` (the driver's own bookkeeping)
     };
+    // [pipe] A window admitted on the pipelined loop is CLAIMED by whoever starts it first: its task, or the driver while it
+    // waits for that window's tile (runClaimed below). The claims outlive the tiles (a task whose window the driver
+    // ran may still be queued when the tile is written); a deque keeps their addresses while the driver appends.
+    struct WinClaim
+    {
+      TileRun* R; long wi; size_t need; std::atomic<bool> taken{false};
+      WinClaim(TileRun* r, long w, size_t n) : R(r), wi(w), need(n) {}
+    };
+    std::deque<WinClaim> claims;
     auto loadTile = [&](TileRun& R)
     {
     const size_t tk = R.tk;
@@ -5842,6 +5854,7 @@ protected:
     auto admitTile = [&](TileRun* R)
     {
     auto* rw = &runWindow;
+    R->claim_next = R->claim_end = claims.size();
     for (long wi = 0; wi < (long)R->wl.size() && !pipe_abort.load(); ++wi)
     {
       const size_t need = project(*R->wl[wi].second);
@@ -5868,8 +5881,18 @@ protected:
       }
       inflight += need; ++active;
       if (active.load() > adm_hwm.load()) adm_hwm.store(active.load());
-      #pragma omp task default(none) firstprivate(rw, R, wi, need)
-      (*rw)(R, wi, need);
+      if (pipe)
+      {
+        WinClaim* c = &claims.emplace_back(R, wi, need);
+        R->claim_end = claims.size();
+        #pragma omp task default(none) firstprivate(rw, c)
+        if (!c->taken.exchange(true, std::memory_order_acq_rel)) (*rw)(c->R, c->wi, c->need);
+      }
+      else
+      {
+        #pragma omp task default(none) firstprivate(rw, R, wi, need)
+        (*rw)(R, wi, need);
+      }
     }
     };   // admitTile
     runWindow = [&](TileRun* R, const long wi, const size_t need)
@@ -6387,6 +6410,27 @@ protected:
             admitTile(runs[next].get());
           }
         };
+        // [pipe] While it waits for tile R's windows the driver runs one that no thread has started yet, in a task of
+        // its own (if(0): undeferred, on this thread) so that the window's taskwaits and taskgroups wait only for the
+        // window's own tasks, never for the other windows and writers, which are children of the driver's implicit task.
+        // Only windows of the tile it waits for: their carry came from the previous tile, whose windows are all done, so
+        // the window never waits for another. Its passes run as tasks again (parTasks_), off the driver flag.
+        auto runClaimed = [&](TileRun& R) -> bool
+        {
+          for (; R.claim_next < R.claim_end; ++R.claim_next)
+          {
+            WinClaim* c = &claims[R.claim_next];
+            if (c->taken.exchange(true, std::memory_order_acq_rel)) continue;
+            ++R.claim_next;
+            auto* rw = &runWindow;
+            onPipeDriver_() = false;
+            #pragma omp task if(0) default(none) firstprivate(rw, c)
+            (*rw)(c->R, c->wi, c->need);
+            onPipeDriver_() = true;
+            return true;
+          }
+          return false;
+        };
         onPipeDriver_() = !solo;   // no taskloop on the driver (parTasks_); solo runs its windows itself anyway
         try
         {
@@ -6406,8 +6450,8 @@ protected:
             {
               #pragma omp taskwait
             }
-            while (R.left.load(std::memory_order_acquire) != 0 && !pipe_abort.load())
-              if (!teamAssist_(8)) std::this_thread::sleep_for(std::chrono::milliseconds(1));   // help the writer meanwhile
+            while (R.left.load(std::memory_order_acquire) != 0 && !pipe_abort.load())   // help the reader or writer, else run a window
+              if (!teamAssist_(8) && (solo || !runClaimed(R))) std::this_thread::sleep_for(std::chrono::milliseconds(1));
             if (pipe_abort.load()) break;
             if (solo) writeTile(fin);
             else

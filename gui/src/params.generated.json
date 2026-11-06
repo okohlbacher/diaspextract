@@ -589,7 +589,7 @@
       "section": "perf",
       "type": "int",
       "default": "0",
-      "description": "Threads that decode the Bruker MS2 frames and slice them into the windows while the run or a tile is read (diaPASEF). 0 = all threads on the first read and the window team's free threads on the tile reads; n = a team of n threads for both; 1 = serial. The spectra do not depend on it.",
+      "description": "Threads that decode the Bruker frames (MS1 on the first read; MS2, sliced into the windows, when the run or a tile is read; diaPASEF). 0 = all threads on the first read and the window team's free threads on the tile reads; n = a team of n threads for both; 1 = serial. The spectra do not depend on it.",
       "advanced": false
     },
     {

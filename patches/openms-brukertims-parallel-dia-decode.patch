@@ -3,11 +3,12 @@ batches; the spectra go to the consumer in (frame, window) order afterwards, as 
 them. The reader of the 3.7 pin does all of it serially, which starved DIAspeXtract's pipelined tile reads at high
 thread counts (1.8.4's patched reader had the parallel batches). Config::dia_ms2_decode_threads sizes the reader's own
 team (0 = up to 4); Config::dia_ms2_parallel_for lets a caller in a parallel region run the batches on its own threads
-instead of a nested team.
+instead of a nested team. Config::ms1_decode_threads sizes the team that decodes the MS1 frames ahead (RawFrameReader,
+0 = up to 4 as before), so a caller with many cores can give its MS1 pass more of them.
 
 --- a/src/openms/include/OpenMS/FORMAT/BrukerTimsFile.h
 +++ b/src/openms/include/OpenMS/FORMAT/BrukerTimsFile.h
-@@ -116,6 +116,18 @@
+@@ -116,7 +116,23 @@
                                             ///< (feature detection, quantification): the MS2 frames are then
                                             ///< not decoded and, for DDA, the precursor table is not read.
                                             ///< Affects all export modes.
@@ -17,18 +18,51 @@ instead of a nested team.
 +      /// their order do not depend on it. Called from a parallel region, the threads form a nested team.
 +      int dia_ms2_decode_threads = 0;
 +
++      /// Threads that decode ahead, in parallel, the MS1 frames that become spectra as they are (not aggregated
++      /// with neighbours, not centroided). 0: up to 4; 1: serial. The spectra and their order do not depend on it.
++      int ms1_decode_threads = 0;
+ 
 +      /// Instead of a team of its own: runs body(i, slot) for every i in [0, n), in parallel as the caller sees
 +      /// fit, with slot < dia_ms2_parallel_for_slots and unique among the calls running at the same time (e.g. the
 +      /// caller's thread number). For a caller already in a parallel region whose threads should do the work rather
 +      /// than a nested team. Ignored with the converters of the Bruker SDK.
 +      std::function<void(long n, const std::function<void(long i, int slot)>& body)> dia_ms2_parallel_for;
 +      int dia_ms2_parallel_for_slots = 0;
- 
++
        /// Frame ID range filter (inclusive). Only frames with
        /// frame_id_min <= Id <= frame_id_max are read; all peak data for frames
+       /// outside the range is skipped, so memory and I/O scale with the range,
 --- a/src/openms/source/FORMAT/BrukerTimsFile.cpp
 +++ b/src/openms/source/FORMAT/BrukerTimsFile.cpp
-@@ -3208,46 +3208,132 @@
+@@ -2526,7 +2526,8 @@
+   {
+   public:
+     /// @param frames frame id and MS level of the frames, in the order of the next() calls
+-    RawFrameReader(TimsDataHandle& handle, std::vector<std::pair<uint32_t, int>> frames) :
++    /// @param max_threads threads that decode ahead; 0: up to MAX_THREADS
++    RawFrameReader(TimsDataHandle& handle, std::vector<std::pair<uint32_t, int>> frames, int max_threads = 0) :
+       handle_(handle),
+       frames_(std::move(frames))
+     {
+@@ -2540,7 +2541,7 @@
+       constexpr int MAX_THREADS = 4;
+       int n_threads = 1;
+ #ifdef _OPENMP
+-      if (!sdk) n_threads = std::min(MAX_THREADS, std::max(1, omp_get_max_threads()));
++      if (!sdk) n_threads = max_threads > 0 ? max_threads : std::min(MAX_THREADS, std::max(1, omp_get_max_threads()));
+ #endif
+       n_threads = static_cast<int>(std::min<size_t>(static_cast<size_t>(n_threads), std::max<size_t>(1, frames_.size())));
+       workers_.resize(static_cast<size_t>(n_threads));
+@@ -2996,7 +2997,7 @@
+       std::vector<std::pair<uint32_t, int>> frames;
+       frames.reserve(indices.size());
+       for (const size_t i : indices) frames.emplace_back(ms1_frame_ids_[i], 1);
+-      raw_ = std::make_unique<RawFrameReader>(handle_, std::move(frames));
++      raw_ = std::make_unique<RawFrameReader>(handle_, std::move(frames), config_.ms1_decode_threads);
+     }
+ 
+     /// readInOrder() for the first @p n frames, in the order of ms1_frame_ids
+@@ -3208,46 +3209,132 @@
  
      startProgress(0, total_work, "Streaming DIA-PASEF MS2 frames");
      Size progress_count = 0;
@@ -103,7 +137,14 @@ instead of a nested team.
 -          addWindowPeaksByMZ(decoded, in_window, spec, im_array);
 -
 -          if (!spec.empty())
--          {
++          TimsFrame& frame = handle->get_frame(ids[i]);
++          std::vector<MSSpectrum>& specs = out[i - b0];
++          specs.clear();
++          if (frame.num_peaks == 0) return;
++          s.decoded.decode(*handle, frame, /*order_by_mz=*/true, s.context.get(), s.buffer.empty() ? nullptr : s.buffer.data());
++          specs.resize(dia_windows.size());
++          for (size_t w = 0; w < dia_windows.size(); ++w)
+           {
 -            spec.getFloatDataArrays().push_back(std::move(im_array));
 -            spec.setIMPeakType(IMPeakType::IM_PROFILE);
 -            // OpenSwath's chromatogram extraction assumes m/z-sorted input (see the matching comment
@@ -112,14 +153,6 @@ instead of a nested team.
 -            spec.sortByPosition();
 -            polarity.apply(spec);
 -            callConsumer([&] { consumer.consumeSpectrum(spec); });
-+          TimsFrame& frame = handle->get_frame(ids[i]);
-+          std::vector<MSSpectrum>& specs = out[i - b0];
-+          specs.clear();
-+          if (frame.num_peaks == 0) return;
-+          s.decoded.decode(*handle, frame, /*order_by_mz=*/true, s.context.get(), s.buffer.empty() ? nullptr : s.buffer.data());
-+          specs.resize(dia_windows.size());
-+          for (size_t w = 0; w < dia_windows.size(); ++w)
-+          {
 +            MSSpectrum& spec = specs[w];
 +            initDIAWindowSpectrum(frame, *dia_windows[w], spec);
 +            DataArrays::FloatDataArray im_array;

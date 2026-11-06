@@ -141,10 +141,10 @@ jobs:
           - { name: linux-x64,   runner: ubuntu-24.04,     archive: tar.gz }
           - { name: linux-arm64, runner: ubuntu-24.04-arm, archive: tar.gz }
           # macos_floor is the deployment target of the tool and libOpenMS, and the highest minos any bundled Mach-O
-          # may carry. Homebrew bottles carry the runner's macOS as minos, so the floor is the runner's: 14 on
-          # macos-14, 15 on macos-15-intel (macos-13 is retired and wedges queues). Lowering it means taking the
+          # may carry. Homebrew bottles carry the runner's macOS as minos, so the floor is the runner's:
+          # 15 on macos-15 and macos-15-intel (macos-13 and macos-14 are retired). Lowering it means taking the
           # dependencies from conda-forge instead.
-          - { name: macos-arm64, runner: macos-14,       archive: tar.gz, macos_floor: '14.0' }
+          - { name: macos-arm64, runner: macos-15,       archive: tar.gz, macos_floor: '15.0' }
           - { name: macos-x64,   runner: macos-15-intel, archive: tar.gz, macos_floor: '15.0' }
           - { name: windows-x64, runner: windows-2022,   archive: zip }
     defaults:
@@ -304,7 +304,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           set -euo pipefail
-          # OpenMS 3.7 wants Apple Clang 16 (C++23): the macos-14 image defaults to Xcode 15, the newest Xcode 16 is there too
+          # OpenMS 3.7 wants Apple Clang 16 (C++23): pick an Xcode 16 if the image defaults to an older one
           xc=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1 || true)
           if [ "$(xcrun clang --version | sed -n 's/.*clang version \([0-9]*\).*/\1/p')" -lt 16 ]; then
             [ -n "$xc" ] || { echo "::error::no Xcode 16 on this runner"; exit 1; }
@@ -1127,7 +1127,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: macos-arm64, runner: macos-14,       cli: tar.gz, ext: .dmg,       macos_floor: '14.0' }
+          - { name: macos-arm64, runner: macos-15,       cli: tar.gz, ext: .dmg,       macos_floor: '15.0' }
           - { name: macos-x64,   runner: macos-15-intel, cli: tar.gz, ext: .dmg,       macos_floor: '15.0' }
           - { name: windows-x64, runner: windows-2022,   cli: zip,    ext: -setup.exe }
           - { name: linux-x64,   runner: ubuntu-24.04,   cli: tar.gz, ext: .deb }

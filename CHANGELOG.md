@@ -22,6 +22,9 @@
 
 ### Changed
 
+- **Apple silicon builds need macOS 15 or newer** (was 14): GitHub retired its macOS 14 build machines, and the bundled
+  Homebrew libraries carry the build machine's macOS as their minimum.
+
 - **OpenMS 3.7.0-pre** (develop `d60780f6`, 2026-11-04) instead of the April commit. Two of the ten OpenMS patches are
   upstream now (Biosaur2 speed, thread-safe exceptions) and are gone, one is new (Percolator's Windows includes, for
   clang-cl); the Bruker reader patch is rebuilt on the new

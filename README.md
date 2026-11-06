@@ -98,7 +98,7 @@ platforms and a `SHA256SUMS` file:
 |---|---|---|
 | Linux x86-64 | `DIAspeXtract-linux-x64.tar.gz` | glibc 2.39 or newer (Ubuntu 24.04, Debian 13, RHEL 10) |
 | Linux arm64 | `DIAspeXtract-linux-arm64.tar.gz` | the same |
-| macOS, Apple silicon | `DIAspeXtract-macos-arm64.dmg` or `.tar.gz` | macOS 14 or newer |
+| macOS, Apple silicon | `DIAspeXtract-macos-arm64.dmg` or `.tar.gz` | macOS 15 or newer |
 | macOS, Intel | `DIAspeXtract-macos-x64.dmg` or `.tar.gz` | macOS 15 or newer |
 | Windows x64 | `DIAspeXtract-windows-x64.zip` | Windows 10 or newer |
 
@@ -117,7 +117,7 @@ For those who would rather not use a terminal, each release also carries a deskt
 
 | platform | asset |
 |---|---|
-| macOS, Apple silicon | `DIAspeXtract-GUI-macos-arm64.dmg` (macOS 14 or newer) |
+| macOS, Apple silicon | `DIAspeXtract-GUI-macos-arm64.dmg` (macOS 15 or newer) |
 | macOS, Intel | `DIAspeXtract-GUI-macos-x64.dmg` (macOS 15 or newer) |
 | Windows x64 | `DIAspeXtract-GUI-windows-x64-setup.exe` |
 | Linux x86-64 | `DIAspeXtract-GUI-linux-x64.deb` |

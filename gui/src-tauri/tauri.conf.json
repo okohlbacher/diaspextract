@@ -23,7 +23,7 @@
     "shortDescription": "Pseudo-MS/MS spectra from DIA data",
     "copyright": "Copyright (c) 2026 Oliver Kohlbacher and contributors",
     "license": "BSD-3-Clause",
-    "macOS": { "minimumSystemVersion": "14.0" },
+    "macOS": { "minimumSystemVersion": "15.0" },
     "linux": { "deb": { "depends": [] } }
   }
 }

@@ -53,7 +53,17 @@ instead of a nested team. Config::ms1_decode_threads sizes the team that decodes
  #endif
        n_threads = static_cast<int>(std::min<size_t>(static_cast<size_t>(n_threads), std::max<size_t>(1, frames_.size())));
        workers_.resize(static_cast<size_t>(n_threads));
-@@ -2996,7 +2997,7 @@
+@@ -2587,7 +2588,8 @@
+       // The next frames, up to one large frame per thread. Small frames (MS2 frames of a few thousand
+       // peaks) are not worth a thread of their own; a batch without two large frames is decoded serially.
+       constexpr uint32_t LARGE_FRAME = 20000; // peaks
+-      const size_t max_frames = 64 * workers_.size();
++      // at most 256 frames (64 per thread of the default 4): a batch of small frames is decoded serially and held whole
++      const size_t max_frames = std::min<size_t>(256, 64 * workers_.size());
+       size_t n = 0, n_large = 0;
+       while (n_decoded_ + n < frames_.size() && n < max_frames && n_large < workers_.size())
+       {
+@@ -2996,7 +2998,7 @@
        std::vector<std::pair<uint32_t, int>> frames;
        frames.reserve(indices.size());
        for (const size_t i : indices) frames.emplace_back(ms1_frame_ids_[i], 1);
@@ -62,13 +72,13 @@ instead of a nested team. Config::ms1_decode_threads sizes the team that decodes
      }
  
      /// readInOrder() for the first @p n frames, in the order of ms1_frame_ids
-@@ -3208,46 +3209,132 @@
+@@ -3208,46 +3210,132 @@
  
      startProgress(0, total_work, "Streaming DIA-PASEF MS2 frames");
      Size progress_count = 0;
 -    DecodedFrame decoded;
 -    std::vector<char> in_window; // per scan of the frame: within the ion mobility limits of the window?
-+
+ 
 +    // A batch of frames is decoded and sliced into the spectra of their windows in parallel, each thread with its
 +    // own decompression context, buffer and scan mask (as RawFrameReader does for the other loaders); the spectra
 +    // are handed to the consumer afterwards, one by one in (frame, window) order: the spectra and their order are
@@ -104,7 +114,7 @@ instead of a nested team. Config::ms1_decode_threads sizes the team that decodes
 +      }
 +    }
 +    constexpr size_t BATCH = 256; // frames; a frame gives one spectrum per window of its group
- 
++
      for (const auto& [group, frame_ids] : group_to_frames)
      {
        auto wit = group_to_windows.find(group);
@@ -169,12 +179,12 @@ instead of a nested team. Config::ms1_decode_threads sizes the team that decodes
 +              spec.sortByPosition();
 +              polarity.apply(spec);
 +            }
-           }
++          }
 +        };
 +        if (caller_for)
 +        {
 +          eff.dia_ms2_parallel_for(static_cast<long>(b1 - b0), [&](long k, int slot) { sliceFrame(b0 + static_cast<size_t>(k), slots[static_cast<size_t>(slot)]); });
-         }
++        }
 +        else if (n_dec > 1)
 +        {
 +          // every thread has its own slot; exceptions must not leave the parallel region
@@ -197,9 +207,9 @@ instead of a nested team. Config::ms1_decode_threads sizes the team that decodes
 +                if (!error) error = std::current_exception();
 +              }
 +            }
-+          }
+           }
 +          if (error) std::rethrow_exception(error);
-+        }
+         }
 +        else
 +        {
 +          sliceFrame(b0, slots[0]);

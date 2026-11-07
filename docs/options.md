@@ -50,7 +50,7 @@ These options trade run time against memory. They do not change the spectra, exc
 |---|---|---|
 | `-tile:rt_sec` | 600 | Width (seconds) of the fixed retention-time cells the integer detector works in. A trace that crosses a cell edge is cut there. 0 or negative: the whole run is one cell and one tile, at several times the memory. Ignored with `-trace:detector openms`. **Changes the output.** |
 | `-tile:cells_per_tile` | 1 | Process the run in tiles of this many cells. Fewer cells per tile use less memory. 0: the whole run is one tile, at several times the memory. mzPeak output always runs as one tile. |
-| `-perf:malloc_trim` | `true` | Return freed memory to the system between steps and tiles (Linux only). This lowers peak memory at some extra run time. Set `false` when time matters more than memory. Values: `true`, `false`. |
+| `-perf:malloc_trim` | `true` | Return freed memory to the system between steps, and between tiles when free memory is below the tool's own footprint (Linux only). This lowers peak memory at some extra run time. Set `false` when time matters more than memory. Values: `true`, `false`. |
 | `-perf:stream_load` | `true` | Read the input frame by frame (`.d`, or mzPeak in a build with mzPeak support; mzML is always read whole). `false` loads the whole run first, which needs much more memory and takes longer. Values: `true`, `false`. **Changes the output.** |
 | `-perf:ms1_trace_bands` | 48 | Trace MS1 in this many m/z bands in parallel. 1 turns it off; 0 counts as 1. At least 0. **Changes the output** slightly. |
 | `-perf:ms1_prune` | `true` | Drop MS1 peaks at or below `-trace:noise_threshold_int` while loading, which saves memory. `false` keeps every peak. Values: `true`, `false`. |

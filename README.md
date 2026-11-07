@@ -143,7 +143,7 @@ cd diaspextract
 # 1. OpenMS at the pinned commit, patched, then built. No released package works.
 git clone https://github.com/OpenMS/OpenMS.git /path/to/OpenMS
 git -C /path/to/OpenMS checkout $(sed -n 's/^OPENMS_BASE=//p' patches/openms.lock)
-scripts/apply_openms_patches.sh /path/to/OpenMS                 # installs two headers, applies ten patches
+scripts/apply_openms_patches.sh /path/to/OpenMS                 # installs two headers, applies eleven patches
 cmake -S /path/to/OpenMS -B /path/to/OpenMS/build -DCMAKE_BUILD_TYPE=Release \
       -DWITH_OPENTIMS=ON -DWITH_THERMO_RAW=ON -DWITH_GUI=OFF -DHAS_XSERVER=OFF \
       -DCMAKE_CXX_FLAGS=-ffp-contract=off   # same spectra on every platform (clang-cl: /clang:-ffp-contract=off)
@@ -162,14 +162,14 @@ OpenMS and the tool with clang-cl, not cl.
 The OpenMS build needs the .NET SDK (8 or newer) for the Thermo `.raw` reader, and an Arrow built with S3 support for
 `s3://` input. Running `.raw` input needs a .NET runtime, 8 or newer: a release bundle carries its own in `dotnet/`.
 
-`scripts/apply_openms_patches.sh` applies the ten small OpenMS patches in `patches/`. They give the Bruker reader the
+`scripts/apply_openms_patches.sh` applies the eleven small OpenMS patches in `patches/`. They give the Bruker reader the
 acquisition's exact m/z calibration and the run's DIA frame table, decode its DIA frames in parallel, let the tool set
-the scan time that peak splitting uses, make tracing and mzML writing faster on many threads, and let `--help` point at
+the scan time that peak splitting uses, make tracing, ion-mobility peak picking and mzML writing faster on many threads, and let `--help` point at
 this repository. Two make the spectra the same on every platform: the
 ion-mobility peak picker orders equal intensities by index (its `std::sort`
 left them to the standard library), and the trace detection and smoothing take `exp` and `log` from
 `src/PortableMath.h` instead of the platform's math library. Two let clang-cl compile OpenMS on Windows. Apply all
-ten: leaving one out stops the build, changes the spectra or slows the run.
+eleven: leaving one out stops the build, changes the spectra or slows the run.
 
 A normal run needs no environment variables; the ones a user may set are listed in [docs/options.md](docs/options.md).
 A leftover `SPEXTRACTOR_*` or `DIASPEXTRACTOR_*` variable from an earlier release makes the tool refuse to start and
@@ -269,7 +269,7 @@ grep -a 'spx:' pseudo.mzML
 ```
 gui/        the desktop app (Tauri): React front end, Rust backend, Playwright tests
 src/        the tool and its headers: m/z calibration, .d metadata reader, MS1 denoiser, mzPeak loader, the path for input without ion mobility
-patches/    the ten OpenMS patches, the pinned OpenMS commit (openms.lock) and mzPeak build helpers
+patches/    the eleven OpenMS patches, the pinned OpenMS commit (openms.lock) and mzPeak build helpers
 scripts/    OpenMS patch application, mzPeak library build, option-name check
 test/       the end-to-end tests
 tests/      the unit tests and calibration checks

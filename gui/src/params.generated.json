@@ -517,7 +517,7 @@
       "section": "perf",
       "type": "string",
       "default": "true",
-      "description": "Return freed memory to the system between phases and tiles (Linux/glibc only). Lowers peak memory at some extra run time; set false when run time matters more.",
+      "description": "Return freed memory to the system between phases, and between tiles when free memory is below the tool's own footprint (Linux/glibc only). Lowers peak memory at some extra run time; set false when run time matters more.",
       "advanced": false,
       "choices": [
         "true",

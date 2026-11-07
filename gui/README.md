@@ -42,7 +42,7 @@ The end-to-end suite drives the built app over the Chrome DevTools protocol, whi
 Windows (build.yml, desktop job, against the installed app):
 
 ```bash
-DX_E2E_APP=...\diaspextract-gui.exe DX_E2E_INPUT=synth.mzML DX_E2E_VERSION=1.9.0 npm run test:e2e
+DX_E2E_APP=...\diaspextract-gui.exe DX_E2E_INPUT=synth.mzML DX_E2E_VERSION=1.9.1 npm run test:e2e
 ```
 
 On macOS and Linux CI starts the CLI from inside the finished app instead.

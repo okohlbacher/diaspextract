@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.9.1 — 2026-11-07
+
+**The spectra do not change**: on the diaPASEF test runs they are 1.9.0's, bit for bit, at every thread count.
+
+### Changed
+
+- **Faster on many threads.** On a 64-core EPYC the diaPASEF HeLa benchmark run takes 1:40.5 at 64 threads (1.9.0:
+  1:44), 2:40 at 32 (2:43), 4:41 at 16 (4:45) and 8:11 at 8 (8:27):
+  - The first read decodes the MS1 frames on all threads (1.9.0: a team of 4, the reader's default).
+  - While the windows of a tile run, the thread that reads the tiles also runs windows of that tile instead of waiting.
+  - The ion-mobility peak picker keeps its working buffers per thread between frames instead of allocating them for
+    every frame (new patch `openms-pickerim-scratch.patch`; a thread keeps at most about 23 MB).
+  - Between tiles, `perf:malloc_trim` returns memory to the system only when free memory is below the tool's own
+    footprint, as on 16-32 GB machines. Each of these trims took 0.4-0.9 s at 64 threads, and the next tile faulted
+    the pages back in. Peak memory at 64 threads rises from 9.5 to 10.8 GB.
+- The reader's MS1 decode works in batches of at most 256 frames whatever its thread count, which bounds its memory.
+
 ## v1.9.0 — 2026-11-04
 
 **The spectra do not change**: on the diaPASEF test run they are 1.8.4's, bit for bit, on the new OpenMS.

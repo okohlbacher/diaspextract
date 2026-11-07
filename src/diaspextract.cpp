@@ -99,7 +99,7 @@ static inline double spxFileTimeSec_(FILETIME a, FILETIME b)   // two FILETIMEs 
 // The release version. The standalone CMake build passes it from project(VERSION); the in-tree
 // OpenMS build does not, so the fallback here is the same number.
 #ifndef DIASPEXTRACT_VERSION
-#define DIASPEXTRACT_VERSION "1.9.0"
+#define DIASPEXTRACT_VERSION "1.9.1"
 #endif
 
 using namespace OpenMS;
@@ -2780,8 +2780,8 @@ protected:
     // NB: "threads" is reserved by TOPPBase (the standard -threads option), so this lives under "perf".
 
     regBool("perf:malloc_trim", "true",
-                          "Return freed memory to the system between phases and tiles (Linux/glibc only). Lowers peak memory at some extra run time; set "
-                          "false when run time matters more.");
+                          "Return freed memory to the system between phases, and between tiles when free memory is below the tool's own "
+                          "footprint (Linux/glibc only). Lowers peak memory at some extra run time; set false when run time matters more.");
     regBool("perf:stream_load", "true",
                           "Read the input frame by frame (Bruker .d, or mzPeak in a build that supports it; mzML is always read whole). false loads "
                           "the whole run first: much more memory and a longer run. Changes the output.");
@@ -6344,7 +6344,11 @@ protected:
     // trim above runs only when there is one tile -- so a tiled loop's RSS would ratchet toward the arena pass 1 sized.
     // After tile k is written, before tile k+1 is read. Output-identical.
     // [pipe] Pipelined, the later tiles in flight keep their pages: the trim returns what tile k left behind.
-    if (trim_on && tk + 1 < tiles.size()) trimLogged_("tile " + String(tk + 1) + "/" + String(tiles.size()));
+    // [no-trim] Only under memory pressure, when the headroom (MemAvailable, cgroup) is below our own RSS: each trim took
+    // 0.4-0.9 s at 64 threads and the next tile faulted the pages back in (64 threads: 2.4 s wall, a third of the page
+    // faults; peak RSS +0.5-1 GB). Where memory is short, as on 16-32 GB machines, it still trims every tile.
+    if (trim_on && tk + 1 < tiles.size() && availableBytes_() < (size_t)std::max(0L, rss_mb_()) * (size_t)(1 << 20))
+      trimLogged_("tile " + String(tk + 1) + "/" + String(tiles.size()) + " (memory pressure)");
 #endif
     };   // finishTile
 

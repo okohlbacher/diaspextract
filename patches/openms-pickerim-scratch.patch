@@ -1,0 +1,82 @@
+--- a/src/openms/source/PROCESSING/CENTROIDING/PeakPickerIM.cpp
++++ b/src/openms/source/PROCESSING/CENTROIDING/PeakPickerIM.cpp
+@@ -1028,7 +1028,14 @@
+       };
+ 
+       // Convert peaks to Points (same as before)
+-      std::vector<Point> points;
++      // [DIAspeXtract pools] the temporaries are per-thread scratch whose capacity survives the call: a fresh set per
++      // spectrum was mmap'd, touched and unmapped for every frame (~90 B per raw peak). Capped by kKeep below.
++      static thread_local std::vector<Point> points;
++      static thread_local std::vector<OpenMS::Size> mz_sorted_indices, original_to_sorted_pos, intensity_sorted_indices,
++                                                    current_cluster_indices;
++      static thread_local std::vector<bool> used;
++      static thread_local std::vector<Point> averaged_points;
++      points.clear();
+       points.reserve(spectrum.size());
+       for (OpenMS::Size i = 0; i < spectrum.size(); ++i) {
+         const auto& peak = spectrum[i];
+@@ -1038,7 +1045,7 @@
+       // --- Setup for Clustering ---
+ 
+       // 1. Create m/z-sorted indices (needed for cluster expansion)
+-      std::vector<OpenMS::Size> mz_sorted_indices(points.size());
++      mz_sorted_indices.resize(points.size());
+       std::iota(mz_sorted_indices.begin(), mz_sorted_indices.end(), 0);
+       std::sort(mz_sorted_indices.begin(), mz_sorted_indices.end(),
+                 [&](OpenMS::Size a, OpenMS::Size b) {   // [DIAspeXtract ties] index breaks ties: STL-independent
+@@ -1046,13 +1053,13 @@
+                 });
+ 
+       // Create reverse lookup: original_index -> mz_sorted_position (needed for cluster expansion)
+-      std::vector<OpenMS::Size> original_to_sorted_pos(points.size());
++      original_to_sorted_pos.resize(points.size());
+       for (OpenMS::Size i = 0; i < points.size(); ++i) {
+         original_to_sorted_pos[mz_sorted_indices[i]] = i;
+       }
+ 
+       // 2. ***OPTIMIZATION: Create intensity-sorted indices for seed picking***
+-      std::vector<OpenMS::Size> intensity_sorted_indices(points.size());
++      intensity_sorted_indices.resize(points.size());
+       std::iota(intensity_sorted_indices.begin(), intensity_sorted_indices.end(), 0);
+       std::sort(intensity_sorted_indices.begin(), intensity_sorted_indices.end(),
+                 [&](OpenMS::Size a, OpenMS::Size b) {
+@@ -1062,11 +1069,11 @@
+                 });
+ 
+       // 3. Keep track of used points
+-      std::vector<bool> used(points.size(), false);
++      used.assign(points.size(), false);
+       OpenMS::Size num_used = 0;
+ 
+       // Store results temporarily
+-      std::vector<Point> averaged_points;
++      averaged_points.clear();
+       averaged_points.reserve(points.size());
+ 
+       double ppm_factor = ppm_tolerance_cluster_ * 1e-6;
+@@ -1086,7 +1093,7 @@
+         // --- Found an unused seed, start clustering ---
+ 
+         // 6. Initialize the cluster with the seed
+-        std::vector<OpenMS::Size> current_cluster_indices;
++        current_cluster_indices.clear();
+         current_cluster_indices.push_back(seed_original_idx);
+         used[seed_original_idx] = true;
+         num_used++;
+@@ -1234,6 +1241,15 @@
+         im_data[i] = p.im;
+       }
+ 
++      {
++        constexpr size_t kKeep = 262144;   // [DIAspeXtract pools] points kept per thread (~23 MB of scratch)
++        if (points.capacity() > kKeep)
++        {
++          std::vector<Point>().swap(points); std::vector<Point>().swap(averaged_points); std::vector<bool>().swap(used);
++          std::vector<OpenMS::Size>().swap(mz_sorted_indices); std::vector<OpenMS::Size>().swap(original_to_sorted_pos);
++          std::vector<OpenMS::Size>().swap(intensity_sorted_indices);
++        }
++      }
+       spectrum.sortByPosition();
+       spectrum.updateRanges();
+       // ensure the output IM array is updated

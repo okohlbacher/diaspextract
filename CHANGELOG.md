@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.9.2 — 2026-11-07
+
+**The spectra do not change**: on the diaPASEF test runs they are 1.9.1's, bit for bit, at every thread count.
+
+### Changed
+
+- **Faster on 2 and 4 threads.** With tiles pipelined, the thread that reads the tiles waited while the next tile's
+  windows could not be admitted yet, so at `-threads 2` one core ran the windows alone (1.25 cores busy). It now runs
+  windows of the tile in progress meanwhile. On a 64-core EPYC the diaPASEF HeLa benchmark run takes 35:28 at 2
+  threads (1.9.1: 48:50) and 16:09 at 4 threads (17:11); at 16 and 64 threads the change is within 1 %.
+
 ## v1.9.1 — 2026-11-07
 
 **The spectra do not change**: on the diaPASEF test runs they are 1.9.0's, bit for bit, at every thread count.

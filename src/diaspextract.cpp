@@ -99,7 +99,7 @@ static inline double spxFileTimeSec_(FILETIME a, FILETIME b)   // two FILETIMEs 
 // The release version. The standalone CMake build passes it from project(VERSION); the in-tree
 // OpenMS build does not, so the fallback here is the same number.
 #ifndef DIASPEXTRACT_VERSION
-#define DIASPEXTRACT_VERSION "1.9.1"
+#define DIASPEXTRACT_VERSION "1.9.2"
 #endif
 
 using namespace OpenMS;
@@ -5851,6 +5851,9 @@ protected:
     };   // loadTile
     // [pipe] the window body, defined below the admission that spawns it
     std::function<void(TileRun*, long, size_t)> runWindow;
+    // [pipe] Set by the pipelined driver: runs one unstarted window of the tile it waits for (or helps the reader or
+    // writer); true if it did. Called while admission is blocked, so the driver works instead of sleeping.
+    std::function<bool()> admitHelp;
     auto admitTile = [&](TileRun* R)
     {
     auto* rw = &runWindow;
@@ -5877,6 +5880,9 @@ protected:
         {
           #pragma omp taskyield
         }
+        // [pipe] The window cap is the window count, so the next tile's windows are admitted only as the current tile's
+        // finish: the driver blocked here while ONE team mate ran windows (-threads 2: 1.25 busy cores). Run one instead.
+        else if (admitHelp && admitHelp()) continue;
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
       }
       inflight += need; ++active;
@@ -6435,11 +6441,14 @@ protected:
           }
           return false;
         };
+        size_t help_fin = 0;   // the tile the driver waits for: its windows' carry is complete, so it may run them
+        if (!solo) admitHelp = [&]() { return teamAssist_(8) || (help_fin < runs.size() && runs[help_fin] && runClaimed(*runs[help_fin])); };
         onPipeDriver_() = !solo;   // no taskloop on the driver (parTasks_); solo runs its windows itself anyway
         try
         {
           for (size_t fin = 0; fin < tiles.size() && !pipe_abort.load(); ++fin)
           {
+            help_fin = fin;
             // Backpressure on the writer: at most `depth` + 1 tiles whose windows are done wait for their write. Without it
             // the driver would keep reading and admitting while the writer lags (slow output storage), and finished spectra
             // and writer tasks spinning on their predecessor would pile up without a bound. It never binds while the writer
@@ -6467,6 +6476,7 @@ protected:
           }
         }
         catch (...) { drvFail(); }
+        admitHelp = nullptr;   // it refers to runClaimed, local to this block
         onPipeDriver_() = false;
       }   // the region's barrier: every admitted window and every writer has finished
       if (drv_err) std::rethrow_exception(drv_err);

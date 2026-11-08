@@ -55,9 +55,9 @@ flowchart TD
   other precursors in the window are removed, split peaks of one fragment ion are fused, and the best 500 fragments
   are kept; a spectrum needs at least 3. A precursor found twice gets one spectrum with the fragments of both, so it
   can hold more than 500.
-- **Tiles and memory.** Tiles run in time order, and the next tile is read while the current one runs. On Linux and Windows, a
-  window starts only when it fits in 75 % of the free memory (under a Slurm or container memory limit, of the room
-  left under it); elsewhere windows run one at a time. The output does not depend on the thread count or the tiling.
+- **Tiles and memory.** Tiles run in time order, and the next tile is read while the current one runs. Isolation
+  windows run in parallel; a window starts only when it fits in 75 % of the free memory (under a Slurm or container
+  memory limit, of the room left under it). The output does not depend on the thread count or the tiling.
 
 ### Input without ion mobility
 

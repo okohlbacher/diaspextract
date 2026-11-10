@@ -377,6 +377,26 @@ namespace spx
     return meta;
   }
 
+  /// [noims] Whether the archive's spectra carry a per-peak ion-mobility array. The streaming reader is for diaPASEF
+  /// archives; one without ion mobility (Orbitrap, FAIMS) is read whole and takes the non-IMS path. Without this its
+  /// stream preflight refused it (no exact TDF calibration) under the default integer detector, before any fallback.
+  /// The first non-empty one of the first 16 spectra decides. An archive this cannot read counts as one with ion
+  /// mobility, so its stream attempt and errors stay what they were.
+  inline bool mzPeakHasIonMobility(const std::string& path)
+  {
+    try
+    {
+      MzPeak::Index index = MzPeak::open(path);
+      MzPeak::Spectra spectra = index.spectra();
+      std::vector<std::size_t> ids(std::min<std::size_t>(spectra.size(), 16));
+      for (std::size_t i = 0; i < ids.size(); ++i) ids[i] = i;
+      for (const MzPeak::Spectrum& sp : spectra.get_spectra_batch(ids))
+        if (!sp.mz().empty()) return !sp.ion_mobility_array().empty();
+    }
+    catch (...) {}
+    return true;
+  }
+
   /// Stream an .mzpeak run into `consumer` (MS1 first, then MS2 per (frame, window), frame order).
   inline void loadMzPeakStreaming(const std::string& path, OpenMS::FullSwathFileConsumer& consumer, int threads)
   {

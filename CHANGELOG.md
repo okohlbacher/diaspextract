@@ -1,5 +1,36 @@
 # Changelog
 
+## v1.9.3 — 2026-11-10
+
+**Spectra change for TOF input without ion mobility (SWATH); all other spectra do not change** (diaPASEF, FAIMS and
+Orbitrap test runs: 1.9.2's, bit for bit; diaPASEF at 1, 2, 16 and 64 threads).
+
+### Added
+
+- **TOF defaults for input without ion mobility (SWATH).** `-noims:instrument auto` (the default) reads the mass
+  analyzer from the input; for a TOF without Orbitrap or FTICR, MS2 mass traces are built at 5 ppm and split into
+  elution peaks at valleys below half of both flanking maxima, and precursors need charge >= 2 and 3 MS1 scans. Wide
+  TOF traces joined neighbouring ions and recurring m/z into one long trace that reached a single precursor only. On six
+  TripleTOF 6600 SWATH runs (PXD002952) Sage identifies 19,178 peptides per run at 1 % FDR (1.9.2: 10,204), and
+  extraction takes 2:15 to 3:01 per run (5:34 to 8:06). Only options left at their defaults change;
+  `-noims:instrument orbitrap` gives 1.9.2's spectra. The underlying options are listed in `docs/options.md`.
+
+### Changed
+
+- **Faster on many threads.** The thread that reads a tile now decodes the next batch of frames while the threads that
+  help it pick ion mobility on the previous batch; before, it waited for that pick. On a 64-core EPYC the diaPASEF HeLa
+  benchmark run takes 1:31.8 at 64 threads (1.9.2: 1:42.8) and 4:38.7 at 16 (4:44.8). Peak memory at 64 threads rises
+  by about 0.9 GB (one more batch of frames in flight). Only the streamed Bruker `.d` and mzPeak reads change.
+
+### Fixed
+
+- **FAIMS log no longer reports PASEF centroiding.** Biosaur2 read a FAIMS run's per-spectrum compensation voltage as
+  ion mobility and logged "PASEF centroiding: N peaks -> 0 centroided clusters". It did nothing (no per-peak mobility),
+  and the non-IMS path now switches it off.
+- **mzPeak input without ion mobility in builds with the streaming mzPeak reader** (`-DMZPEAK_ROOT`; the release
+  builds have none). Such an archive (Orbitrap, FAIMS) was streamed like a diaPASEF one and, under the default integer
+  detector, refused for lacking an exact TDF calibration. It is now read whole and takes the non-IMS path.
+
 ## v1.9.2 — 2026-11-07
 
 **The spectra do not change**: on the diaPASEF test runs they are 1.9.1's, bit for bit, at every thread count.

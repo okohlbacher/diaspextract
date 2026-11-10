@@ -31,6 +31,10 @@ checks that fail if the things most likely to break do break:
                            [det] lines
       24. non-IMS     input without ion mobility: the separate path finds the precursor, is thread-invariant and commits
                            its output; profile spectra, IM at MS2 only and a negative noims:min_corr are refused
+      25. FAIMS 2 CVs      a run with two compensation voltages is split by CV: each precursor keeps its own fragments
+                           and CV, the output is in RT order and thread-invariant, and the CV is not read as ion mobility
+      26. FAIMS mzPeak     the same run as an mzPeak archive (FileConverter on PATH or DIASPEXTRACT_TEST_FILECONVERTER): read
+                           whole at the defaults, never streamed, and the mzML's spectra (skipped without FileConverter)
       23. real .d          DIASPEXTRACT_TEST_D set: a real diaPASEF run at the defaults is streamed, dnoise-filtered and
                            traced by the integer detector, writes spectra, and is thread-, tile- and tile-pipeline-invariant
                            (skipped without it); with DIASPEXTRACT_TEST_D_DIGEST set, its spectra digest must equal it
@@ -46,7 +50,7 @@ cross-batch sample offsets) is covered only by the cluster gates on real .d inpu
 Usage: test_diaspextract.py /path/to/diaspextract [workdir]
 Exit status is 0 only if every check passes.
 """
-import base64, hashlib, json, os, re, struct, subprocess, sys, tempfile
+import base64, hashlib, json, os, re, shutil, struct, subprocess, sys, tempfile
 
 ISO = 1.0033548
 PROTON = 1.007276
@@ -57,8 +61,9 @@ def b64f(vals, double=True):
     return base64.b64encode(struct.pack(fmt, *vals)).decode()
 
 
-def spectrum(idx, ms_level, rt, peaks, im, prec=None, group=0, kind="centroid"):
-    """One mzML spectrum. `peaks` is [(mz, intensity)], `im` one 1/K0 per peak (None: no ion-mobility array)."""
+def spectrum(idx, ms_level, rt, peaks, im, prec=None, group=0, kind="centroid", cv=None):
+    """One mzML spectrum. `peaks` is [(mz, intensity)], `im` one 1/K0 per peak (None: no ion-mobility array), `cv` a
+    FAIMS compensation voltage on the scan, as ThermoRawFileParser writes it (None: no FAIMS)."""
     mz = b64f([p[0] for p in peaks])
     inten = b64f([p[1] for p in peaks], double=False)
     pre = ""
@@ -75,12 +80,13 @@ def spectrum(idx, ms_level, rt, peaks, im, prec=None, group=0, kind="centroid"):
 <binaryDataArray arrayLength="{len(im)}" encodedLength="{len(b64f(im))}"><cvParam cvRef="MS" accession="MS:1002816" name="mean inverse reduced ion mobility array" unitAccession="MS:1002814" unitName="volt-second per square centimeter" unitCvRef="MS"/><cvParam cvRef="MS" accession="MS:1000523" name="64-bit float"/><cvParam cvRef="MS" accession="MS:1000576" name="no compression"/><binary>{b64f(im)}</binary></binaryDataArray>"""
     kind_cv = '<cvParam cvRef="MS" accession="MS:1000127" name="centroid spectrum"/>' if kind == "centroid" else \
               '<cvParam cvRef="MS" accession="MS:1000128" name="profile spectrum"/>'
+    faims = "" if cv is None else f'<cvParam cvRef="MS" accession="MS:1001581" name="FAIMS compensation voltage" value="{cv}"/>'
     return f"""<spectrum id="frame={idx + 1} windowGroup={group} scan=0" index="{idx}" defaultArrayLength="{len(peaks)}">
 {kind_cv}
 <cvParam cvRef="MS" accession="MS:1000511" name="ms level" value="{ms_level}"/>
 <cvParam cvRef="MS" accession="MS:1000294" name="mass spectrum"/>
 <scanList count="1"><cvParam cvRef="MS" accession="MS:1000795" name="no combination"/>
-<scan><cvParam cvRef="MS" accession="MS:1000016" name="scan start time" value="{rt}" unitAccession="UO:0000010" unitName="second" unitCvRef="UO"/></scan></scanList>
+<scan><cvParam cvRef="MS" accession="MS:1000016" name="scan start time" value="{rt}" unitAccession="UO:0000010" unitName="second" unitCvRef="UO"/>{faims}</scan></scanList>
 {pre}
 <binaryDataArrayList count="{2 if im is None else 3}">
 <binaryDataArray encodedLength="{len(mz)}"><cvParam cvRef="MS" accession="MS:1000514" name="m/z array" unitAccession="MS:1000040" unitName="m/z" unitCvRef="MS"/><cvParam cvRef="MS" accession="MS:1000523" name="64-bit float"/><cvParam cvRef="MS" accession="MS:1000576" name="no compression"/><binary>{mz}</binary></binaryDataArray>
@@ -179,6 +185,27 @@ def synth_noims(path, kind="centroid", ms2_im=False):
         specs.append(spectrum(idx, 2, rt + 1.0, ms2, [0.9] * 3 if ms2_im else None, prec=(605.0, 590.0, 620.0), kind=kind)); idx += 1
     write_mzml(path, specs)
     return mono
+
+
+def synth_faims(path):
+    """Two-CV FAIMS DIA without ion mobility, as ThermoRawFileParser writes it: every cycle has an MS1 and an MS2 scan at
+    -45 V and then at -65 V. Precursor A (z=2) and its fragments exist at -45 V only, precursor B (z=2) and its fragments
+    at -65 V only; both co-elute in the same 590-620 isolation window. Returns (mono A, mono B, fragments A, fragments B)."""
+    mono = {-45: 601.3, -65: 611.8}
+    frags = {-45: (233.11, 348.19, 461.27), -65: (275.17, 390.21, 503.30)}
+    specs, idx = [], 0
+    for c in range(24):
+        amp = max(1.0 - abs(c - 12) / 9.0, 0.02)
+        for k, cv in enumerate((-45, -65)):
+            rt = 10.0 + 4.0 * c + 2.0 * k
+            ms1 = [(mono[cv] + i * ISO / 2.0, 8.0e5 * amp * rel) for i, rel in enumerate((1.0, 0.66, 0.27, 0.08))]
+            ms1 += [(450.2 + 37.1 * j + 3.3 * k, 3.0e3 * (1 + (c * 7 + j) % 5)) for j in range(6)]   # unrelated background
+            ms1.sort()
+            specs.append(spectrum(idx, 1, rt, ms1, None, cv=cv)); idx += 1
+            ms2 = [(mz, 2.0e5 * amp * rel) for mz, rel in zip(frags[cv], (0.7, 1.0, 0.55))]
+            specs.append(spectrum(idx, 2, rt + 1.0, ms2, None, prec=(605.0, 590.0, 620.0), cv=cv)); idx += 1
+    write_mzml(path, specs)
+    return mono[-45], mono[-65], frags[-45], frags[-65]
 
 
 def mzcal_table(db):
@@ -1009,6 +1036,58 @@ def main():
         r = run(binary, ni, os.path.join(work, "noims_env.mzML"), expect_fail=True, env=dict(os.environ, SPX_NOIMS_MAX_PEAKS="100"))
         assert "SPX_NOIMS_MAX_PEAKS" in r.stdout + r.stderr, "SPX_NOIMS_MAX_PEAKS not refused by name:\n" + (r.stdout + r.stderr)[-600:]
     check("input without ion mobility: the non-IMS path, thread-invariant; profile, MS2-only IM, multiplexed MS2, SPX_NOIMS_* and negative min_corr refused", c24)
+
+    # 25: FAIMS without ion mobility, two compensation voltages: the run is split by CV and each CV takes the non-IMS path
+    #     on its own. Each precursor is found with its own fragments only (the other CV's co-eluting fragments in the same
+    #     window are not mixed in), every spectrum carries its CV, the output is in retention-time order and the same at
+    #     1 and 4 threads. The per-spectrum CV is not per-peak ion mobility: Biosaur2's PASEF centroiding stays off.
+    def c25():
+        fa = os.path.join(work, "faims2cv.mzML"); ma, mb, fra, frb = synth_faims(fa)
+        o1, o4 = os.path.join(work, "faims2cv1.mzML"), os.path.join(work, "faims2cv4.mzML")
+        r = run(binary, fa, o1, threads=1); log = r.stdout + r.stderr
+        run(binary, fa, o4, threads=4)
+        assert "[faims] 2 compensation voltages" in log, "the two CVs were not split:\n" + log[-1500:]
+        assert "PASEF" not in log, \
+            "Biosaur2 treated the FAIMS CV as ion mobility:\n" + log[-1500:]
+        ps = precursors(o1)
+        for mono, own, other, cv in ((ma, fra, frb, -45), (mb, frb, fra, -65)):
+            assert any(abs(mz - mono) < 0.01 and z == 2 for mz, z in ps), f"CV {cv}: the z=2 precursor {mono} is missing: {ps}"
+            pk = peaks_of(o1, mono)
+            assert all(any(abs(p - f) < 0.01 for p in pk) for f in own), f"CV {cv}: own fragments {own} missing from {pk}"
+            assert not any(abs(p - f) < 0.01 for p in pk for f in other), f"CV {cv}: the other CV's fragments {other} in {pk}"
+        txt = open(o1).read()
+        blocks = re.findall(r"<spectrum .*?</spectrum>", txt, re.S)
+        assert blocks, "no spectrum written"
+        cvs = [re.search(r'accession="MS:1001581"[^>]*value="([^"]+)"', b) for b in blocks]
+        assert all(cvs), "a spectrum without its FAIMS compensation voltage"
+        assert {round(float(m.group(1))) for m in cvs} == {-45, -65}, "spectra do not carry both CVs: %s" % {m.group(1) for m in cvs}
+        rts = [float(re.search(r'name="scan start time" value="([^"]+)"', b).group(1)) for b in blocks]
+        assert rts == sorted(rts), "the merged FAIMS output is not in retention-time order"
+        assert digest(o1) == digest(o4), "the FAIMS spectra differ between 1 and 4 threads"
+    check("FAIMS with two CVs: split by CV, each precursor with its own fragments and CV, RT order, thread-invariant", c25)
+
+    # 26: the same two-CV run as an mzPeak archive (OpenMS FileConverter; DIASPEXTRACT_TEST_FILECONVERTER or on PATH) at
+    #     the defaults: an archive without ion mobility is read whole and gives the mzML's spectra. A build with the
+    #     streaming mzPeak reader (-DMZPEAK_ROOT) used to stream it and refuse it under the integer detector (no exact
+    #     TDF calibration) before its fallback to the whole-run load.
+    conv = os.environ.get("DIASPEXTRACT_TEST_FILECONVERTER") or shutil.which("FileConverter")
+    if conv:
+        def c26():
+            fa = os.path.join(work, "faims2cv.mzML")
+            if not os.path.exists(fa): synth_faims(fa)
+            mp = os.path.join(work, "faims2cv.mzpeak")
+            if os.path.exists(mp): os.remove(mp)
+            cr = subprocess.run([conv, "-in", fa, "-out", mp], capture_output=True, text=True)
+            assert cr.returncode == 0 and os.path.exists(mp), "FileConverter could not write the mzPeak archive:\n" + (cr.stdout + cr.stderr)[-800:]
+            om, oz = os.path.join(work, "faims2cv_mzml.mzML"), os.path.join(work, "faims2cv_mzpeak.mzML")
+            run(binary, fa, om)
+            r = run(binary, mp, oz); log = r.stdout + r.stderr
+            assert "[faims] 2 compensation voltages" in log, "the mzPeak archive's two CVs were not split:\n" + log[-1500:]
+            assert "streaming load failed" not in log, "an mzPeak archive without ion mobility was streamed:\n" + log[-1500:]
+            assert digest(oz) == digest(om), "the mzPeak archive's spectra differ from the mzML's"
+        check("FAIMS as mzPeak without ion mobility: read whole at the defaults, the mzML's spectra", c26)
+    else:
+        print("  SKIP  FAIMS as mzPeak: set DIASPEXTRACT_TEST_FILECONVERTER to OpenMS's FileConverter (or put it on PATH)")
 
     # 23: a REAL diaPASEF .d end to end (DIASPEXTRACT_TEST_D; CI uses OpenMS's public 5.6-min HeLa test run, and
     #     bench/slice_d.py cuts one from any run). Everything above reads synthetic mzML; this is the shipped default

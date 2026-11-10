@@ -8,7 +8,7 @@
 // (Pearson r >= min_corr on the window's scan grid), or, with fewer than 3 grid points in that span, when its apex lies
 // within one cycle of the precursor apex. A fragment's intensity is weighted by r^24 (Sage and MSFragger peptides and
 // entrapment on three Orbitrap sets: stronger powers overfit Sage's scoring); the 200 heaviest are kept, one spectrum
-// per precursor with >= 3 fragments.
+// per precursor with >= min_frags (3) fragments.
 // Parallelism: windows run in parallel, heaviest first; each window's precursors are OpenMP tasks, so threads that have
 // no window left help with the precursors of the last ones. Results are index-addressed: the output does not depend on
 // the thread count.
@@ -41,6 +41,20 @@ using diaspextract::String;
   {
     double ppm = 10.0;          ///< mass-trace and isotope m/z tolerance
     double min_corr = 0.3;      ///< fragment-precursor Pearson r on the window grid
+    // MS1 precursor detection (Biosaur2): the Orbitrap defaults; TOF input changes them (see noImsSpectra_)
+    bool tof = false;           ///< Biosaur2's TOF noise filter (per-50-m/z-bin intensity floor)
+    double min_intensity = 1.0; ///< Biosaur2 mini: least peak intensity
+    int min_hill_scans = 2;     ///< Biosaur2 minlh: fewest MS1 scans per hill
+    int min_charge = 1;         ///< Biosaur2 cmin
+    int min_frags = 3;          ///< fewest fragments a spectrum needs
+    double min_frag_intensity = 0; ///< least apex intensity of a fragment trace
+    int min_frag_points = 1;    ///< fewest scans of a fragment trace
+    int max_frags = 200;        ///< most intense fragments kept per spectrum (by weighted intensity)
+    double weight_pow = 24.0;   ///< fragment intensity x r^weight_pow
+    double ms2_ppm = 0;         ///< MS2 mass-trace tolerance; 0 = ppm
+    double split = 0;           ///< split MS2 traces at elution valleys below split x the lower flanking maximum; 0 = off
+    bool env_all_charges = false; ///< MS2 envelopes: a -1 isotope at one charge moves on to the next lower charge (else: no precursor)
+    bool drop_precursor = false;  ///< drop the precursor's own isotope peaks (mono-1 .. mono+3) from its spectrum
   };
 
   struct Stats { size_t windows = 0, ms2_traces = 0, precursors = 0, spectra = 0, peaks = 0; double busy_s = 0, wall_s = 0; int threads = 1; };
@@ -48,9 +62,6 @@ using diaspextract::String;
   namespace detail
   {
     constexpr double C13 = 1.0033548, PROTON = 1.007276;
-    constexpr int MAX_PEAKS = 200;          ///< most intense fragments kept per spectrum (by weighted intensity)
-    constexpr int MIN_FRAGS = 3;            ///< fewest fragments a spectrum needs
-    constexpr double WEIGHT_POW = 24.0;     ///< fragment intensity x r^24 (few-point profiles: x exp(-(apex distance / cycle)^2)^6)
     constexpr double FEW_APEX_CYCLES = 1.0; ///< precursors with < 3 window scans: fragment apex within this many cycles of the precursor apex
 
     struct Prec { double mz, rt, rt_lo, rt_hi, inten; int z; std::vector<double> rt_pts, int_pts; };
@@ -77,6 +88,23 @@ using diaspextract::String;
       return mt;
     }
 
+    /// cut points (grid indices) of a trace's grid profile @p y (index g0 + k), at valleys of the 1-2-1 smoothed profile
+    /// that fall below @p valley x both flanking maxima: one elution peak per segment
+    inline std::vector<size_t> valleys(const std::vector<double>& y, size_t g0, double valley)
+    {
+      std::vector<size_t> cut;
+      double M = 0, m = -1; size_t mi = 0;   // m < 0: still rising to the current maximum M
+      for (size_t k = 0; k < y.size(); ++k)
+      {
+        const double v = 0.25 * ((k ? y[k - 1] : 0.0) + 2 * y[k] + (k + 1 < y.size() ? y[k + 1] : 0.0));
+        if (m < 0) { if (v >= M) M = v; else { m = v; mi = k; } }
+        else if (v < m) { m = v; mi = k; }
+        else if (m < valley * M && m < valley * v) { cut.push_back(g0 + mi); M = v; m = -1; }
+        else if (v > M) { M = v; m = -1; }
+      }
+      return cut;
+    }
+
     /// Pearson r of two profiles sampled on the same grid
     inline double pearson(const std::vector<double>& a, const std::vector<double>& b)
     {
@@ -101,7 +129,7 @@ using diaspextract::String;
 
     /// isotope envelopes (z = 2..4) from MS2 traces; a trace is a mono if it has a +1 isotope and no -1 isotope at the same charge
     // ponytail: greedy, highest charge first, no averagine check; add an intensity-pattern test if charge errors show up
-    inline std::vector<Prec> envelopes(const std::vector<MassTrace>& mt, double ppm, double lo, double hi, double coelute)
+    inline std::vector<Prec> envelopes(const std::vector<MassTrace>& mt, double ppm, double lo, double hi, double coelute, bool all_charges = false)
     {
       std::vector<size_t> o(mt.size());
       std::iota(o.begin(), o.end(), 0);
@@ -128,7 +156,7 @@ using diaspextract::String;
         for (int z = 4; z >= 2; --z)
         {
           if (partner(k, mz[k] + C13 / z) < 0) continue;
-          if (partner(k, mz[k] - C13 / z) >= 0) break;   // not the lightest isotope at this charge: not a mono
+          if (partner(k, mz[k] - C13 / z) >= 0) { if (all_charges) continue; break; }   // not the lightest isotope at this charge
           if (mz[k] >= lo && mz[k] < hi)
           {
             const MassTrace& t = mt[o[k]];
@@ -143,16 +171,21 @@ using diaspextract::String;
     }
 
     /// precursors from OpenMS's Biosaur2 port, run once on the whole run's MS1 (averagine-checked isotope patterns)
-    inline std::vector<Prec> biosaur(PeakMap&& ms1, double ppm, double mzlo, double mzhi)
+    inline std::vector<Prec> biosaur(PeakMap&& ms1, const Params& P, double mzlo, double mzhi)
     {
       std::vector<Biosaur2Algorithm::Hill> hills;
       std::vector<Biosaur2Algorithm::PeptideFeature> feats;
       {
         Biosaur2Algorithm b;
         Param p = b.getDefaults();
-        p.setValue("htol", ppm); p.setValue("itol", ppm);
+        p.setValue("htol", P.ppm); p.setValue("itol", P.ppm);
         p.setValue("minmz", mzlo); p.setValue("maxmz", mzhi);
-        p.setValue("cmin", 1); p.setValue("cmax", 4);
+        p.setValue("cmin", P.min_charge); p.setValue("cmax", 4);
+        p.setValue("mini", P.min_intensity); p.setValue("minlh", P.min_hill_scans);
+        p.setValue("tof", P.tof ? "true" : "false");
+        // no per-peak ion mobility on this path: a FAIMS run's per-spectrum CV made Biosaur2 switch on its PASEF
+        // centroiding and IM gating, both no-ops without an IM array but logged as if they ran
+        p.setValue("paseftol", 0.0);
         b.setParameters(p);
         b.setMSData(std::move(ms1));
         FeatureMap fm;   // unused; freed with the algorithm's copy of the MS1 data
@@ -177,7 +210,7 @@ using diaspextract::String;
 
     /// the spectrum of precursor @p p from the window's fragments (sorted by apex RT), or an empty one (no MS level)
     inline MSSpectrum assemble(const Prec& p, const std::vector<Frag>& fr, const std::vector<double>& grid, double cycle,
-                               double min_corr, double lo, double hi)
+                               const Params& P, double lo, double hi)
     {
       MSSpectrum s;
       const size_t g0 = std::lower_bound(grid.begin(), grid.end(), p.rt_lo) - grid.begin();
@@ -188,27 +221,50 @@ using diaspextract::String;
       const double neutral = p.z * (p.mz - PROTON);
       std::vector<std::pair<double, double>> pk;   // (intensity, m/z)
       std::vector<double> fp(pp.size());
+      // split traces (TOF) are short against the precursor span: their r comes from their own points (one-pass sums).
+      // ponytail: unsplit traces keep the two-pass dense form, so Orbitrap output stays bit-identical
+      const bool sparse = P.split > 0;
+      double sa = 0, saa = 0;
+      for (double a : pp) { sa += a; saa += a * a; }
+      const double nn = (double)pp.size(), va = nn * saa - sa * sa;
       const double a0 = few ? p.rt - FEW_APEX_CYCLES * cycle : p.rt_lo, a1 = few ? p.rt + FEW_APEX_CYCLES * cycle : p.rt_hi;
       const auto first = std::lower_bound(fr.begin(), fr.end(), a0, [](const Frag& f, double t) { return f.apex_rt < t; });
       for (size_t k = first - fr.begin(); k < fr.size() && fr[k].apex_rt <= a1; ++k)
       {
         const Frag& f = fr[k];
         if (f.mz - PROTON > neutral - 56.0) continue;   // heavier than the precursor allows at z = 1
+        if (P.drop_precursor)
+        {
+          const double iso = std::round((f.mz - p.mz) * p.z / C13);
+          if (iso >= -1 && iso <= 3 && std::fabs(f.mz - p.mz - iso * C13 / p.z) <= f.mz * P.ppm * 1e-6) continue;   // unfragmented precursor
+        }
         if (!few)
         {
-          std::fill(fp.begin(), fp.end(), 0.0);
-          for (const auto& q : f.gpts) if (q.first >= g0 && q.first < g1) fp[q.first - g0] = q.second;
-          const double r = pearson(pp, fp);
-          if (r < min_corr) continue;
-          pk.emplace_back(f.inten * pmath::pow(r, WEIGHT_POW), f.mz);
+          double r;
+          if (sparse)
+          {
+            double sb = 0, sbb = 0, sab = 0;
+            for (auto it = std::lower_bound(f.gpts.begin(), f.gpts.end(), std::make_pair(g0, -1.0)); it != f.gpts.end() && it->first < g1; ++it)
+            { sb += it->second; sbb += it->second * it->second; sab += pp[it->first - g0] * it->second; }
+            const double vb = nn * sbb - sb * sb;
+            r = (va > 0 && vb > 0) ? (nn * sab - sa * sb) / std::sqrt(va * vb) : 0.0;
+          }
+          else
+          {
+            std::fill(fp.begin(), fp.end(), 0.0);
+            for (const auto& q : f.gpts) if (q.first >= g0 && q.first < g1) fp[q.first - g0] = q.second;
+            r = pearson(pp, fp);
+          }
+          if (r < P.min_corr) continue;
+          pk.emplace_back(f.inten * pmath::pow(r, P.weight_pow), f.mz);
           continue;
         }
         const double d = (f.apex_rt - p.rt) / cycle;
-        pk.emplace_back(f.inten * pmath::exp(-d * d * WEIGHT_POW / 4.0), f.mz);
+        pk.emplace_back(f.inten * pmath::exp(-d * d * P.weight_pow / 4.0), f.mz);
       }
-      if ((int)pk.size() < MIN_FRAGS) return s;
-      if ((int)pk.size() > MAX_PEAKS)
-      { std::nth_element(pk.begin(), pk.begin() + MAX_PEAKS, pk.end(), std::greater<>()); pk.resize(MAX_PEAKS); }
+      if ((int)pk.size() < P.min_frags) return s;
+      if ((int)pk.size() > P.max_frags)
+      { std::nth_element(pk.begin(), pk.begin() + P.max_frags, pk.end(), std::greater<>()); pk.resize(P.max_frags); }
       // by m/z, equal m/z by intensity: nth_element leaves the kept peaks in an unspecified order
       std::sort(pk.begin(), pk.end(), [](const auto& a, const auto& b) { return std::tie(a.second, a.first) < std::tie(b.second, b.first); });
       s.setMSLevel(2);
@@ -298,7 +354,7 @@ using diaspextract::String;
     double top = 0;
     for (const auto& k : keys) top = std::max(top, k.second);
     const auto tb = clk::now();
-    const std::vector<Prec> bio = biosaur(std::move(m1), P.ppm, keys.front().first - 1.0, top + 1.0);
+    const std::vector<Prec> bio = biosaur(std::move(m1), P, keys.front().first - 1.0, top + 1.0);
     log("[noims] Biosaur2: " + String(bio.size()) + " isotope-pattern features as precursors in "
         + String(std::chrono::duration<double>(clk::now() - tb).count()) + " s");
 
@@ -307,7 +363,8 @@ using diaspextract::String;
     std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return wpeaks[a] > wpeaks[b]; });
     std::vector<std::vector<MSSpectrum>> res(W);
     std::vector<size_t> nprec(W, 0), ntr2(W, 0);
-    std::vector<double> busy(W, 0.0);
+    std::vector<double> busy(W, 0.0), t_mtd(W, 0.0), t_frag(W, 0.0);
+    std::vector<size_t> nfrag(W, 0);
     std::exception_ptr err;
     #pragma omp parallel for schedule(dynamic, 1)
     for (long o = 0; o < (long)W; ++o)
@@ -323,11 +380,12 @@ using diaspextract::String;
         if (owner(it->mz) == (long)w) prec.push_back(*it);
 
       // MS2 traces on the window's scan grid
-      const std::vector<MassTrace> ft = traces(m2[w], P.ppm);
+      const std::vector<MassTrace> ft = traces(m2[w], P.ms2_ppm > 0 ? P.ms2_ppm : P.ppm);
       ntr2[w] = ft.size();
+      t_mtd[w] = std::chrono::duration<double>(clk::now() - tw).count();
       m2[w].clear(true);
       // unfragmented precursors seen in MS2, unless MS1 already has them (same z, 1 cycle, ppm)
-      std::vector<Prec> q = envelopes(ft, P.ppm, lo, hi, 1.01 * cycle);
+      std::vector<Prec> q = envelopes(ft, P.ppm, lo, hi, 1.01 * cycle, P.env_all_charges);
       const size_t n1 = prec.size();
       for (auto& c : q)
       {
@@ -341,18 +399,47 @@ using diaspextract::String;
       const std::vector<double>& gr = grid[w];
       std::vector<Frag> fr;
       fr.reserve(ft.size());
+      std::vector<double> prof;
       for (const auto& t : ft)
       {
+        if (t.getMaxIntensity(false) < P.min_frag_intensity || (int)t.getSize() < P.min_frag_points) continue;
         Frag f{t.getCentroidMZ(), apexRT(t), t.getMaxIntensity(false), {}, {}};
         for (const auto& pk : t)
         {
           f.pts.emplace_back(pk.getRT(), pk.getIntensity());
           f.gpts.emplace_back(std::lower_bound(gr.begin(), gr.end(), pk.getRT() - 1e-6) - gr.begin(), pk.getIntensity());
         }
-        fr.push_back(std::move(f));
+        std::vector<size_t> cut;
+        if (P.split > 0 && f.gpts.size() >= 3)
+        {
+          const size_t g0 = f.gpts.front().first;
+          prof.assign(f.gpts.back().first - g0 + 1, 0.0);
+          for (const auto& q : f.gpts) prof[q.first - g0] = q.second;
+          cut = valleys(prof, g0, P.split);
+        }
+        if (cut.empty()) { fr.push_back(std::move(f)); continue; }
+        // one fragment per elution peak: its own apex, intensity and intensity-weighted m/z
+        cut.push_back(SIZE_MAX);
+        size_t k = 0;
+        for (size_t c : cut)
+        {
+          Frag g{0, 0, -1, {}, {}};
+          double sw = 0;
+          for (auto it = t.begin() + k; k < f.gpts.size() && f.gpts[k].first < c; ++k, ++it)
+          {
+            g.pts.push_back(f.pts[k]); g.gpts.push_back(f.gpts[k]);
+            g.mz += it->getMZ() * it->getIntensity(); sw += it->getIntensity();
+            if (it->getIntensity() > g.inten) { g.inten = it->getIntensity(); g.apex_rt = it->getRT(); }
+          }
+          if (g.gpts.empty()) continue;
+          g.mz = sw > 0 ? g.mz / sw : t.getCentroidMZ();
+          if (g.inten >= P.min_frag_intensity && (int)g.gpts.size() >= P.min_frag_points) fr.push_back(std::move(g));
+        }
       }
       std::sort(fr.begin(), fr.end(), [](const Frag& a, const Frag& b) { return std::tie(a.apex_rt, a.mz, a.inten, a.pts) < std::tie(b.apex_rt, b.mz, b.inten, b.pts); });
       for (auto& f : fr) std::vector<std::pair<double, double>>().swap(f.pts);   // pts only break sort ties; gpts serve the rest
+      nfrag[w] = fr.size();
+      t_frag[w] = std::chrono::duration<double>(clk::now() - tw).count() - t_mtd[w];
 
       // one slot per precursor, filled by tasks that idle threads can take
       std::vector<MSSpectrum> slot(prec.size());
@@ -361,7 +448,7 @@ using diaspextract::String;
       #pragma omp taskloop grainsize(256) default(shared)
       for (long i = 0; i < np; ++i)
       {
-        try { slot[i] = assemble(prec[i], fr, gr, cycle, P.min_corr, lo, hi); }
+        try { slot[i] = assemble(prec[i], fr, gr, cycle, P, lo, hi); }
         catch (...)
         {
           #pragma omp critical(noims_err)
@@ -390,6 +477,10 @@ using diaspextract::String;
     st.spectra = out.size();
     if (const auto n = std::count_if(scans.begin(), scans.end(), [](const auto& v) { return v.size() < 3; }))
       log("[noims] " + String(n) + " of " + String(W) + " isolation windows have fewer than 3 MS2 scans: no spectra from them");
+    double sm = 0, sf = 0; size_t nf = 0;
+    for (size_t w = 0; w < W; ++w) { sm += t_mtd[w]; sf += t_frag[w]; nf += nfrag[w]; }
+    log("[noims] " + String(nf) + " fragments; window busy: MS2 traces " + String(sm) + " s, envelopes and fragments " + String(sf)
+        + " s, spectra " + String(st.busy_s - sm - sf) + " s");
     st.wall_s = std::chrono::duration<double>(clk::now() - t0).count();
     log("[noims] " + String(st.ms2_traces) + " MS2 traces, " + String(st.precursors) + " precursors, " + String(st.spectra) + " spectra, " + String(st.peaks) + " peaks; "
         + String(st.wall_s) + " s, window busy " + String(st.busy_s) + " s on " + String(st.threads) + " threads");

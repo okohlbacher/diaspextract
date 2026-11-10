@@ -209,6 +209,20 @@ exit code 11.
 |---|---|---|
 | `-noims:min_corr` | 0.3 | Smallest Pearson correlation between a fragment's and the precursor's profile on the window's scan grid. 0 to 1. |
 | `-noims:ppm` | 10 | m/z tolerance of the mass traces and isotope patterns (ppm). At least 0. |
+| `-noims:instrument` | auto | Mass analyzer the defaults are tuned for: `auto` (from the input's instrument description: TOF without Orbitrap or FTICR is `tof`), `orbitrap`, `tof`. On `tof`, options left at their defaults change to: `-noims:ms2_ppm 5`, `-noims:split 0.5`, `-noims:min_charge 2`, `-noims:min_hill_scans 3`. |
+| `-noims:ms2_ppm` | 0 | m/z tolerance of the MS2 mass traces (ppm); 0 = `-noims:ppm`. |
+| `-noims:split` | 0 | Split MS2 traces into elution peaks at valleys below this fraction of both flanking maxima; 0 = off. 0 to 1. |
+| `-noims:envelope_charges` | first | Isotope envelopes found in MS2: `first` drops an envelope whose highest matching charge has a −1 isotope; `all` tries the lower charges. |
+| `-noims:precursor_peaks` | keep | The precursor's own isotope peaks (mono −1 to +3) in its spectrum: `keep` or `drop`. |
+| `-noims:min_charge` | 1 | Smallest precursor charge (Biosaur2 `cmin`). 1 to 4. |
+| `-noims:min_fragments` | 3 | Fewest fragments a spectrum needs. |
+| `-noims:max_fragments` | 200 | Most fragments kept per spectrum, by weighted intensity. |
+| `-noims:weight_power` | 24 | Fragment intensity is weighted by r to this power. |
+| `-noims:min_fragment_intensity` | 0 | Smallest apex intensity of a fragment trace. |
+| `-noims:min_fragment_points` | 1 | Fewest MS2 scans of a fragment trace. |
+| `-noims:min_intensity` | 1 | Smallest MS1 peak intensity for precursor detection (Biosaur2 `mini`). |
+| `-noims:min_hill_scans` | 2 | Fewest MS1 scans per precursor hill (Biosaur2 `minlh`). |
+| `-noims:tof` | off | Biosaur2's TOF noise filter on MS1 (a per-50-m/z intensity floor): `off`, `on`. |
 
 ## Diagnostics
 

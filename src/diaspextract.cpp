@@ -99,7 +99,7 @@ static inline double spxFileTimeSec_(FILETIME a, FILETIME b)   // two FILETIMEs 
 // The release version. The standalone CMake build passes it from project(VERSION); the in-tree
 // OpenMS build does not, so the fallback here is the same number.
 #ifndef DIASPEXTRACT_VERSION
-#define DIASPEXTRACT_VERSION "1.9.2"
+#define DIASPEXTRACT_VERSION "1.9.3"
 #endif
 
 using namespace OpenMS;
@@ -222,13 +222,15 @@ namespace
       for (const auto& p : pullJobs_()) if (p->cur.load(std::memory_order_relaxed) < p->n) { j = p; break; } }
     return j && j->pull(max_chunks) > 0;
   }
-  template <class F> static void teamFor_(long n, long chunk, F&& f)
+  /// [overlap] teamFor_ in two halves: teamForStart_ publishes the loop and queues its helpers and returns at once (the
+  /// caller may do other work meanwhile, e.g. read the next frames); teamForFinish_ pulls what is left, unpublishes the
+  /// loop and waits for every claimed chunk. `f` must outlive teamForFinish_ (the helpers call it through the job).
+  template <class F> static std::shared_ptr<PullJob_> teamForStart_(long n, long chunk, F& f)
   {
-    if (n <= 0) return;
-    using FT = std::remove_reference_t<F>;
     auto st = std::make_shared<PullJob_>();
-    st->n = n; st->chunk = chunk; st->fp = (void*)&f;
-    st->call = [](void* p, long i, int slot) { (*static_cast<FT*>(p))(i, slot); };
+    st->n = std::max(0L, n); st->chunk = chunk; st->fp = (void*)&f;
+    st->call = [](void* p, long i, int slot) { (*static_cast<F*>(p))(i, slot); };
+    if (n <= 0) return st;
     { std::lock_guard<std::mutex> g(pullMu_()); pullJobs_().push_back(st); }
     ++pullLive_();
     const int team = std::max(1, omp_get_num_threads());
@@ -237,14 +239,25 @@ namespace
     {
       ++teamHelpersQueued_();
       #pragma omp task default(none) firstprivate(st)
-      { --teamHelpersQueued_(); st->pull(-1); }
+      { --teamHelpersQueued_(); st->pull(-1);
+        while (teamAssist_(-1)) {} }   // [overlap] then any other live loop (the decode beside a pick): the cap held its helpers back
     }
+    return st;
+  }
+  static void teamForFinish_(const std::shared_ptr<PullJob_>& st)
+  {
+    if (st->n <= 0) return;
     st->pull(-1);
     { std::lock_guard<std::mutex> g(pullMu_());
       auto& v = pullJobs_(); v.erase(std::remove(v.begin(), v.end(), st), v.end()); }
     --pullLive_();
     while (st->busy.load() != 0) std::this_thread::yield();
     if (st->err) std::rethrow_exception(st->err);
+  }
+  template <class F> static void teamFor_(long n, long chunk, F&& f)
+  {
+    if (n <= 0) return;
+    teamForFinish_(teamForStart_(n, chunk, f));
   }
   /// True on the pipelined tile loop's driver while it drives. Every window task is a child of the driver's
   /// implicit task, so a taskloop's taskgroup end on the driver (libgomp then runs ANY queued child of the waiting task)
@@ -2048,6 +2061,8 @@ namespace
     PickCompactConsumer(PeakPickerIM& picker, map<WinKey, PeakSlab>& windows,
                         PeakMap& ms1, CompactStats& stats)
       : picker_(picker), windows_(windows), ms1_(ms1), stats_(stats) {}
+    /// [overlap] A reader that failed mid-tile leaves a pick job queued: wait for it, its helpers use pend_.
+    ~PickCompactConsumer() { for (PickBatch_* b : {pend_.get(), next_.get()}) if (b->job) { try { teamForFinish_(b->job); } catch (...) {} } }
 
     size_t frames_seen = 0;
 
@@ -2085,65 +2100,79 @@ namespace
 
     /// [perf-load] The readers hand frames over serially: pick+compact a buffered BATCH in parallel, then
     /// append strictly by buffer index (arrival order).
-    void flush_()
+    /// One pick batch: the frames (moved out of buf_), their windows, and everything the pick writes. Two of them
+    /// alternate on the pipelined reader, so one batch is picked while the reader decodes the next.
+    struct PickBatch_
     {
-      if (!tables_init_) { tables_init_ = true; if (tablefn) tables_ = tablefn(); }
-      const int n = (int)buf_.size();
-      if (n == 0) return;
-      // per-frame regions of one reusable scratch, sized by the RAW peak counts
-      scratch_off_.resize((size_t)n + 1);
-      { size_t total = 0; for (int i = 0; i < n; ++i) { scratch_off_[(size_t)i] = total; total += buf_[(size_t)i].size(); } scratch_off_[(size_t)n] = total;
-        if (scratch_mzq_.size() < total) { scratch_mzq_.resize(total); scratch_inten_.resize(total); scratch_imq_.resize(total); } }
-      std::vector<size_t> kept((size_t)n);
-      std::vector<double> frt((size_t)n);
-      std::vector<uint32_t> fid((size_t)n);
-      std::vector<CompactStats> st((size_t)n);          // per-frame stats, merged serially below
-      PeakPickerIM picker = picker_;                    // Param is a deep-copy value type
-      std::exception_ptr pick_err;                      // an exception escaping an OMP region aborts
-      auto pickOne = [&](const int i, PeakPickerIM& pk)
+      std::vector<MapType::SpectrumType> buf;
+      std::vector<WinKey> key;
+      std::vector<size_t> off;                       ///< per-frame regions of the scratch (raw sizes)
+      std::vector<uint32_t> mzq; std::vector<float> inten; std::vector<uint16_t> imq;
+      std::vector<size_t> kept; std::vector<double> frt; std::vector<uint32_t> fid;
+      std::vector<CompactStats> st;                  ///< per-frame stats, merged serially at the append
+      std::vector<std::unique_ptr<PeakPickerIM>> pk; ///< [pipe] one picker copy per puller slot
+      std::exception_ptr err;
+      std::function<void(long, int)> body;           ///< the pick loop body the job calls (pipelined)
+      std::shared_ptr<PullJob_> job;                 ///< the live pick job, null when none
+    };
+    /// Take buf_/key_ into b and size its outputs (the scratch keeps its capacity between batches).
+    void takeBatch_(PickBatch_& b)
+    {
+      b.buf.swap(buf_); b.key.swap(key_); buf_.clear(); key_.clear();
+      const size_t n = b.buf.size();
+      b.off.resize(n + 1);
+      size_t total = 0; for (size_t i = 0; i < n; ++i) { b.off[i] = total; total += b.buf[i].size(); } b.off[n] = total;
+      if (b.mzq.size() < total) { b.mzq.resize(total); b.inten.resize(total); b.imq.resize(total); }
+      b.kept.assign(n, 0); b.frt.assign(n, 0.0); b.fid.assign(n, 0); b.st.assign(n, CompactStats()); b.err = nullptr;
+    }
+    void pickOne_(PickBatch_& b, const size_t i, PeakPickerIM& pk)
+    {
+      try
       {
-        try
-        {
-          auto& s = buf_[(size_t)i];
-          ensureIMArrayName(s);
-          if (s.getIMPeakType() != IMPeakType::IM_CENTROIDED) pk.pickIMCluster(s);
-          ensureIMArrayName(s);
-          frt[(size_t)i] = s.getRT();
-          fid[(size_t)i] = frameIdOf(s.getNativeID());
-          if (!frameCalibrated_(fid[(size_t)i])) ++st[(size_t)i].unmapped_frame;
-          const size_t o = scratch_off_[(size_t)i];
-          kept[(size_t)i] = compactifyInto(s, st[(size_t)i], &scratch_mzq_[o], &scratch_inten_[o], &scratch_imq_[o], scratch_off_[(size_t)i + 1] - o);
-          s.clear(true);                                // raw frame dies here, inside the loop
-        }
-        catch (...) { taskErr_(pick_err); }
-      };
-      if (!omp_in_parallel())
-      {
-        // chunk 1: one frame per chunk, so a batch spreads over every worker
-        #pragma omp parallel for firstprivate(picker) schedule(dynamic, 1)
-        for (int i = 0; i < n; ++i) pickOne(i, picker);
+        auto& s = b.buf[i];
+        ensureIMArrayName(s);
+        if (s.getIMPeakType() != IMPeakType::IM_CENTROIDED) pk.pickIMCluster(s);
+        ensureIMArrayName(s);
+        b.frt[i] = s.getRT();
+        b.fid[i] = frameIdOf(s.getNativeID());
+        if (!frameCalibrated_(b.fid[i])) ++b.st[i].unmapped_frame;
+        const size_t o = b.off[i];
+        b.kept[i] = compactifyInto(s, b.st[i], &b.mzq[o], &b.inten[o], &b.imq[o], b.off[i + 1] - o);
+        s.clear(true);                                // raw frame dies here, inside the loop
       }
-      else
-      {
-        // [pipe] the pipelined tile reader, on the window team's driver: one picker copy per puller slot, made
-        // by the slot's first frame (a slot has one puller at a time)
-        std::vector<std::unique_ptr<PeakPickerIM>> pk((size_t)std::max(1, omp_get_num_threads()));
-        teamFor_(n, 1, [&](long i, int slot) {
-          std::unique_ptr<PeakPickerIM>& p = pk[(size_t)slot];
-          if (!p) p.reset(new PeakPickerIM(picker));
-          pickOne((int)i, *p); });
-      }
-      if (pick_err) std::rethrow_exception(pick_err);
-      // Append in arrival order per window, the windows of this batch in parallel: a window's
-      // frames stay in order (one thread walks them), distinct windows never touch each other's
-      // slab, and the copy of ~1 GB per batch into cold pages runs on many threads.
+      catch (...) { taskErr_(b.err); }
+    }
+    /// [pipe][overlap] Queue the batch's pick on the window team and return: the reader decodes the next frames while
+    /// free threads (and windows at their break points) pick these.
+    void startPick_(PickBatch_& b)
+    {
+      b.pk.resize((size_t)std::max(1, omp_get_num_threads()));
+      b.body = [this, &b](long i, int slot) {
+        std::unique_ptr<PeakPickerIM>& p = b.pk[(size_t)slot];
+        if (!p) p.reset(new PeakPickerIM(picker_));   // Param is a deep-copy value type
+        pickOne_(b, (size_t)i, *p); };
+      b.job = teamForStart_((long)b.buf.size(), 1, b.body);
+    }
+    void finishPick_(PickBatch_& b)
+    {
+      if (!b.job) return;
+      std::shared_ptr<PullJob_> j; j.swap(b.job);
+      teamForFinish_(j);
+      if (b.err) std::rethrow_exception(b.err);
+    }
+    /// Append in arrival order per window, the windows of this batch in parallel: a window's
+    /// frames stay in order (one thread walks them), distinct windows never touch each other's
+    /// slab, and the copy of ~1 GB per batch into cold pages runs on many threads.
+    void appendBatch_(PickBatch_& b)
+    {
+      const int n = (int)b.buf.size();
       struct Batch { PeakSlab* slab; FrameTab* tab; std::vector<int> idx; };
       std::vector<Batch> per_win;
       { std::map<WinKey, size_t> at;
         for (int i = 0; i < n; ++i)
         {
-          stats_ += st[(size_t)i];
-          const WinKey& k = key_[(size_t)i];
+          stats_ += b.st[(size_t)i];
+          const WinKey& k = b.key[(size_t)i];
           auto it = at.find(k);
           if (it == at.end())
           { it = at.emplace(k, per_win.size()).first;
@@ -2162,16 +2191,16 @@ namespace
         for (int i : bw.idx)
         {
           const size_t exp_f = bw.tab ? bw.tab->rt.size() : n_ms1;   // the window's frame count: exact when a table exists
-          if (bw.tab && !bw.tab->step(*bw.slab, frt[(size_t)i], fid[(size_t)i]))   // [frames] lockstep with the frozen table
+          if (bw.tab && !bw.tab->step(*bw.slab, b.frt[(size_t)i], b.fid[(size_t)i]))   // [frames] lockstep with the frozen table
           {
             #pragma omp critical(pad_err)
             if (!pad_err) pad_err = std::make_exception_ptr(InputRefusal(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
                   "[frames] a delivered MS2 frame (rt, frame id) is not in its window's frozen frame table (window "
-                  + winLabel(key_[(size_t)i]) + ", frame " + String(fid[(size_t)i]) + ")", String(frt[(size_t)i], 6)));
+                  + winLabel(b.key[(size_t)i]) + ", frame " + String(b.fid[(size_t)i]) + ")", String(b.frt[(size_t)i], 6)));
             break;
           }
-          const size_t o = scratch_off_[(size_t)i];
-          bw.slab->append(frt[(size_t)i], fid[(size_t)i], &scratch_mzq_[o], &scratch_inten_[o], &scratch_imq_[o], kept[(size_t)i], exp_f);
+          const size_t o = b.off[(size_t)i];
+          bw.slab->append(b.frt[(size_t)i], b.fid[(size_t)i], &b.mzq[o], &b.inten[o], &b.imq[o], b.kept[(size_t)i], exp_f);
         }
       };
       if (!omp_in_parallel())
@@ -2179,9 +2208,47 @@ namespace
         #pragma omp parallel for schedule(dynamic, 1)
         for (long w = 0; w < (long)per_win.size(); ++w) { try { appendWin(w); } catch (...) { taskErr_(pad_err); } }   // [task-err] bad_alloc, the slab bounds
       }
-      else teamFor_((long)per_win.size(), 1, [&](long w, int) { appendWin(w); });   // [pipe] as the pick above
+      else teamFor_((long)per_win.size(), 1, [&](long w, int) { appendWin(w); });   // [pipe] as the pick
       if (pad_err) std::rethrow_exception(pad_err);
-      buf_.clear(); key_.clear();
+      b.buf.clear(); b.key.clear();
+    }
+    /// [overlap] The pending batch (picked or being picked, not yet appended): finish its pick, append it.
+    void drainPending_()
+    {
+      if (!pending_) return;
+      pending_ = false;
+      finishPick_(*pend_);
+      appendBatch_(*pend_);
+    }
+
+    /// [perf-load] The readers hand frames over serially: pick+compact a buffered BATCH in parallel, then
+    /// append strictly by buffer index (arrival order).
+    /// [pipe][overlap] On the pipelined tile reader the pick of a batch runs while the reader decodes the next one:
+    /// this call queues the new batch's pick, then finishes and appends the PREVIOUS batch (still in arrival order,
+    /// before the new one), and returns. finish() appends the last one. The output is the serial order's.
+    void flush_()
+    {
+      if (!tables_init_) { tables_init_ = true; if (tablefn) tables_ = tablefn(); }
+      if (buf_.empty()) return;
+      if (!omp_in_parallel())
+      {
+        drainPending_();
+        PickBatch_& b = *next_;
+        takeBatch_(b);
+        PeakPickerIM picker = picker_;                  // Param is a deep-copy value type
+        const int n = (int)b.buf.size();
+        // chunk 1: one frame per chunk, so a batch spreads over every worker
+        #pragma omp parallel for firstprivate(picker) schedule(dynamic, 1)
+        for (int i = 0; i < n; ++i) pickOne_(b, (size_t)i, picker);
+        if (b.err) std::rethrow_exception(b.err);
+        appendBatch_(b);
+        return;
+      }
+      PickBatch_& b = *next_;                           // free: its last append is done
+      takeBatch_(b);
+      startPick_(b);
+      drainPending_();                                  // the previous batch, while the helpers pick this one
+      std::swap(pend_, next_); pending_ = true;
     }
 
   protected:
@@ -2251,7 +2318,7 @@ namespace
     /// last `n mod kBatch` spectra are dropped.
     void finish()
     {
-      pickMS1Batch_(ms1_buf_); flush_();
+      pickMS1Batch_(ms1_buf_); flush_(); drainPending_();
       // [frames] the tail of every delivered window's table; a table window that delivered nothing
       // gets no slab (it is counted as absent by the caller)
       for (auto& kv : tables_)
@@ -2264,8 +2331,8 @@ namespace
     std::vector<MapType::SpectrumType> buf_;
     std::vector<WinKey> key_;
     FrameTables tables_; bool tables_init_ = false;   ///< [frames] the reader's frozen tables + cursors
-    std::vector<size_t> scratch_off_;                 ///< per-frame regions of the batch scratch (raw sizes)
-    std::vector<uint32_t> scratch_mzq_; std::vector<float> scratch_inten_; std::vector<uint16_t> scratch_imq_;
+    std::unique_ptr<PickBatch_> next_{new PickBatch_}, pend_{new PickBatch_};   ///< [overlap] the free batch, the pending one
+    bool pending_ = false;                            ///< [overlap] pend_ holds a batch whose append is due
     PeakPickerIM& picker_;
     std::vector<MapType::SpectrumType> ms1_buf_;   // MS1 frames awaiting the parallel pick
     bool dn_loader_checked_ = false;               ///< [dnoise] checkLoader ran on the first MS1 frame
@@ -2910,6 +2977,36 @@ protected:
     setMinFloat_("noims:min_corr", 0.0);
     setMaxFloat_("noims:min_corr", 1.0);
     registerDoubleOption_("noims:ppm", "<ppm>", 10.0, "Non-IMS path: mass-trace and isotope m/z tolerance.", false, true);
+    registerStringOption_("noims:instrument", "<type>", "auto", "Non-IMS path: mass analyzer the defaults are tuned for; auto = from the input's instrument (TOF without Orbitrap or FTICR = tof).", false, true);
+    setValidStrings_("noims:instrument", {"auto", "orbitrap", "tof"});
+    registerStringOption_("noims:tof", "<mode>", "off", "Non-IMS path: Biosaur2's TOF noise filter on MS1.", false, true);
+    setValidStrings_("noims:tof", {"off", "on"});
+    registerDoubleOption_("noims:min_intensity", "<i>", 1.0, "Non-IMS path: least MS1 peak intensity for precursor detection (Biosaur2 mini).", false, true);
+    registerIntOption_("noims:min_hill_scans", "<n>", 2, "Non-IMS path: fewest MS1 scans per precursor hill (Biosaur2 minlh).", false, true);
+    registerIntOption_("noims:min_charge", "<z>", 1, "Non-IMS path: least precursor charge (Biosaur2 cmin).", false, true);
+    registerIntOption_("noims:min_fragments", "<n>", 3, "Non-IMS path: fewest fragments a spectrum needs.", false, true);
+    registerDoubleOption_("noims:min_fragment_intensity", "<i>", 0.0, "Non-IMS path: least apex intensity of a fragment trace.", false, true);
+    registerIntOption_("noims:min_fragment_points", "<n>", 1, "Non-IMS path: fewest MS2 scans of a fragment trace.", false, true);
+    registerIntOption_("noims:max_fragments", "<n>", 200, "Non-IMS path: most fragments kept per spectrum.", false, true);
+    registerDoubleOption_("noims:weight_power", "<p>", 24.0, "Non-IMS path: fragment intensity is weighted by r^p.", false, true);
+    registerDoubleOption_("noims:ms2_ppm", "<ppm>", 0.0, "Non-IMS path: MS2 mass-trace tolerance; 0 = noims:ppm.", false, true);
+    setMinFloat_("noims:ms2_ppm", 0.0);
+    registerDoubleOption_("noims:split", "<f>", 0.0, "Non-IMS path: split MS2 traces at elution valleys below f x the lower flanking maximum; 0 = off.", false, true);
+    setMinFloat_("noims:split", 0.0);
+    setMaxFloat_("noims:split", 1.0);
+    registerStringOption_("noims:envelope_charges", "<mode>", "first", "Non-IMS path: MS2 isotope envelopes: first = a -1 isotope at the highest matching charge drops the envelope; all = try the lower charges.", false, true);
+    setValidStrings_("noims:envelope_charges", {"first", "all"});
+    registerStringOption_("noims:precursor_peaks", "<mode>", "keep", "Non-IMS path: the precursor's own isotope peaks in its spectrum: keep or drop.", false, true);
+    setValidStrings_("noims:precursor_peaks", {"keep", "drop"});
+    setMinInt_("noims:max_fragments", 1);
+    setMinFloat_("noims:weight_power", 0.0);
+    setMinFloat_("noims:min_fragment_intensity", 0.0);
+    setMinInt_("noims:min_fragment_points", 1);
+    setMinFloat_("noims:min_intensity", 0.0);
+    setMinInt_("noims:min_hill_scans", 1);
+    setMinInt_("noims:min_charge", 1);
+    setMaxInt_("noims:min_charge", 4);
+    setMinInt_("noims:min_fragments", 1);
 
     // Bounds, not documentation: without these a negative count wraps through `Size` (min_fragments
     // -1 becomes ~1.8e19 and nothing is ever emitted) and a negative tolerance silently gates
@@ -4430,6 +4527,10 @@ protected:
     return writeNoIms_(res, out, out_type);
   }
 
+  // TOF defaults of the non-IMS path (PXD002952 TripleTOF 6600 SWATH, Sage peptides at 1 %)
+  static constexpr double TOF_MS2_PPM = 5.0, TOF_SPLIT = 0.5;
+  static constexpr int TOF_MIN_CHARGE = 2, TOF_MIN_HILL_SCANS = 3;
+
   ExitCodes noImsSpectra_(PeakMap& exp, PeakMap& res)
   {
     for (const MSSpectrum& s : exp)
@@ -4459,6 +4560,44 @@ protected:
     spx_noims::Params P;
     P.min_corr = getDoubleOption_("noims:min_corr");
     P.ppm = getDoubleOption_("noims:ppm");
+    P.tof = getStringOption_("noims:tof") == "on";
+    P.min_intensity = getDoubleOption_("noims:min_intensity");
+    P.min_hill_scans = getIntOption_("noims:min_hill_scans");
+    P.min_charge = getIntOption_("noims:min_charge");
+    P.min_frags = getIntOption_("noims:min_fragments");
+    P.min_frag_intensity = getDoubleOption_("noims:min_fragment_intensity");
+    P.min_frag_points = getIntOption_("noims:min_fragment_points");
+    P.max_frags = getIntOption_("noims:max_fragments");
+    P.weight_pow = getDoubleOption_("noims:weight_power");
+    P.ms2_ppm = getDoubleOption_("noims:ms2_ppm");
+    P.split = getDoubleOption_("noims:split");
+    P.env_all_charges = getStringOption_("noims:envelope_charges") == "all";
+    P.drop_precursor = getStringOption_("noims:precursor_peaks") == "drop";
+    // [tof] TOF analyzers (SWATH) record each fragment m/z with more scatter and many unrelated ions per scan: wide MS2
+    // traces join neighbouring ions and recurring m/z into one long trace whose single apex reaches one precursor only.
+    // TOF input therefore gets narrow MS2 traces split into elution peaks, and fewer precursors: charge >= 2, seen in
+    // >= 3 MS1 scans (charge 1 gave 0.2 % PSMs per spectrum on SWATH). Only options left at their defaults change; Orbitrap and FTICR input keeps every default.
+    String inst = getStringOption_("noims:instrument");
+    if (inst == "auto")
+    {
+      bool tof = false, ft = false;
+      for (const auto& a : exp.getInstrument().getMassAnalyzers())
+      {
+        tof |= a.getType() == MassAnalyzer::AnalyzerType::TOF;
+        ft |= a.getType() == MassAnalyzer::AnalyzerType::ORBITRAP || a.getType() == MassAnalyzer::AnalyzerType::FOURIERTRANSFORM;
+      }
+      inst = tof && !ft ? "tof" : "orbitrap";
+    }
+    if (inst == "tof")
+    {
+      const spx_noims::Params D;
+      if (P.ms2_ppm == D.ms2_ppm) P.ms2_ppm = TOF_MS2_PPM;
+      if (P.split == D.split) P.split = TOF_SPLIT;
+      if (P.min_charge == D.min_charge) P.min_charge = TOF_MIN_CHARGE;
+      if (P.min_hill_scans == D.min_hill_scans) P.min_hill_scans = TOF_MIN_HILL_SCANS;
+      writeLogInfo_("[noims] TOF input: MS2 traces at " + String(P.ms2_ppm) + " ppm split at valleys below " + String(P.split)
+                    + ", precursors of charge >= " + String(P.min_charge) + " seen in >= " + String(P.min_hill_scans) + " MS1 scans");
+    }
     spx_noims::run(exp, P, res, [this](const String& m) { writeLogInfo_(m); });   // moves the spectra out of exp
     return EXECUTION_OK;
   }
@@ -4595,7 +4734,8 @@ protected:
     // an mzML is always read whole: the frame-by-frame reader reads a .d (or an mzPeak archive) only
     const FileTypes::Type in_type = FileHandler::getTypeByFileName(in);
 #ifdef DIASPEXTRACT_WITH_MZPEAK
-    const bool streamable = in_type == FileTypes::BRUKER_TDF || in_type == FileTypes::MZPEAK;
+    // [noims] an mzPeak archive without ion mobility is read whole, as an mzML is
+    const bool streamable = in_type == FileTypes::BRUKER_TDF || (in_type == FileTypes::MZPEAK && spx::mzPeakHasIonMobility(in));
 #else
     const bool streamable = in_type == FileTypes::BRUKER_TDF;
 #endif

@@ -712,6 +712,147 @@
       "description": "Non-IMS path: mass-trace and isotope m/z tolerance.",
       "advanced": true,
       "min": 0
+    },
+    {
+      "name": "noims:instrument",
+      "section": "noims",
+      "type": "string",
+      "default": "auto",
+      "description": "Non-IMS path: mass analyzer the defaults are tuned for; auto = from the input's instrument (TOF without Orbitrap or FTICR = tof).",
+      "advanced": true,
+      "choices": [
+        "auto",
+        "orbitrap",
+        "tof"
+      ]
+    },
+    {
+      "name": "noims:tof",
+      "section": "noims",
+      "type": "string",
+      "default": "off",
+      "description": "Non-IMS path: Biosaur2's TOF noise filter on MS1.",
+      "advanced": true,
+      "choices": [
+        "off",
+        "on"
+      ]
+    },
+    {
+      "name": "noims:min_intensity",
+      "section": "noims",
+      "type": "double",
+      "default": "1.0",
+      "description": "Non-IMS path: least MS1 peak intensity for precursor detection (Biosaur2 mini).",
+      "advanced": true,
+      "min": 0
+    },
+    {
+      "name": "noims:min_hill_scans",
+      "section": "noims",
+      "type": "int",
+      "default": "2",
+      "description": "Non-IMS path: fewest MS1 scans per precursor hill (Biosaur2 minlh).",
+      "advanced": true,
+      "min": 1
+    },
+    {
+      "name": "noims:min_charge",
+      "section": "noims",
+      "type": "int",
+      "default": "1",
+      "description": "Non-IMS path: least precursor charge (Biosaur2 cmin).",
+      "advanced": true,
+      "min": 1,
+      "max": 4
+    },
+    {
+      "name": "noims:min_fragments",
+      "section": "noims",
+      "type": "int",
+      "default": "3",
+      "description": "Non-IMS path: fewest fragments a spectrum needs.",
+      "advanced": true,
+      "min": 1
+    },
+    {
+      "name": "noims:min_fragment_intensity",
+      "section": "noims",
+      "type": "double",
+      "default": "0.0",
+      "description": "Non-IMS path: least apex intensity of a fragment trace.",
+      "advanced": true,
+      "min": 0
+    },
+    {
+      "name": "noims:min_fragment_points",
+      "section": "noims",
+      "type": "int",
+      "default": "1",
+      "description": "Non-IMS path: fewest MS2 scans of a fragment trace.",
+      "advanced": true,
+      "min": 1
+    },
+    {
+      "name": "noims:max_fragments",
+      "section": "noims",
+      "type": "int",
+      "default": "200",
+      "description": "Non-IMS path: most fragments kept per spectrum.",
+      "advanced": true,
+      "min": 1
+    },
+    {
+      "name": "noims:weight_power",
+      "section": "noims",
+      "type": "double",
+      "default": "24.0",
+      "description": "Non-IMS path: fragment intensity is weighted by r^p.",
+      "advanced": true,
+      "min": 0
+    },
+    {
+      "name": "noims:ms2_ppm",
+      "section": "noims",
+      "type": "double",
+      "default": "0.0",
+      "description": "Non-IMS path: MS2 mass-trace tolerance; 0 = noims:ppm.",
+      "advanced": true,
+      "min": 0
+    },
+    {
+      "name": "noims:split",
+      "section": "noims",
+      "type": "double",
+      "default": "0.0",
+      "description": "Non-IMS path: split MS2 traces at elution valleys below f x the lower flanking maximum; 0 = off.",
+      "advanced": true,
+      "min": 0,
+      "max": 1
+    },
+    {
+      "name": "noims:envelope_charges",
+      "section": "noims",
+      "type": "string",
+      "default": "first",
+      "description": "Non-IMS path: MS2 isotope envelopes: first = a -1 isotope at the highest matching charge drops the envelope; all = try the lower charges.",
+      "advanced": true,
+      "choices": [
+        "first",
+        "all"
+      ]
+    },
+    {
+      "name": "noims:precursor_peaks",
+      "section": "noims",
+      "type": "string",
+      "default": "keep",
+      "description": "Non-IMS path: the precursor's own isotope peaks in its spectrum: keep or drop.",
+      "advanced": true,
+      "choices": [
+        "keep",
+        "drop"
+      ]
     }
   ]
 }

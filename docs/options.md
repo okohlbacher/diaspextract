@@ -209,7 +209,7 @@ exit code 11.
 |---|---|---|
 | `-noims:min_corr` | 0.3 | Smallest Pearson correlation between a fragment's and the precursor's profile on the window's scan grid. 0 to 1. |
 | `-noims:ppm` | 10 | m/z tolerance of the mass traces and isotope patterns (ppm). At least 0. |
-| `-noims:instrument` | auto | Mass analyzer the defaults are tuned for: `auto` (from the input's instrument description: TOF without Orbitrap or FTICR is `tof`), `orbitrap`, `tof`. On `tof`, options left at their defaults change to: `-noims:ms2_ppm 5`, `-noims:split 0.5`, `-noims:min_charge 2`, `-noims:min_hill_scans 3`. |
+| `-noims:instrument` | auto | Mass analyzer the defaults are tuned for: `auto` (from the input's instrument description: TOF without Orbitrap or FTICR is `tof`), `orbitrap`, `tof`. On `tof`, options left at their defaults change to: `-noims:ms2_ppm 4`, `-noims:split 0.5`, `-noims:min_charge 2`, `-noims:min_hill_scans 3`, `-noims:ppm 7`, `-noims:min_corr 0.5`, `-noims:weight_power 2`, `-noims:complement_boost 2`, `-noims:span_pad 5`, `-noims:envelope_pattern on`, `-noims:hill_seeds 3`, `-noims:pair_top 200`, `-noims:seed_mono on`, `-noims:ms2_shift auto`. An option given explicitly keeps its value. |
 | `-noims:ms2_ppm` | 0 | m/z tolerance of the MS2 mass traces (ppm); 0 = `-noims:ppm`. |
 | `-noims:split` | 0 | Split MS2 traces into elution peaks at valleys below this fraction of both flanking maxima; 0 = off. 0 to 1. |
 | `-noims:envelope_charges` | first | Isotope envelopes found in MS2: `first` drops an envelope whose highest matching charge has a −1 isotope; `all` tries the lower charges. |
@@ -223,6 +223,14 @@ exit code 11.
 | `-noims:min_intensity` | 1 | Smallest MS1 peak intensity for precursor detection (Biosaur2 `mini`). |
 | `-noims:min_hill_scans` | 2 | Fewest MS1 scans per precursor hill (Biosaur2 `minlh`). |
 | `-noims:tof` | off | Biosaur2's TOF noise filter on MS1 (a per-50-m/z intensity floor): `off`, `on`. |
+| `-noims:complement_boost` | 0 | Fragments with a complementary partner (their m/z sum to the precursor mass + 2 protons) get their weight multiplied by this; 0 = off. At least 0. |
+| `-noims:span_pad` | 0 | Widen each precursor's RT span by this many window scans per side for the fragment correlation; 0 = off. At least 0. |
+| `-noims:envelope_pattern` | off | MS2 isotope envelopes must fit the averagine +1/mono intensity ratio; the best-fitting charge wins: `off`, `on`. |
+| `-noims:hill_seeds` | 0 | MS1 hills outside every feature become charge 2 and 3 precursors, kept if their spectrum has at least this many complementary fragment pairs; 0 = off. With MSFragger and Percolator, 1 found 2.7 % more peptides than the TOF default 3; with Sage, 3 is better. |
+| `-noims:pair_top` | 50 | Hill seeds count complementary pairs among this many most intense peaks. At least 2. |
+| `-noims:seed_mono` | off | Drop a hill seed at a charge when a hill one isotope step lighter overlaps it in RT (it is then no monoisotopic peak): `off`, `on`. |
+| `-noims:ms2_shift` | 0 | Shift of the fragment m/z in ppm, or `auto` (estimated per run from the y1 ions of tryptic peptides). |
+| `-noims:tag_source` | off | Write each spectrum's precursor source as userParam `precursor_source` (0 MS1 feature, 1 MS2 envelope, 2 corrected envelope, 3 hill seed); hill seeds also get `hill_pairs` and `hill_span` (s): `off`, `on`. |
 
 ## Diagnostics
 

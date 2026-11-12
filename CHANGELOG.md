@@ -1,5 +1,44 @@
 # Changelog
 
+## v1.9.4 — 2026-11-12
+
+**Spectra change for TOF input without ion mobility (SWATH) only.** diaPASEF and Orbitrap spectra do not change (Orbitrap
+test runs: 1.9.3's files, byte for byte; diaPASEF: every spectrum identical).
+
+### Added
+
+- **More precursors on TOF SWATH input.** Three precursor sources join the MS1 features: isotope envelopes found in MS2
+  (checked against the averagine +1/mono ratio), MS1 hills outside every feature, tried as charge 2 and 3 and kept when
+  their spectrum has at least three complementary b/y fragment pairs, and a per-run fragment m/z shift estimated from
+  y1 ions. Fragments with a complementary partner get more weight, and each precursor's RT span for the correlation is
+  widened. All of it is on by default for TOF input only (`-noims:instrument auto`); `-noims:instrument orbitrap` gives
+  1.9.3's spectra. On six TripleTOF 6600 SWATH runs (PXD002952), mean per run at 1 % FDR: Sage 25,670 peptides, and
+  23,769 against a database twice the size (shuffled entrapment, estimated FDP 1.03 %); MSFragger with Percolator
+  27,596. Extraction takes 7:21 to 8:14 per run on 16 threads of a 64-core EPYC node. New options, all listed in
+  `docs/options.md`: `-noims:complement_boost`, `-noims:span_pad`, `-noims:envelope_pattern`, `-noims:hill_seeds`,
+  `-noims:pair_top`, `-noims:seed_mono`, `-noims:ms2_shift`, `-noims:tag_source`. With MSFragger and Percolator,
+  `-noims:hill_seeds 1` gave 2.7 % more peptides than the default 3; with Sage, 3 is better.
+- **The GUI lists the new options.**
+
+### Changed
+
+- **Code follows the OpenMS coding conventions** (naming, namespaces, file headers, Doxygen, clang-format; cpplint with
+  OpenMS's settings reports no error). Progress is reported per tile (ion mobility) and per isolation window (without).
+- **Negative values are refused** for `-gate:min_correlation_points`, `-assembly:im_weight_sigma`,
+  `-assembly:corr_power`, `-trace:ms2_min_length_sec`, `-tile:cells_per_tile`, `-trace:ms2_split_valleys`,
+  `-trace:ms1_split_valleys`, `-trace:native_ms1_neighbors`, `-perf:max_concurrent_windows`, `-perf:decode_threads` and
+  `-charge:im_veto_band`.
+- **A corrupt or unreadable mzPeak archive** ends through the tool's regular error handling and exit codes.
+
+### Removed
+
+- The unused non-IMS options `-noims:fragment_rank`, `-noims:mono_correction` and `-noims:ms2_envelopes`, and the
+  debug dumps `DIASPX_DUMP` and `DIASPX_HILLS`.
+
+### Fixed
+
+- `docs/options.md` gave 5 ppm for the TOF MS2 trace tolerance; it is 4 ppm.
+
 ## v1.9.3 — 2026-11-10
 
 **Spectra change for TOF input without ion mobility (SWATH); all other spectra do not change** (diaPASEF, FAIMS and

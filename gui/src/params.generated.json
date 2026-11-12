@@ -94,7 +94,8 @@
       "type": "int",
       "default": "3",
       "description": "Fewest shared points a fragment's correlation needs. Where gate:shrinkage applies, gate:shrink_min_points is used instead.",
-      "advanced": true
+      "advanced": true,
+      "min": 0
     },
     {
       "name": "gate:short_traces",
@@ -131,7 +132,7 @@
       "section": "gate",
       "type": "double",
       "default": "-1.0",
-      "description": "Largest precursor-fragment 1/K0 difference for the fragment match only, leaving the tracing tolerance unchanged. Negative (default) = gate:delta_im. Experimental.",
+      "description": "Largest precursor-fragment 1/K0 difference for the fragment match only, leaving the tracing tolerance unchanged. Negative (default) = gate:delta_im; otherwise 0 to about 0.1. Experimental.",
       "advanced": true
     },
     {
@@ -223,7 +224,7 @@
       "section": "gate",
       "type": "double",
       "default": "0.6",
-      "description": "gate:shrinkage fisher: prior mean correlation.",
+      "description": "gate:shrinkage fisher: prior mean correlation (-1 < r < 1).",
       "advanced": true
     },
     {
@@ -268,7 +269,8 @@
       "type": "double",
       "default": "0.005",
       "description": "Weight each fragment's intensity by a Gaussian of its 1/K0 distance to the precursor (sigma in 1/K0), before the fragment cap. 0 = off.",
-      "advanced": false
+      "advanced": false,
+      "min": 0
     },
     {
       "name": "assembly:corr_power",
@@ -276,7 +278,8 @@
       "type": "double",
       "default": "2.0",
       "description": "Weight each fragment's intensity by corr^k, corr its elution correlation with the precursor. 0 = off.",
-      "advanced": false
+      "advanced": false,
+      "min": 0
     },
     {
       "name": "assembly:twin_im_tolerance",
@@ -424,7 +427,8 @@
       "type": "double",
       "default": "0.0",
       "description": "Shortest fragment trace kept (seconds). 0 = no filter.",
-      "advanced": false
+      "advanced": false,
+      "min": 0
     },
     {
       "name": "trace:detector",
@@ -444,7 +448,8 @@
       "type": "double",
       "default": "7.0",
       "description": "Split fragment traces at chromatographic valleys; the value is the expected peak width (seconds). 0 = off.",
-      "advanced": false
+      "advanced": false,
+      "min": 0
     },
     {
       "name": "trace:ms1_split_valleys",
@@ -452,7 +457,8 @@
       "type": "double",
       "default": "7.0",
       "description": "Split precursor traces at chromatographic valleys, so two peptides that elute apart at the same m/z stay separate; the value is the expected peak width (seconds). 0 = off.",
-      "advanced": false
+      "advanced": false,
+      "min": 0
     },
     {
       "name": "trace:max_span_sec",
@@ -469,7 +475,8 @@
       "type": "int",
       "default": "0",
       "description": "Add n neighbouring MS1 frames on each side to every MS1 frame before peak picking (Bruker .d with perf:stream_load true). 0 = off. Needs -dnoise:ms1 false.",
-      "advanced": true
+      "advanced": true,
+      "min": 0
     },
     {
       "name": "trace:im_slice_merge",
@@ -485,7 +492,7 @@
       "section": "tile",
       "type": "double",
       "default": "600.0",
-      "description": "Width (seconds) of the fixed retention-time cells the integer detector traces in; a trace that crosses a cell edge is cut there. 0 or negative = the whole run as one cell. Changes the output.",
+      "description": "Width (seconds) of the fixed retention-time cells the integer detector traces in; a trace that crosses a cell edge is cut there; 60 to a few thousand seconds. 0 or negative = the whole run as one cell. Changes the output.",
       "advanced": true
     },
     {
@@ -494,7 +501,8 @@
       "type": "int",
       "default": "1",
       "description": "Process the run in tiles of this many retention-time cells to bound memory; fewer cells per tile use less memory. 0 = the whole run as one tile, at several times the memory. mzPeak output always runs as one tile.",
-      "advanced": true
+      "advanced": true,
+      "min": 0
     },
     {
       "name": "diag:spectrum_meta",
@@ -582,7 +590,8 @@
       "type": "int",
       "default": "0",
       "description": "Most isolation windows processed at once; fewer use less memory but take longer. 0 = no cap (free memory still limits them).",
-      "advanced": false
+      "advanced": false,
+      "min": 0
     },
     {
       "name": "perf:decode_threads",
@@ -590,7 +599,8 @@
       "type": "int",
       "default": "0",
       "description": "Threads that decode the Bruker frames (MS1 on the first read; MS2, sliced into the windows, when the run or a tile is read; diaPASEF). 0 = all threads on the first read and the window team's free threads on the tile reads; n = a team of n threads for both; 1 = serial. The spectra do not depend on it.",
-      "advanced": false
+      "advanced": false,
+      "min": 0
     },
     {
       "name": "charge:min_charge",
@@ -619,7 +629,8 @@
       "type": "double",
       "default": "2.5",
       "description": "charge:im_charge_veto: half-width of the 2+ and 3+ mobility bands, in robust standard deviations of the fit.",
-      "advanced": false
+      "advanced": false,
+      "min": 0
     },
     {
       "name": "charge:mono_profile_check",
@@ -852,6 +863,86 @@
       "choices": [
         "keep",
         "drop"
+      ]
+    },
+    {
+      "name": "noims:complement_boost",
+      "section": "noims",
+      "type": "double",
+      "default": "0.0",
+      "description": "Non-IMS path: weight x f for fragments with a complementary partner (sum = precursor mass + 2 protons); 0 = off.",
+      "advanced": true,
+      "min": 0
+    },
+    {
+      "name": "noims:span_pad",
+      "section": "noims",
+      "type": "int",
+      "default": "0",
+      "description": "Non-IMS path: widen each precursor's RT span by n window scans per side for the fragment correlation; 0 = off.",
+      "advanced": true,
+      "min": 0
+    },
+    {
+      "name": "noims:envelope_pattern",
+      "section": "noims",
+      "type": "string",
+      "default": "off",
+      "description": "Non-IMS path: MS2 isotope envelopes must fit the averagine +1/mono intensity ratio; the best-fitting charge wins.",
+      "advanced": true,
+      "choices": [
+        "off",
+        "on"
+      ]
+    },
+    {
+      "name": "noims:hill_seeds",
+      "section": "noims",
+      "type": "int",
+      "default": "0",
+      "description": "Non-IMS path: MS1 hills outside every feature become charge 2 and 3 precursors, kept with at least this many complementary fragment pairs (0 = off).",
+      "advanced": true,
+      "min": 0
+    },
+    {
+      "name": "noims:pair_top",
+      "section": "noims",
+      "type": "int",
+      "default": "50",
+      "description": "Non-IMS path: hill seeds count complementary fragment pairs among the n most intense peaks.",
+      "advanced": true,
+      "min": 2
+    },
+    {
+      "name": "noims:seed_mono",
+      "section": "noims",
+      "type": "string",
+      "default": "off",
+      "description": "Non-IMS path: drop a hill seed at a charge when a hill one isotope step lighter overlaps it in RT (it is then no monoisotopic peak).",
+      "advanced": true,
+      "choices": [
+        "off",
+        "on"
+      ]
+    },
+    {
+      "name": "noims:ms2_shift",
+      "section": "noims",
+      "type": "string",
+      "default": "0",
+      "description": "Non-IMS path: shift of the fragment m/z in ppm; auto = estimated from the y1 ions of tryptic peptides.",
+      "advanced": true
+    },
+    {
+      "name": "noims:tag_source",
+      "section": "noims",
+      "type": "string",
+      "default": "off",
+      "description": "Non-IMS path: write each spectrum's precursor source as userParam precursor_source (0 MS1 feature, 1 MS2 envelope, 2 corrected envelope, 3 hill seed); hill seeds also get hill_pairs and hill_span (s).",
+      "advanced": true,
+      "choices": [
+        "off",
+        "on"
       ]
     }
   ]

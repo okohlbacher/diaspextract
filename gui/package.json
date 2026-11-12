@@ -1,7 +1,7 @@
 {
   "name": "diaspextract-gui",
   "private": true,
-  "version": "1.9.3",
+  "version": "1.9.4",
   "description": "Desktop app for DIAspeXtract (Tauri)",
   "license": "BSD-3-Clause",
   "type": "module",

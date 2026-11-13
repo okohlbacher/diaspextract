@@ -905,6 +905,15 @@
       "min": 0
     },
     {
+      "name": "noims:env_ms1_support",
+      "section": "noims",
+      "type": "int",
+      "default": "0",
+      "description": "Non-IMS path: an MS2 isotope envelope becomes a precursor only if MS1 has its mono m/z (15 ppm) in at least n scans within 1.5 cycles of its apex (0 = off).",
+      "advanced": true,
+      "min": 0
+    },
+    {
       "name": "noims:pair_top",
       "section": "noims",
       "type": "int",

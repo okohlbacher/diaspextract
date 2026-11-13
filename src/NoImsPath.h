@@ -76,6 +76,8 @@ struct Params
   double ms2_shift = 0;   ///< fragment m/z shift in ppm
   bool ms2_shift_auto = false; ///< estimate the shift from the y1 ions of tryptic peptides
   int span_pad = 0;            ///< widen the precursor's RT span by this many window scans on each side (correlation and apex gate); 0 = off
+  int env_ms1_support = 0;     ///< MS2 envelopes need their mono m/z in MS1 (15 ppm) in at least this many scans within 1.5 cycles of their
+                               ///< apex; 0 = off. Without MS1 signal an envelope is mostly a fragment ion, not an unfragmented precursor.
 };
 
 /// @brief Counts and timings of one run(), for the log.
@@ -811,6 +813,36 @@ inline Stats run(OpenMS::PeakMap& exp,
   {
     top = std::max(top, k.second);
   }
+  // MS1 scans as RT and sorted m/z, kept for the MS2 envelopes' MS1 support (Biosaur2 consumes m1)
+  std::vector<double> ms1_rt;
+  std::vector<std::vector<float>> ms1_mz;
+  if (opts.env_ms1_support > 0)
+  {
+    for (const auto& s : m1)
+    {
+      ms1_rt.push_back(s.getRT());
+      std::vector<float> v;
+      v.reserve(s.size());
+      for (const auto& p : s)
+      {
+        v.push_back((float)p.getMZ());
+      }
+      std::sort(v.begin(), v.end());
+      ms1_mz.push_back(std::move(v));
+    }
+  }
+  // number of MS1 scans within 1.5 cycles of rt with a peak within 15 ppm of mz
+  const auto ms1Support = [&](double mz, double rt) {
+    int n = 0;
+    const double tol = mz * 15e-6;
+    for (auto it = std::lower_bound(ms1_rt.begin(), ms1_rt.end(), rt - 1.5 * cycle); it != ms1_rt.end() && *it <= rt + 1.5 * cycle; ++it)
+    {
+      const auto& v = ms1_mz[it - ms1_rt.begin()];
+      const auto p = std::lower_bound(v.begin(), v.end(), (float)(mz - tol));
+      n += p != v.end() && *p <= mz + tol;
+    }
+    return n;
+  };
   const auto tb = clk::now();
   std::vector<Internal::Prec> seeds;
   const std::vector<Internal::Prec> bio
@@ -863,6 +895,7 @@ inline Stats run(OpenMS::PeakMap& exp,
         {
           dup = prec[i].z == c.z && std::fabs(prec[i].mz - c.mz) <= c.mz * opts.ppm * 1e-6 && std::fabs(prec[i].rt - c.rt) <= cycle;
         }
+        if (! dup && opts.env_ms1_support > 0 && ms1Support(c.mz, c.rt) < opts.env_ms1_support) { continue; }
         if (! dup) { prec.push_back(std::move(c)); }
       }
       nprec[w] = prec.size();

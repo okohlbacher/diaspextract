@@ -49,6 +49,7 @@
 #include <mutex>
 #include <thread>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 #include <cstdlib> // getenv
@@ -110,7 +111,7 @@ static inline double spxFileTimeSec(FILETIME a, FILETIME b) // two FILETIMEs (10
 // The release version. The standalone CMake build passes it from project(VERSION); the in-tree
 // OpenMS build does not, so the fallback here is the same number.
 #ifndef DIASPEXTRACT_VERSION
-  #define DIASPEXTRACT_VERSION "1.9.4"
+  #define DIASPEXTRACT_VERSION "1.9.5"
 #endif
 
 using namespace OpenMS;
@@ -5304,6 +5305,11 @@ protected:
                        "fragment pairs (0 = off).",
                        false, true);
     setMinInt_("noims:hill_seeds", 0);
+    registerIntOption_("noims:env_ms1_support", "<n>", 0,
+                       "Non-IMS path: an MS2 isotope envelope becomes a precursor only if MS1 has its mono m/z (15 ppm) in at least n scans "
+                       "within 1.5 cycles of its apex (0 = off).",
+                       false, true);
+    setMinInt_("noims:env_ms1_support", 0);
     registerIntOption_("noims:pair_top", "<n>", 50, "Non-IMS path: hill seeds count complementary fragment pairs among the n most intense peaks.",
                        false, true);
     setMinInt_("noims:pair_top", 2);
@@ -7740,10 +7746,25 @@ protected:
     return writeNoIms_(res, out, out_type);
   }
 
-  // TOF defaults of the non-IMS path (PXD002952 TripleTOF 6600 SWATH, Sage peptides at 1 %)
-  static constexpr double TOF_MS2_PPM = 4.0, TOF_SPLIT = 0.5, TOF_PPM = 7.0, TOF_MIN_CORR = 0.5, TOF_WEIGHT_POW = 2.0, TOF_COMP_BOOST = 2.0;
-  static constexpr int TOF_MIN_CHARGE = 2, TOF_MIN_HILL_SCANS = 3, TOF_SPAN_PAD = 5, TOF_HILL_SEEDS = 3,
-                       TOF_PAIR_TOP = 200; // hill seeds: 3 pairs beat 1 on six TripleTOF runs with entrapment (+413 peptides, 45 % fewer spectra)
+  // TOF defaults of the non-IMS path (PXD002952 TripleTOF 6600 SWATH, Sage and MSFragger + Percolator peptides at 1 %, with entrapment).
+  // Hill seeds: 3 pairs beat 1 on six TripleTOF runs (+413 peptides, 45 % fewer spectra). MS1 support of MS2 envelopes: level on the
+  // six 64-variable-window runs, +0.6 to +1.2 % on 32-fixed-window runs 004-007.
+  // A split of 0.3, padding 3 and a cap of 300 gain 2-4 % with 32 fixed windows but lose 1-2 % with 64 variable ones: keyed on the
+  // window scheme below (TOF_FIXED_*).
+  // MS2 traces at 6 ppm with variable windows (+1.3 to +1.6 % on 64-variable runs 010-013, Sage and MSFragger + Percolator).
+  static constexpr double TOF_MS2_PPM = 6.0, TOF_SPLIT = 0.5, TOF_PPM = 7.0, TOF_MIN_CORR = 0.5, TOF_WEIGHT_POW = 2.0, TOF_COMP_BOOST = 2.0;
+  static constexpr int TOF_MIN_CHARGE = 2, TOF_MIN_HILL_SCANS = 3, TOF_SPAN_PAD = 5, TOF_HILL_SEEDS = 3, TOF_PAIR_TOP = 200,
+                       TOF_ENV_MS1_SUPPORT = 2;
+  // Fixed-width isolation windows (not on a 5600): split 0.3, correlation weight r^4, cap 300. Tuned on PXD002952 6600 32-fixed runs
+  // 002 and 003; on 004-007 it beat the alternative with padding 3 instead of r^4 with both engines (Sage +2.1 / +3.7 %, MSFragger +
+  // Percolator +3.8 / +4.6 % against the variable-window values, standard / entrapment database, all four runs).
+  static constexpr double TOF_FIXED_SPLIT = 0.3, TOF_FIXED_WEIGHT_POW = 4.0, TOF_FIXED_MS2_PPM = 4.0;
+  static constexpr int TOF_FIXED_MAX_FRAGS = 300;
+  // TripleTOF 5600 (lower MS1 resolution: hills break at 7 ppm): wider MS1 and MS2 tolerances, a lower split valley, a wider correlation
+  // window and a weaker complement boost. Tuned on PXD002952 5600 runs 007 and 009, confirmed on 008 and 010-012.
+  // MS1 at 20 ppm: +0.3 to +3.2 % on 5600 runs 008, 010-012 against 15 ppm, estimated FDP 1.05 % (15 ppm: 1.12 %).
+  static constexpr double TOF5600_PPM = 20.0, TOF5600_MS2_PPM = 6.0, TOF5600_SPLIT = 0.3, TOF5600_COMP_BOOST = 1.0;
+  static constexpr int TOF5600_SPAN_PAD = 8;
 
   /**
     @brief Validate the non-IMS input, apply the TOF defaults when the instrument is a TOF, and run NoIms::run.
@@ -7798,6 +7819,7 @@ protected:
     noims_opts.span_pad = getIntOption_("noims:span_pad");
     noims_opts.env_pattern = getStringOption_("noims:envelope_pattern") == "on";
     noims_opts.hill_seeds = getIntOption_("noims:hill_seeds");
+    noims_opts.env_ms1_support = getIntOption_("noims:env_ms1_support");
     noims_opts.tag_src = getStringOption_("noims:tag_source") == "on";
     noims_opts.pair_top = getIntOption_("noims:pair_top");
     noims_opts.seed_mono = getStringOption_("noims:seed_mono") == "on";
@@ -7828,23 +7850,47 @@ protected:
       // ponytail: "explicit" = named on the command line; a value set only in an -ini file counts if it differs from the general default
       const auto dflt
         = [](const char* o, bool at_default) { return at_default && g_noims_cli.find(std::string("-noims:") + o + " ") == std::string::npos; };
-      if (dflt("ms2_ppm", noims_opts.ms2_ppm == noims_dflt.ms2_ppm)) { noims_opts.ms2_ppm = TOF_MS2_PPM; }
-      if (dflt("split", noims_opts.split == noims_dflt.split)) { noims_opts.split = TOF_SPLIT; }
+      const bool tof5600 = exp.getInstrument().getName().find("5600") != std::string::npos;
+      // fixed windows: at least 90 % of the distinct MS2 isolation windows lie within 1 m/z of the median width (an edge window
+      // without overlap on one side is narrower)
+      std::set<std::pair<long, long>> wins;
+      for (const auto& sp : exp)
+      {
+        if (sp.getMSLevel() != 2 || sp.getPrecursors().empty()) { continue; }
+        const auto& pc = sp.getPrecursors()[0];
+        wins.emplace(std::lround((pc.getMZ() - pc.getIsolationWindowLowerOffset()) * 100), std::lround((pc.getMZ() + pc.getIsolationWindowUpperOffset()) * 100));
+      }
+      std::vector<double> widths;
+      for (const auto& x : wins) { widths.push_back((x.second - x.first) / 100.0); }
+      bool fixed = false;
+      if (widths.size() >= 4 && ! tof5600)
+      {
+        std::nth_element(widths.begin(), widths.begin() + widths.size() / 2, widths.end());
+        const double med = widths[widths.size() / 2];
+        fixed = std::count_if(widths.begin(), widths.end(), [med](double w) { return std::fabs(w - med) <= 1.0; }) >= 0.9 * widths.size();
+      }
+      if (dflt("ms2_ppm", noims_opts.ms2_ppm == noims_dflt.ms2_ppm)) { noims_opts.ms2_ppm = tof5600 ? TOF5600_MS2_PPM : fixed ? TOF_FIXED_MS2_PPM : TOF_MS2_PPM; }
+      if (dflt("split", noims_opts.split == noims_dflt.split)) { noims_opts.split = tof5600 ? TOF5600_SPLIT : fixed ? TOF_FIXED_SPLIT : TOF_SPLIT; }
       if (dflt("min_charge", noims_opts.min_charge == noims_dflt.min_charge)) { noims_opts.min_charge = TOF_MIN_CHARGE; }
       if (dflt("min_hill_scans", noims_opts.min_hill_scans == noims_dflt.min_hill_scans)) { noims_opts.min_hill_scans = TOF_MIN_HILL_SCANS; }
       // tuned on PXD002952 run 008 against Sage peptides at 1 %: tighter tolerances, flatter correlation weight, wider RT span,
       // complement boost, averagine-checked MS2 envelopes, hill seeds, and a per-run fragment m/z shift
-      if (dflt("ppm", noims_opts.ppm == noims_dflt.ppm)) { noims_opts.ppm = TOF_PPM; }
+      if (dflt("ppm", noims_opts.ppm == noims_dflt.ppm)) { noims_opts.ppm = tof5600 ? TOF5600_PPM : TOF_PPM; }
       if (dflt("min_corr", noims_opts.min_corr == noims_dflt.min_corr)) { noims_opts.min_corr = TOF_MIN_CORR; }
-      if (dflt("weight_power", noims_opts.weight_pow == noims_dflt.weight_pow)) { noims_opts.weight_pow = TOF_WEIGHT_POW; }
-      if (dflt("complement_boost", noims_opts.comp_boost == noims_dflt.comp_boost)) { noims_opts.comp_boost = TOF_COMP_BOOST; }
-      if (dflt("span_pad", noims_opts.span_pad == noims_dflt.span_pad)) { noims_opts.span_pad = TOF_SPAN_PAD; }
+      if (dflt("weight_power", noims_opts.weight_pow == noims_dflt.weight_pow)) { noims_opts.weight_pow = fixed ? TOF_FIXED_WEIGHT_POW : TOF_WEIGHT_POW; }
+      if (dflt("complement_boost", noims_opts.comp_boost == noims_dflt.comp_boost)) { noims_opts.comp_boost = tof5600 ? TOF5600_COMP_BOOST : TOF_COMP_BOOST; }
+      if (dflt("span_pad", noims_opts.span_pad == noims_dflt.span_pad))
+      {
+        noims_opts.span_pad = tof5600 ? TOF5600_SPAN_PAD : TOF_SPAN_PAD;
+      }
+      if (fixed && dflt("max_fragments", noims_opts.max_frags == noims_dflt.max_frags)) { noims_opts.max_frags = TOF_FIXED_MAX_FRAGS; }
       if (dflt("hill_seeds", noims_opts.hill_seeds == noims_dflt.hill_seeds)) { noims_opts.hill_seeds = TOF_HILL_SEEDS; }
       if (dflt("pair_top", noims_opts.pair_top == noims_dflt.pair_top)) { noims_opts.pair_top = TOF_PAIR_TOP; }
+      if (dflt("env_ms1_support", noims_opts.env_ms1_support == noims_dflt.env_ms1_support)) { noims_opts.env_ms1_support = TOF_ENV_MS1_SUPPORT; }
       if (dflt("envelope_pattern", ! noims_opts.env_pattern)) { noims_opts.env_pattern = true; }
       if (dflt("seed_mono", ! noims_opts.seed_mono)) { noims_opts.seed_mono = true; }
       if (dflt("ms2_shift", ! noims_opts.ms2_shift_auto && noims_opts.ms2_shift == 0)) { noims_opts.ms2_shift_auto = true; }
-      writeLogInfo_("[noims] TOF input: MS2 traces at " + String(noims_opts.ms2_ppm) + " ppm split at valleys below " + String(noims_opts.split)
+      writeLogInfo_("[noims] TOF input" + String(tof5600 ? " (TripleTOF 5600)" : fixed ? " (fixed isolation windows)" : "") + ": MS1 at " + String(noims_opts.ppm) + " ppm, MS2 traces at " + String(noims_opts.ms2_ppm) + " ppm split at valleys below " + String(noims_opts.split)
                     + ", precursors of charge >= " + String(noims_opts.min_charge) + " seen in >= " + String(noims_opts.min_hill_scans)
                     + " MS1 scans");
     }

@@ -1,5 +1,42 @@
 # Changelog
 
+## v1.9.5 — 2026-11-13
+
+**Spectra change for TOF input without ion mobility (SWATH) only.** diaPASEF and Orbitrap spectra do not change (Orbitrap
+test runs: 1.9.3's files, byte for byte; diaPASEF: every spectrum identical).
+
+### Added
+
+- **TripleTOF 5600 defaults.** The TOF defaults now also read the instrument model from the input. On a TripleTOF 5600,
+  whose lower MS1 resolution breaks precursor hills at 7 ppm, options left at their defaults change to `-noims:ppm 20`,
+  `-noims:ms2_ppm 6`, `-noims:split 0.3`, `-noims:span_pad 8` and `-noims:complement_boost 1`. On four TripleTOF 5600
+  SWATH runs of PXD002952 that were not used for tuning, mean peptides per run at 1 % FDR: Sage 9,006 (1.9.4: 7,314,
+  +23 %), 8,139 against a database twice the size (shuffled entrapment; 6,426, +27 %; estimated FDP 1.05 %, 1.9.4:
+  0.97 %); MSFragger with Percolator 14,369 (11,000, +31 %). All four runs gain with both engines. Extraction takes about
+  1:35 per run on 16 threads.
+- **Variable isolation windows.** MS2 traces are built at 6 ppm instead of 4 (`-noims:ms2_ppm 6`). On four TripleTOF 6600
+  runs with 64 variable windows not used for this setting: Sage 25,510 peptides per run (1.9.4: 25,266, +1.0 %), 23,413
+  against the entrapment database (23,398, +0.1 %); MSFragger with Percolator 27,507 (27,271, +0.9 %).
+- **Fixed isolation windows.** When at least 90 % of the distinct MS2 isolation windows lie within 1 m/z of their median
+  width (not on a TripleTOF 5600), options left at their defaults change to `-noims:ms2_ppm 4`, `-noims:split 0.3`,
+  `-noims:weight_power 4` and `-noims:max_fragments 300`; with variable windows such settings lost 1 % to 2 % and are not used. On four
+  TripleTOF 6600 runs with 32 fixed windows not used for tuning, mean peptides per run at 1 % FDR: Sage 16,533 (1.9.4:
+  16,098, +2.7 %), 15,401 against the entrapment database (14,681, +4.9 %; estimated FDP 0.96 %, 1.9.4: 1.01 %);
+  MSFragger with Percolator 18,764 (18,079, +3.8 %). All four runs gain with both engines. These runs also chose between
+  this setting and one with `-noims:span_pad 3` instead of `-noims:weight_power 4`, which gained less.
+- **`-noims:env_ms1_support`.** An isotope envelope found in MS2 becomes a precursor only if MS1 shows its monoisotopic
+  m/z (15 ppm) in at least this many scans within 1.5 cycles of its apex; 2 for TOF input, 0 (off) otherwise. Without
+  MS1 signal such an envelope is mostly a fragment ion: on a TripleTOF 5600 run 86 % of the MS2-envelope spectra had
+  none and yielded 0.6 peptides per 1,000 spectra. It removes 14 % (TripleTOF 6600) to 38 % (5600) of the spectra; on
+  the six TripleTOF 6600 runs with 64 variable windows the peptide count is unchanged (Sage −0.1 % to +0.3 %,
+  MSFragger with Percolator −0.4 % to −0.3 %), on four 6600 runs with 32 fixed windows it rises by 0.6 % to 1.2 % (Sage).
+- **The GUI lists the new option.**
+
+### Changed
+
+- The log line for TOF input says when it selects the TripleTOF 5600 or the fixed-window defaults, and gives the MS1
+  tolerance.
+
 ## v1.9.4 — 2026-11-12
 
 **Spectra change for TOF input without ion mobility (SWATH) only.** diaPASEF and Orbitrap spectra do not change (Orbitrap

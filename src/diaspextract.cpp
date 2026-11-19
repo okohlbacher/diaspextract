@@ -111,7 +111,7 @@ static inline double spxFileTimeSec(FILETIME a, FILETIME b) // two FILETIMEs (10
 // The release version. The standalone CMake build passes it from project(VERSION); the in-tree
 // OpenMS build does not, so the fallback here is the same number.
 #ifndef DIASPEXTRACT_VERSION
-  #define DIASPEXTRACT_VERSION "1.9.5"
+  #define DIASPEXTRACT_VERSION "1.9.6"
 #endif
 
 using namespace OpenMS;
@@ -2521,7 +2521,7 @@ void buildTofIndex(const PeakSlab& sl, TracePrep& tp, TofIdx tlo, TofIdx thi)
   const uint64_t span = (uint64_t)thi - tlo + 1;
   const Size ppf = std::max<Size>(1, n_points / n_frames);
   uint32_t want = 64;
-  while (want < 4096 && (Size)want * 32 < ppf)
+  while (want < 16384 && (Size)want * 8 < ppf) // [tofidx2] ~8 peaks per bucket, up to 16384 buckets per frame
   {
     want <<= 1;
   }
@@ -4236,6 +4236,9 @@ private:
 struct FragStats
 {
   vector<double> mean, invnorm;               ///< per fragment, over the full grid of grid_frames frames
+  /// [span] per fragment, store-local frames: the first and last non-zero point and the first strict maximum, or -1 with
+  /// no non-zero point -- what assembleOne_ derived from the profile for every precursor that reached it
+  vector<int32_t> nz_lo, nz_hi, nz_apex;
   const vector<int>* nearest_local = nullptr; ///< MS1-store frame -> nearest window frame within delta_rt, or -1 (the FrozenWin's)
   Size grid_frames = 0;                       ///< frames in the window's grid
 };
@@ -4257,20 +4260,39 @@ FragStats buildFragStats(const vector<Trace>& frags, const TraceStore& wst, cons
   g.nearest_local = &fw.nearest_local;
   g.mean.resize(frags.size());
   g.invnorm.resize(frags.size());
+  g.nz_lo.resize(frags.size());
+  g.nz_hi.resize(frags.size());
+  g.nz_apex.resize(frags.size());
 #pragma omp taskloop default(shared)
   for (long ii = 0; ii < (long)frags.size(); ++ii)
   {
     const Trace& f = frags[(Size)ii];
     double sum = 0, sumsq = 0;
+    int32_t lo = -1, hi = -1, ap = -1;
+    float mx = 0.0f;
     for (Size k = 0; k < f.span(); ++k)
     {
-      const double v = xv(wst, f, k);
+      const float fv = xv(wst, f, k);
+      if (! (fv == 0.0f)) // [span] the same test and order as assembleOne_'s walk
+      {
+        if (lo < 0) { lo = (int32_t)(f.frame0 + k); }
+        hi = (int32_t)(f.frame0 + k);
+        if (fv > mx)
+        {
+          mx = fv;
+          ap = (int32_t)(f.frame0 + k);
+        }
+      }
+      const double v = fv;
       if (v > 0.0)
       {
         sum += v;
         sumsq += v * v;
       }
     }
+    g.nz_lo[ii] = lo;
+    g.nz_hi[ii] = hi;
+    g.nz_apex[ii] = ap;
     g.mean[ii] = sum / n_grid;
     const double var = sumsq - n_grid * g.mean[ii] * g.mean[ii];
     g.invnorm[ii] = var > 0 ? 1.0 / sqrt(var) : 0.0; // 0 => constant/degenerate -> never correlates
@@ -6506,6 +6528,32 @@ protected:
     vector<double> rt;
     vector<uint16_t> q;
     double rt0 = 0.0, inv = 0.0;
+    /// [rtf] Each fragment's reported-RT frame (frame0 + rt_at, store-local): rt[i] == frame_rt[rtf[i]]. With the store's
+    /// frame times ascending and finite (frames_sorted), the exact RT gate |rt - x| <= drt is the frame interval
+    /// interval(x, drt), so the scan compares one int32 instead of loading the bucket and the double.
+    vector<int32_t> rtf;
+    bool frames_sorted = false;
+    /// [rtidx] The fragments by reported-RT frame (CSR): idx[off[f], off[f+1]) are the fragments with rtf == f, ascending,
+    /// so their 1/K0 order (the window's fragments are sorted by 1/K0 first) and a [lo, hi) range is two binary searches.
+    vector<uint32_t> off, idx;
+    const vector<double>* frame_rt = nullptr;
+    /**
+      @brief [rtf] The store frames f passing the exact gate !(fabs(frame_rt[f] - x) > drt), as [lo, hi] (empty: lo > hi).
+
+      fl(frame_rt[f] - x) is non-decreasing in f, so the passing frames are contiguous: the first with !(d < -drt) up to
+      the last with !(d > drt) -- the same rounded difference and the same comparisons as the per-fragment test.
+
+      @param[in] x Retention time (finite)
+      @param[in] drt Tolerance
+      @param[out] lo First passing frame
+      @param[out] hi Last passing frame
+    */
+    void interval(double x, double drt, int32_t& lo, int32_t& hi) const
+    {
+      const vector<double>& fr = *frame_rt;
+      lo = (int32_t)(std::partition_point(fr.begin(), fr.end(), [&](double v) { return (v - x) < -drt; }) - fr.begin());
+      hi = (int32_t)(std::partition_point(fr.begin(), fr.end(), [&](double v) { return ! ((v - x) > drt); }) - fr.begin()) - 1;
+    }
     /**
       @brief Exact RT of fragment @p i.
 
@@ -6546,6 +6594,10 @@ protected:
       const Size n = fr.size();
       rt.resize(n);
       q.assign(n, 0);
+      rtf.resize(n);
+      frame_rt = &st.frame_rt;
+      frames_sorted = std::is_sorted(st.frame_rt.begin(), st.frame_rt.end())
+                      && std::all_of(st.frame_rt.begin(), st.frame_rt.end(), [](double v) { return std::isfinite(v); });
       rt0 = 0.0;
       inv = 0.0;
       // [serial] As nt tasks. The serial fold takes the first value, then any value strictly below (above) it, so
@@ -6560,6 +6612,7 @@ protected:
         for (Size i = (Size)c * n / (Size)nt; i < (Size)(c + 1) * n / (Size)nt; ++i)
         {
           rt[i] = rtOf(st, fr[i]);
+          rtf[i] = (int32_t)((int64_t)fr[i].frame0 + fr[i].rt_at);
           if (c == 0)
           {
             if (! i || rt[i] < l) { l = rt[i]; }
@@ -6576,6 +6629,18 @@ protected:
         chi[c] = h;
         has[c] = any;
       });
+      if (frames_sorted) // a reported RT outside the store's frames: no index, the full scan decides
+        frames_sorted = std::all_of(rtf.begin(), rtf.end(), [&](int32_t r) { return r >= 0 && (Size)r < st.frame_rt.size(); });
+      if (frames_sorted) // [rtidx] counting sort by frame, fragments ascending within a frame
+      {
+        const Size nf = st.frame_rt.size();
+        off.assign(nf + 1, 0);
+        for (Size i = 0; i < n; ++i) ++off[(Size)rtf[i] + 1];
+        for (Size f = 0; f < nf; ++f) off[f + 1] += off[f];
+        idx.resize(n);
+        vector<uint32_t> cur(off.begin(), off.end() - 1);
+        for (Size i = 0; i < n; ++i) idx[cur[(Size)rtf[i]]++] = (uint32_t)i;
+      }
       double lo = clo[0], hi = chi[0];
       for (long c = 1; c < nt; ++c)
       {
@@ -7017,27 +7082,22 @@ protected:
     {
       Size lo = lower_bound(frag_im.begin(), frag_im.end(), pc.im - delta_im) - frag_im.begin();
       Size hi = upper_bound(frag_im.begin(), frag_im.end(), pc.im + delta_im) - frag_im.begin();
-      const int pq = frag_rt.bucket_of(pc.rt);
-      for (Size fi = lo; fi < hi; ++fi)
-      {
-        const int dq = (int)frag_rt.q[fi] - pq;
-        if (dq < -2 || dq > 2)
-        {
-          continue; // 2 B reject, see FragRt
-        }
-        // [soa] the gate reads a parallel array; the trace record is touched only after it passes.
-        if (fabs(frag_rt[fi] - pc.rt) > g_drt)
-        {
-          continue; // RT gate ([adaptive] faint window)
-        }
+      // [rtf] the exact RT gate as a frame interval (see FragRt::interval); the bucket test is only a prefilter of it
+      // (buckets are >= tile_drt >= g_drt wide), so the interval alone decides the same fragments.
+      const bool by_frame = frag_rt.frames_sorted;
+      int32_t rlo = 0, rhi = -1;
+      if (by_frame) frag_rt.interval(pc.rt, g_drt, rlo, rhi);
+      static thread_local vector<uint32_t> surv_fi; // [rtidx] the survivors' fragment indices, in visiting order
+      surv_fi.clear();
+      auto visit = [&](Size fi) {
         if (fg.invnorm[fi] == 0.0)
         {
-          continue; // degenerate fragment
+          return; // degenerate fragment
         }
         const Trace& f = frag_traces[fi];
         if (fabs(f.mz - pc.mono_mz) < 0.01)
         {
-          continue; // exclude precursor peak
+          return; // exclude precursor peak
         }
         double dot = 0;
         int overlap = 0;
@@ -7045,34 +7105,32 @@ protected:
         // min_corr_pts can never pass the overlap guard below: skip it before the dot product.
         // Output-identical by construction (the guard's continue is the only thing it would reach).
         const bool short_np = f.np() < (Size)std::max(min_corr_pts, 0);
-        if (short_np && ! g_conc && ! (g_shrink && (int)f.np() >= cfg_shrink_min_pts)) { continue; }
-        int f_lo = -1, f_hi = -1, f_apex = -1; // [short]/[coloc] the fragment's detected span and apex
-        float f_max = 0.0f;
-        // two sequential streams: the fragment's span in the arena and pdense over window frames
-        for (Size k = 0; k < f.span(); ++k)
+        if (short_np && ! g_conc && ! (g_shrink && (int)f.np() >= cfg_shrink_min_pts)) { return; }
+        // [span] the fragment's detected span and apex, precomputed per window (FragStats); [short]/[coloc] read them
+        const int f_lo = fg.nz_lo[fi], f_hi = fg.nz_hi[fi], f_apex = fg.nz_apex[fi];
+        if (g_coloc) // [coloc] DIA-Umpire-style co-location -- before the profile walk, which it does not depend on
         {
-          const float fv = xv(wst, f, k);
-          if (fv == 0.0f) { continue; }
-          if (f_lo < 0) { f_lo = (int)(f.frame0 + k); }
-          f_hi = (int)(f.frame0 + k);
-          if (fv > f_max)
-          {
-            f_max = fv;
-            f_apex = (int)(f.frame0 + k);
-          }
-          const float pv = pdense[f.frame0 + k];
-          if (pv != 0.0f)
-          {
-            dot += (double)pv * fv;
-            ++overlap;
-          }
-        }
-        if (g_coloc) // [coloc] DIA-Umpire-style co-location
-        {
-          if (f_lo < 0 || p_hi < 0) { continue; }
-          if (f_apex < p_lo - 1 || f_apex > p_hi + 1 || p_apex < f_lo - 1 || p_apex > f_hi + 1) { continue; }
+          if (f_lo < 0 || p_hi < 0) { return; }
+          if (f_apex < p_lo - 1 || f_apex > p_hi + 1 || p_apex < f_lo - 1 || p_apex > f_hi + 1) { return; }
           const int inter = std::min(f_hi, p_hi) - std::max(f_lo, p_lo) + 1, shorter = std::min(f_hi - f_lo, p_hi - p_lo) + 1;
-          if (inter < cfg_coloc_overlap * shorter) { continue; }
+          if (inter < cfg_coloc_overlap * shorter) { return; }
+        }
+        // [span] pdense is non-zero only on the precursor's touched frames, all inside [p_lo, p_hi]: the dot product over
+        // the span's intersection with it adds the same terms in the same (ascending) order as over the whole span.
+        if (p_hi >= 0)
+        {
+          const long k0 = std::max(0L, (long)p_lo - (long)f.frame0), k1 = std::min((long)f.span() - 1, (long)p_hi - (long)f.frame0);
+          for (long k = k0; k <= k1; ++k)
+          {
+            const float fv = xv(wst, f, (Size)k);
+            if (fv == 0.0f) { continue; }
+            const float pv = pdense[f.frame0 + (Size)k];
+            if (pv != 0.0f)
+            {
+              dot += (double)pv * fv;
+              ++overlap;
+            }
+          }
         }
         double c, c_raw = 0.0; // c_raw: the unshrunk score, for the cap key
         const bool no_corr = g_shrink ? overlap < cfg_shrink_min_pts : (short_np || overlap < min_corr_pts); // [short]/[shrink] precedence
@@ -7081,10 +7139,10 @@ protected:
           // [short] too few points for a correlation: faint ions are the tips of their elution peaks, so their
           // detected spans shrink with intensity but stay centred on the apex. Keep a fragment whose span lies inside
           // the precursor's (one cycle of slack) with its centre near the precursor's; the score ranks by centring.
-          if ((int)f.np() < cfg_short_min_pts || f_lo < 0 || p_hi < 0) { continue; }
-          if (f_lo < p_lo - 1 || f_hi > p_hi + 1) { continue; }
+          if ((int)f.np() < cfg_short_min_pts || f_lo < 0 || p_hi < 0) { return; }
+          if (f_lo < p_lo - 1 || f_hi > p_hi + 1) { return; }
           const double d = std::fabs(0.5 * (f_lo + f_hi) - p_ctr), tol = std::max(1.0, cfg_short_center_tol * p_half);
-          if (d > tol) { continue; }
+          if (d > tol) { return; }
           c = min_corr * (1.0 - 0.5 * d / (tol + 1.0)); // at the gate: ranks and weighs as a borderline fragment
           c_raw = c;
         }
@@ -7092,7 +7150,7 @@ protected:
         {
           if (overlap < (g_shrink ? cfg_shrink_min_pts : min_corr_pts))
           {
-            continue; // overlap guard; [shrink] its own floor
+            return; // overlap guard; [shrink] its own floor
           }
           c = (dot - n_grid * pmean * fg.mean[fi]) * pinv * fg.invnorm[fi]; // Pearson over the full RT grid
           c_raw = c;
@@ -7104,7 +7162,7 @@ protected:
           }
           if (! (c >= min_corr))
           {
-            continue; // correlation gate (a NaN score is rejected too)
+            return; // correlation gate (a NaN score is rejected too)
           }
         }
         // The IM weight feeds both the cap key and the emitted intensity; corr^corr_power feeds only the emitted one.
@@ -7121,6 +7179,58 @@ protected:
         if (fuse_on)                                                                         // [fuse] the same key without its intensity term
         {
           frag_kq.push_back(std::max(c_raw, 0.0) * (1.0 + overlap));
+        }
+        if (by_frame) surv_fi.push_back((uint32_t)fi);
+      };
+      if (by_frame)
+      {
+        // [rtidx] only the fragments whose reported RT is a passing frame (the exact gate, see FragRt::interval) and whose
+        // index lies in the 1/K0 range [lo, hi): the same candidates the full scan accepted, visited frame by frame.
+        for (int32_t r = rlo; r <= rhi; ++r)
+        {
+          const uint32_t* b0 = frag_rt.idx.data() + frag_rt.off[(Size)r];
+          const uint32_t* e0 = frag_rt.idx.data() + frag_rt.off[(Size)r + 1];
+          const uint32_t* it = std::lower_bound(b0, e0, (uint32_t)lo);
+          const uint32_t* ie = std::lower_bound(it, e0, (uint32_t)hi);
+          for (; it != ie; ++it) visit(*it);
+        }
+        // back to the full scan's order (ascending fragment index): everything after this loop depends on it
+        if (surv_fi.size() > 1 && ! std::is_sorted(surv_fi.begin(), surv_fi.end()))
+        {
+          const Size m = surv_fi.size();
+          vector<uint32_t> perm(m);
+          std::iota(perm.begin(), perm.end(), 0u);
+          std::sort(perm.begin(), perm.end(), [&](uint32_t x, uint32_t y) { return surv_fi[x] < surv_fi[y]; }); // indices distinct
+          auto apply = [&](auto& v) {
+            if (v.size() != m) return; // frag_ai / frag_kq exist only with [foreign] / [fuse]
+            std::remove_reference_t<decltype(v)> w(m);
+            for (Size i = 0; i < m; ++i) w[i] = std::move(v[perm[i]]);
+            v.swap(w);
+          };
+          apply(frags);
+          apply(frag_bin);
+          apply(frag_span);
+          apply(frag_ai);
+          apply(frag_scores);
+          apply(frag_kq);
+        }
+      }
+      else
+      {
+        const int pq = frag_rt.bucket_of(pc.rt);
+        for (Size fi = lo; fi < hi; ++fi)
+        {
+          const int dq = (int)frag_rt.q[fi] - pq;
+          if (dq < -2 || dq > 2)
+          {
+            continue; // 2 B reject, see FragRt
+          }
+          // [soa] the gate reads a parallel array; the trace record is touched only after it passes.
+          if (fabs(frag_rt[fi] - pc.rt) > g_drt)
+          {
+            continue; // RT gate ([adaptive] faint window)
+          }
+          visit(fi);
         }
       }
     }

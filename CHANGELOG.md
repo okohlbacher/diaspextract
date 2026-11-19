@@ -1,5 +1,36 @@
 # Changelog
 
+## v1.9.6 — 2026-11-19
+
+**Faster; spectra unchanged.** Every spectrum is byte-identical to 1.9.5 (spectrum-list digest on the diaPASEF HeLa runs
+32 of PXD017703 at 16 and 64 threads and 34 at 64 threads).
+
+### Changed
+
+- **Precursor-fragment assembly visits only RT-compatible fragments.** The window's fragments are indexed by the frame of
+  their reported RT; each precursor reads only the frames inside its exact RT gate and the 1/K0 range within each. Before,
+  it walked every fragment of its 1/K0 slice across the whole tile and rejected 98.4 % on RT (HeLa run 32: 663 billion
+  fragment visits, 10.6 billion passing). The gate is the same floating-point test, evaluated once per precursor on the
+  frame table; the survivors keep their order. Fragment span and apex are computed once per window, and the
+  correlation's dot product covers only the precursor's span.
+- **Ion-mobility peak picking skips used points.** `PeakPickerIM::pickIMCluster` keeps the unused points of a frame as a
+  linked list in m/z order, so a cluster's neighbour walk jumps to the nearest unused point instead of stepping over
+  clustered ones one by one, and an already m/z-sorted frame is no longer sorted again (new OpenMS patch
+  `openms-pickerim-unusedlist.patch`; same clusters, same order of members).
+- **Finer flight-time index for MS2 tracing:** about 8 peaks per bucket instead of about 80 (up to 16,384 buckets per frame).
+
+HeLa run 32 (16 windows of 50 Th, 2.0 billion MS2 peaks), AMD EPYC 7763, interleaved runs:
+
+| | 1.9.5 | 1.9.6 |
+|:--|--:|--:|
+| Wall time, 16 threads | 12:24-12:30 | 8:31 (-31 %) |
+| Wall time, 64 threads | 4:08 | 3:06-3:08 (-25 %) |
+| CPU time, 16 / 64 threads | 11,390 / 13,670 s | 7,440 / 9,320 s (-35 % / -32 %) |
+| Peak memory, 16 / 64 threads | 10.7-11.1 / 14.4 GB | 11.1-11.3 / 15.7-16.0 GB |
+| Busy cores, 16 / 64 threads | 15.2 / 55.1 | 14.6 / 49.9 |
+
+The 64-thread run keeps fewer cores busy because the remaining work waits on each window's slowest m/z band.
+
 ## v1.9.5 — 2026-11-13
 
 **Spectra change for TOF input without ion mobility (SWATH) only.** diaPASEF and Orbitrap spectra do not change (Orbitrap

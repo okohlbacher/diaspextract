@@ -45,6 +45,8 @@
 #include <cstdio>
 #include <fstream>
 #include <atomic>
+#include <unordered_map>
+#include <unordered_set>
 #include <deque>
 #include <mutex>
 #include <thread>
@@ -111,7 +113,7 @@ static inline double spxFileTimeSec(FILETIME a, FILETIME b) // two FILETIMEs (10
 // The release version. The standalone CMake build passes it from project(VERSION); the in-tree
 // OpenMS build does not, so the fallback here is the same number.
 #ifndef DIASPEXTRACT_VERSION
-  #define DIASPEXTRACT_VERSION "1.9.6"
+  #define DIASPEXTRACT_VERSION "1.9.7"
 #endif
 
 using namespace OpenMS;
@@ -2682,6 +2684,11 @@ TracePrep prepareTracing(const PeakSlab& sl, double noise, double snr, const vec
   return tp;
 }
 
+// [cmp] diagnostics of DIASPEXTRACT_TRACER=compare: the members of every emitted trace (both tracers) and of every rejected
+// single-pass hill, with a bitmask of the failed tests (1 not owned, 2 apex, 4 span, 8 sampling rate); thread-local, unset otherwise
+thread_local vector<vector<uint32_t>>* g_cmp_members = nullptr;
+thread_local vector<pair<uint8_t, vector<uint32_t>>>* g_cmp_hills = nullptr;
+
 /**
   @brief Mass-trace detection on integer arrays with the semantics of OpenMS MassTraceDetection::run_
   (written from that source):
@@ -2715,7 +2722,9 @@ vector<Trace> detectTracesInteger(const PeakSlab& sl,
                                   double im_tol,
                                   double noise,
                                   double min_len_sec,
-                                  int band = -1)
+                                  int band = -1,
+                                  const vector<uint64_t>* seed_ok = nullptr,
+                                  const vector<uint64_t>* taken0 = nullptr)
 {
   vector<Trace> out;
   const Size n_frames = sl.frames(), n_points = sl.tof.size();
@@ -2725,9 +2734,13 @@ vector<Trace> detectTracesInteger(const PeakSlab& sl,
   const double imq_tol = im_tol * IM_Q;
   const Size max_missed = 5; // trace_termination_outliers
 
-  vector<uint64_t> visited((n_points + 63) / 64, 0); // one BIT per peak
-  auto seen = [&](Size k) { return (visited[k >> 6] >> (k & 63)) & 1u; };
-  auto mark = [&](Size k) { visited[k >> 6] |= (uint64_t)1 << (k & 63); };
+  vector<uint64_t> visited = taken0 ? *taken0 : vector<uint64_t>((n_points + 63) / 64, 0); // one BIT per peak; [hybrid] pre-taken
+  // [spec] relaxed atomic accesses: speculative helper walks read the bits while this band's thread sets them (plain moves on x86)
+  auto seen = [&](Size k) { return (__atomic_load_n(&visited[k >> 6], __ATOMIC_RELAXED) >> (k & 63)) & 1u; };
+  auto mark = [&](Size k) {
+    uint64_t* w = &visited[k >> 6];
+    __atomic_store_n(w, __atomic_load_n(w, __ATOMIC_RELAXED) | ((uint64_t)1 << (k & 63)), __ATOMIC_RELAXED); // one writer
+  };
   auto mz_at = [&](uint32_t k, Size f) { return ax.mzOf(sl.tof[k], sl.b[f]); };
   auto iwm = [](double v, double w, double& c, double& cnt, double& den) { // updateIterativeWeightedMean_
     const double ct = 1.0 + (w * v) / cnt, dt = 1.0 + w / den;
@@ -2750,7 +2763,7 @@ vector<Trace> detectTracesInteger(const PeakSlab& sl,
   /// The +-3 sd window is converted to a BIN range once per frame step, so the walk is bounded
   /// by two calibration calls and a binary search; only candidates inside that window are
   /// converted back to m/z for the comparison.
-  auto best = [&](Size f, double cmz, double sd, double cim, bool& taken) -> long {
+  auto best = [&](Size f, double cmz, double sd, double cim, bool& taken, int dir) -> long {
     taken = false;
     const uint32_t a = sl.frame_off[f], b = sl.frame_off[f + 1];
     if (b <= a) { return -1; }
@@ -2760,6 +2773,26 @@ vector<Trace> detectTracesInteger(const PeakSlab& sl,
     const TofIdx hi_t = ax.tofOf(hi_mz, bf);
     uint32_t r0 = a, r1 = b;
     tp.range(f, lo_t, a, b, r0, r1); // [tofidx] computed, not searched
+    // [prefetch] The walk's next frames in this direction lie elsewhere in the slab (a cache miss each): hint the index
+    // row two frames ahead and, through the row one frame ahead (hinted on the previous step), that frame's peaks.
+    // Hints only, with the bucket of this frame's window: nothing read here changes what is computed.
+    if (! tp.fidx.empty())
+    {
+      const uint64_t d = lo_t <= tp.tlo ? 0 : ((uint64_t)(lo_t - tp.tlo) >> tp.tsh);
+      const uint32_t kk = d >= tp.nbk ? tp.nbk : (uint32_t)d;
+      const long f1 = (long)f + dir, f2 = (long)f + 2 * dir;
+      if (f2 >= 0 && f2 < (long)n_frames) { __builtin_prefetch(&tp.fidx[(Size)f2 * ((Size)tp.nbk + 1) + kk]); }
+      if (f1 >= 0 && f1 < (long)n_frames)
+      {
+        const uint32_t p = tp.fidx[(Size)f1 * ((Size)tp.nbk + 1) + kk];
+        if (p < n_points)
+        {
+          __builtin_prefetch(&sl.tof[p]);
+          __builtin_prefetch(&sl.inten[p]);
+          __builtin_prefetch(&sl.imq[p]);
+        }
+      }
+    }
     const uint32_t s0 = (uint32_t)(lower_bound(sl.tof.begin() + r0, sl.tof.begin() + r1, lo_t) - sl.tof.begin());
     long bk = -1;
     double bd = std::numeric_limits<double>::infinity();
@@ -2794,10 +2827,11 @@ vector<Trace> detectTracesInteger(const PeakSlab& sl,
   // band's seeds: prepareTracing partitions by the same edges, and every cell bin lies inside them (checked).
   const bool segd = band >= 0;
   const Size s0 = segd ? tp.seg[band] : 0, s1 = segd ? tp.seg[band + 1] : tp.order.size();
-  for (Size si = s0; si < s1; ++si)
-  {
-    const uint32_t seed = tp.order[si];
-    if (seen(seed)) { continue; }
+  // The walk of one seed: its members (seed first) and centroids; true iff the trace is valid (isTraceValid_). It reads the
+  // `visited` bits only through seen(), and only for peaks it then holds in `got` (the seed, and every best candidate that was
+  // not taken) or that it found taken: bits are only ever set, so a walk whose members are all still unseen is the walk the
+  // sequential loop would do now ([spec] below).
+  auto walk = [&](const uint32_t seed, vector<pair<uint32_t, uint32_t>>& got, double& cmz_out, double& cim_out) -> bool {
     const Size f0 = (uint32_t)(std::upper_bound(sl.frame_off.begin(), sl.frame_off.end(), seed) - sl.frame_off.begin() - 1);
     const double w0 = sl.inten[seed], m0 = mz_at(seed, f0);
     double cmz = m0, cnt = w0 * m0, den = w0;
@@ -2822,7 +2856,7 @@ vector<Trace> detectTracesInteger(const PeakSlab& sl,
         if (tp.frame_live[f])
         {
           bool taken = false;
-          const long k = best(f, cmz, sd, cim, taken);
+          const long k = best(f, cmz, sd, cim, taken, side == 0 ? -1 : 1);
           if (k >= 0)
           {
             const double mz = mz_at((uint32_t)k, f), w = sl.inten[k];
@@ -2849,14 +2883,136 @@ vector<Trace> detectTracesInteger(const PeakSlab& sl,
       fmin = std::min(fmin, g.first);
       fmax = std::max(fmax, g.first);
     }
+    cmz_out = cmz;
+    cim_out = cim;
     const double span_s = rtAxis()[sl.rt_index[fmax]] - rtAxis()[sl.rt_index[fmin]];
-    if (span_s < min_len_sec) { continue; }
+    if (span_s < min_len_sec) { return false; }
     const Size total = dn.scans + up.scans + 1;
     const Size adjusted = total > dn.missed + up.missed ? total - dn.missed - up.missed : 1;
-    if ((double)got.size() / (double)adjusted < msr) { continue; }
+    if ((double)got.size() / (double)adjusted < msr) { return false; }
+    return true;
+  };
+  // [spec] Speculative look-ahead on a heavy band: helper tasks (they run only on threads with nothing else queued before them)
+  // walk the seeds ahead of this thread against the bits as they are, into a ring of slots; this thread, still going strictly
+  // in seed order, takes a slot's walk only if every member is still unseen -- then it IS the walk it would do (see walk) --
+  // and walks itself otherwise. Output-identical by construction; DIASPEXTRACT_SPEC=<helpers> (default 3, 0 = off).
+  static const int spec_helpers = [] {
+    const char* e = std::getenv("DIASPEXTRACT_SPEC");
+    return e && *e ? std::max(0, std::min(32, std::atoi(e))) : 3;
+  }();
+  static const long spec_min = [] {
+    const char* e = std::getenv("DIASPEXTRACT_SPEC_MIN");
+    return e && *e ? std::max(1L, std::atol(e)) : 4096L;
+  }();
+  const int64_t n_seed = (int64_t)(s1 - s0);
+  const bool spec = spec_helpers > 0 && n_seed >= spec_min && ! seed_ok && ! g_cmp_members && omp_in_parallel() && omp_get_num_threads() > 1;
+  struct SpecSlot
+  {
+    std::atomic<int64_t> st {-1}; ///< 4 x position + 1 (writing) / 2 (ready) / 0 (dropped); -1 never used
+    vector<pair<uint32_t, uint32_t>> got;
+    double cmz = 0.0, cim = 0.0;
+    bool valid = false;
+  };
+  const int64_t ring_n = 2048; // a power of two
+  std::unique_ptr<SpecSlot[]> ring;
+  std::atomic<int64_t> opos {0}, hcur {0}; // this thread's position; the helpers' next position
+  std::atomic<bool> spec_done {false};
+  const int owner_tid = omp_get_thread_num();
+  std::function<void()> helper;
+  if (spec)
+  {
+    ring.reset(new SpecSlot[(Size)ring_n]);
+    helper = [&]() {
+      if (omp_get_thread_num() == owner_tid) { return; } // run undeferred on this thread (task cliff): nothing to look ahead
+      // a resubmitted helper that the runtime runs undeferred (task cliff) would recurse on this stack: end the turn instead
+      thread_local int spec_depth = 0;
+      if (spec_depth > 0) { return; }
+      struct DepthGuard { DepthGuard() { ++spec_depth; } ~DepthGuard() { --spec_depth; } } depth_guard;
+      for (int n_walk = 0; ! spec_done.load(std::memory_order_relaxed);)
+      {
+        // claim the next position, never one this thread has passed, never more than the ring ahead of it
+        int64_t j = hcur.load(std::memory_order_relaxed);
+        const int64_t o = opos.load(std::memory_order_acquire);
+        if (j < o + 1) { j = o + 1; }
+        if (j >= n_seed) { return; }
+        if (j >= o + ring_n || n_walk >= 64)
+        {
+          // too far ahead, or a turn taken: back to the end of the queue, so queued work of other windows goes first
+          std::this_thread::yield();
+#pragma omp task default(shared)
+          helper();
+          return;
+        }
+        int64_t want = hcur.load(std::memory_order_relaxed);
+        if (want > j || ! hcur.compare_exchange_strong(want, j + 1, std::memory_order_relaxed)) { continue; }
+        SpecSlot& S = ring[(Size)(j & (ring_n - 1))];
+        int64_t cur = S.st.load(std::memory_order_acquire);
+        // never take a slot that is being written or already holds this or a later position: a helper that stalled after its
+        // claim must not overwrite a newer walk the owner may be reading
+        if ((cur >= 0 && ((cur & 3) == 1 || cur >= 4 * j)) || ! S.st.compare_exchange_strong(cur, 4 * j + 1, std::memory_order_acq_rel)) { continue; }
+        const uint32_t seed = tp.order[s0 + (Size)j];
+        if (seen(seed))
+        {
+          S.st.store(4 * j, std::memory_order_release);
+          continue;
+        }
+        try
+        {
+          S.valid = walk(seed, S.got, S.cmz, S.cim);
+        }
+        catch (...) // e.g. bad_alloc: drop the slot, the owner walks this seed itself (and meets the error there)
+        {
+          S.st.store(4 * j, std::memory_order_release);
+          continue;
+        }
+        S.st.store(4 * j + 2, std::memory_order_release);
+        ++n_walk;
+      }
+    };
+  }
+  auto band_loop = [&]() {
+  for (Size si = s0; si < s1; ++si)
+  {
+    const int64_t pos = (int64_t)(si - s0);
+    if (spec) { opos.store(pos, std::memory_order_release); } // slots before pos are free for reuse from here on
+    const uint32_t seed = tp.order[si];
+    if (seen(seed)) { continue; }
+    if (seed_ok && ! (((*seed_ok)[seed >> 6] >> (seed & 63)) & 1u)) { continue; } // [hybrid] targeted second pass
+    double cmz = 0.0, cim = 0.0;
+    bool valid = false, have = false;
+    if (spec)
+    {
+      SpecSlot& S = ring[(Size)(pos & (ring_n - 1))];
+      if (S.st.load(std::memory_order_acquire) == 4 * pos + 2)
+      {
+        have = true;
+        for (const auto& g : S.got)
+        {
+          if (seen(g.second))
+          {
+            have = false;
+            break;
+          }
+        }
+        if (have)
+        {
+          got.swap(S.got);
+          cmz = S.cmz;
+          cim = S.cim;
+          valid = S.valid;
+        }
+      }
+    }
+    if (! have) { valid = walk(seed, got, cmz, cim); }
+    if (! valid) { continue; }
     for (const auto& g : got)
     {
       mark(g.second); // valid: now they are taken
+    }
+    if (g_cmp_members)
+    {
+      g_cmp_members->emplace_back();
+      for (const auto& g : got) g_cmp_members->back().push_back(g.second);
     }
 
     // the span: (store-local frame, intensity) points, plus the per-frame bin arena the valley
@@ -2892,6 +3048,410 @@ vector<Trace> detectTracesInteger(const PeakSlab& sl,
     }
     t.im = IM_LO + cim / IM_Q;
     out.push_back(std::move(t));
+  }
+  }; // band_loop
+  if (! spec)
+  {
+    band_loop();
+    return out;
+  }
+  std::exception_ptr spec_err;
+#pragma omp taskgroup
+  {
+    for (int h = 0; h < spec_helpers; ++h)
+    {
+#pragma omp task default(shared)
+      helper();
+    }
+    try
+    {
+      band_loop();
+    }
+    catch (...)
+    {
+      spec_err = std::current_exception();
+    }
+    spec_done.store(true, std::memory_order_relaxed);
+  }
+  if (spec_err) { std::rethrow_exception(spec_err); }
+  return out;
+}
+
+/**
+  @brief [single] EXPERIMENTAL single-pass MS2 trace detection (hill linking in the style of Biosaur2), selected with
+  DIASPEXTRACT_TRACER=single. Not output-identical to detectTracesInteger.
+
+  The frames are visited once, in RT order. In each frame the band's peaks above noise are taken most intense first
+  (later index first among equals, as the seeds); each joins the open hill nearest in m/z whose centroid lies within
+  +-3 of its running sd and whose 1/K0 is within the gate, one peak per hill and frame, else it opens a hill. The open
+  hills sit in a flat grid of 16-bin flight-time buckets (of their last peak). A hill closes after more than 5 missed
+  live frames. It becomes a trace when it holds a peak above the seed gate, spans at least min_len_sec and has at least
+  half of the live frames it spans; the trace fields are filled as in detectTracesInteger (weighted centroid,
+  updateWeightedSDEstimateRobust, apex bin and frame, reported-RT frame). Valley splitting and everything after are shared.
+
+  @param[in] sl The cell's slab
+  @param[in] tp Its tracing preparation (frame_live)
+  @param[in,out] store Receives the spans
+  @param[in] mass_ppm Initial sd of a hill's m/z, in ppm
+  @param[in] im_tol 1/K0 gate
+  @param[in] noise Membership threshold
+  @param[in] min_apex Seed gate (snr x noise)
+  @param[in] min_len_sec Minimum trace length
+  @param[in] bnd Band edges ({0, 0} unbanded)
+  @param[in] band Band, -1 for all peaks
+  @return The traces
+*/
+vector<Trace> detectTracesSinglePass(const PeakSlab& sl,
+                                     const TracePrep& tp,
+                                     TraceStore& store,
+                                     double mass_ppm,
+                                     double im_tol,
+                                     double noise,
+                                     double min_apex,
+                                     double min_len_sec,
+                                     const vector<TofIdx>& bnd,
+                                     int band = -1,
+                                     TofIdx margin = 0,
+                                     bool second = false,
+                                     bool trim = false)
+{
+  vector<Trace> out;
+  const Size n_frames = sl.frames(), n_points = sl.tof.size();
+  if (n_frames == 0 || n_points == 0) { return out; }
+  const TofAxis& ax = tofAxis();
+  const double msr = 0.5, imq_tol = im_tol * IM_Q;
+  const Size max_missed = 5;
+  const bool banded = band >= 0 && (Size)band + 1 < bnd.size();
+  const TofIdx own_lo = banded ? bnd[(Size)band] : 0;
+  const TofIdx own_hi = banded ? bnd[(Size)band + 1] : std::numeric_limits<TofIdx>::max(); // the band's own [lo, hi)
+  // [single2] peaks are linked over the band widened by `margin` bins; a hill is emitted only by the band that owns its
+  // apex bin, so an ion across an edge is traced whole, once
+  const TofIdx blo = banded && own_lo > margin ? own_lo - margin : (banded ? 0 : own_lo);
+  const TofIdx bhi = banded && own_hi < std::numeric_limits<TofIdx>::max() - margin ? own_hi + margin : own_hi;
+  auto iwm = [](double v, double w, double& c, double& cnt, double& den) {
+    const double ct = 1.0 + (w * v) / cnt, dt = 1.0 + w / den;
+    c *= (ct / dt);
+    cnt += w * v;
+    den += w;
+  };
+  auto sd_robust = [](double mz, double w, double mean, double& sd, double& wsum) {
+    const double d1 = pmath::log(wsum) + 2.0 * pmath::log(sd);
+    const double d2 = pmath::log(w) + 2.0 * pmath::log(std::abs(mz - mean));
+    const double denom = std::sqrt(pmath::exp(d1) + pmath::exp(d2));
+    const double ws = wsum + w;
+    const double t = denom / std::sqrt(ws);
+    if (t > std::numeric_limits<double>::epsilon()) { sd = t; }
+    wsum = ws;
+  };
+  vector<uint32_t> live_pre(n_frames + 1, 0); // live frames before f
+  for (Size f = 0; f < n_frames; ++f) { live_pre[f + 1] = live_pre[f] + (tp.frame_live[f] ? 1 : 0); }
+  // [hot] What the grid search and the per-frame miss scan read of every hill, 32 bytes, apart from the rest: both touch many
+  // hills per peak and per frame, and the whole record (with its member list) was a cache miss each.
+  struct HillHot
+  {
+    double cmz, cim, sd;
+    int32_t ext_f;
+    uint32_t missed;
+  };
+  struct Hill
+  {
+    double cnt, den, cnt_im, den_im, wsum;
+    float top;
+    uint32_t bucket;
+    vector<pair<uint32_t, uint32_t>> got; // (frame, peak), in frame order
+  };
+  vector<Hill> hills;
+  vector<HillHot> hot;
+  vector<vector<pair<uint32_t, uint32_t>>> got_pool; // [pool] closed hills' member lists, reused (capacity kept)
+  TofIdx tmax = 0;
+  for (Size k = 0; k < n_points; ++k) { tmax = std::max(tmax, sl.tof[k]); }
+  const unsigned sh = 4;
+  vector<vector<uint32_t>> grid(((Size)tmax >> sh) + 2);
+  auto grid_del = [&](uint32_t bk, uint32_t h) {
+    auto& v = grid[bk];
+    for (Size i = 0; i < v.size(); ++i)
+      if (v[i] == h) { v[i] = v.back(); v.pop_back(); return; }
+  };
+  vector<uint32_t> open, still;
+  vector<uint32_t> fp; // this frame's peaks
+  // [hybrid] peaks of emitted hills (taken in the second pass) and of hills rejected ONLY for their sampling rate (its seeds)
+  vector<uint64_t> taken2(second ? (n_points + 63) / 64 : 0, 0), seed2(second ? (n_points + 63) / 64 : 0, 0);
+  bool any2 = false;
+  // emits a trace from members got[i0, i1) with the given centroids
+  auto emit = [&](const vector<pair<uint32_t, uint32_t>>& got, Size i0, Size i1, double cmz, double cim) {
+    vector<pair<uint32_t, float>> pts;
+    pts.reserve(i1 - i0);
+    uint32_t kap = got[i0].second, fap = got[i0].first;
+    for (Size i = i0; i < i1; ++i)
+    {
+      const auto& g = got[i];
+      pts.emplace_back(g.first, sl.inten[g.second]);
+      if (sl.inten[g.second] > sl.inten[kap])
+      {
+        kap = g.second;
+        fap = g.first;
+      }
+    }
+    Trace t = makeSpan(pts, store);
+    const uint32_t t_tof = sl.tof[kap];
+    store.bins.resize(store.inten.size(), 0);
+    for (Size i = i0; i < i1; ++i)
+    {
+      const auto& g = got[i];
+      const int64_t d = (int64_t)sl.tof[g.second] - (int64_t)t_tof;
+      if (d < -32768 || d > 32767) { throw OpenMS::Exception::OutOfRange(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION); }
+      store.bins[t.off + (g.first - t.frame0)] = (int16_t)d;
+    }
+    t.tof = t_tof;
+    t.bframe = fap;
+    t.mz = cmz;
+    const int64_t d = (int64_t)fap - (int64_t)t.frame0;
+    if (d < -32768 || d > 32767) { throw OpenMS::Exception::OutOfRange(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION); }
+    t.rt_at = (int16_t)d;
+    t.im = IM_LO + cim / IM_Q;
+    out.push_back(std::move(t));
+  };
+  auto close = [&](uint32_t h) {
+    Hill& H = hills[h];
+    const HillHot& Q = hot[h];
+    grid_del(H.bucket, h);
+    const uint32_t fmin = H.got.front().first, fmax = H.got.back().first;
+    const double span_s = rtAxis()[sl.rt_index[fmax]] - rtAxis()[sl.rt_index[fmin]];
+    const uint32_t live = std::max<uint32_t>(1, live_pre[fmax + 1] - live_pre[fmin]);
+    uint32_t kap0 = H.got[0].second;
+    for (const auto& g : H.got)
+      if (sl.inten[g.second] > sl.inten[kap0]) { kap0 = g.second; }
+    const bool owned = ! banded || (sl.tof[kap0] >= own_lo && sl.tof[kap0] < own_hi);
+    if (g_cmp_hills)
+    {
+      const uint8_t m = (uint8_t)((owned ? 0 : 1) | (H.top > min_apex ? 0 : 2) | (span_s >= min_len_sec ? 0 : 4) | ((double)H.got.size() / (double)live >= msr ? 0 : 8));
+      g_cmp_hills->emplace_back(m, vector<uint32_t>());
+      for (const auto& g : H.got) g_cmp_hills->back().second.push_back(g.second);
+    }
+    const bool rate_ok = (double)H.got.size() / (double)live >= msr;
+    if (second && owned && H.top > min_apex && span_s >= min_len_sec)
+    {
+      static const bool apex_only = [] { const char* e = std::getenv("DIASPEXTRACT_HYB_SEEDS"); return e && std::string(e) == "apex"; }();
+      if (rate_ok || ! apex_only)
+      {
+        auto& bits = rate_ok ? taken2 : seed2;
+        for (const auto& g : H.got) bits[g.second >> 6] |= (uint64_t)1 << (g.second & 63);
+      }
+      else { seed2[kap0 >> 6] |= (uint64_t)1 << (kap0 & 63); } // [hybrid] one seed: the sparse hill's apex
+      any2 = any2 || ! rate_ok;
+    }
+    if (owned && H.top > min_apex && span_s >= min_len_sec && rate_ok) { emit(H.got, 0, H.got.size(), Q.cmz, Q.cim); }
+    else if (trim && owned && H.top > min_apex && span_s >= min_len_sec && H.got.size() <= 512)
+    {
+      // [trim] a sparse hill: keep its longest stretch of members that holds the apex and has at least half of the live
+      // frames it spans (ties: the shorter span), if that stretch is long enough
+      const auto& G = H.got;
+      Size a = 0;
+      for (Size i = 1; i < G.size(); ++i)
+        if (sl.inten[G[i].second] > sl.inten[G[a].second]) a = i;
+      long bi = -1, bj = -1;
+      uint32_t blive = 0;
+      for (Size i = 0; i <= a; ++i)
+        for (Size j = G.size(); j-- > a;)
+        {
+          const Size n = j - i + 1;
+          if (bi >= 0 && n < (Size)(bj - bi + 1)) break;
+          const uint32_t lv = std::max<uint32_t>(1, live_pre[G[j].first + 1] - live_pre[G[i].first]);
+          if ((double)n / (double)lv < msr) continue;
+          if (rtAxis()[sl.rt_index[G[j].first]] - rtAxis()[sl.rt_index[G[i].first]] < min_len_sec) continue;
+          if (bi < 0 || n > (Size)(bj - bi + 1) || lv < blive) { bi = (long)i; bj = (long)j; blive = lv; }
+          break; // the longest j for this i
+        }
+      if (bi >= 0)
+      {
+        double cn = 0, dn = 0, ci = 0;
+        for (long i = bi; i <= bj; ++i)
+        {
+          const double w = sl.inten[G[i].second];
+          cn += w * ax.mzOf(sl.tof[G[i].second], sl.b[G[i].first]);
+          ci += w * sl.imq[G[i].second];
+          dn += w;
+        }
+        emit(G, (Size)bi, (Size)bj + 1, cn / dn, ci / dn);
+      }
+    }
+    H.got.clear();
+    got_pool.push_back(std::move(H.got));
+    H.got = vector<pair<uint32_t, uint32_t>>();
+  };
+  for (Size f = 0; f < n_frames; ++f)
+  {
+    const uint32_t a = sl.frame_off[f], e = sl.frame_off[f + 1];
+    const uint32_t k0 = (uint32_t)(std::lower_bound(sl.tof.begin() + a, sl.tof.begin() + e, blo) - sl.tof.begin());
+    const uint32_t k1 = banded ? (uint32_t)(std::lower_bound(sl.tof.begin() + k0, sl.tof.begin() + e, bhi) - sl.tof.begin()) : e;
+    fp.clear();
+    for (uint32_t k = k0; k < k1; ++k)
+      if ((double)sl.inten[k] > noise) { fp.push_back(k); }
+    std::sort(fp.begin(), fp.end(), [&](uint32_t x, uint32_t y) { return sl.inten[x] != sl.inten[y] ? sl.inten[x] > sl.inten[y] : x > y; });
+    const double bf = sl.b[f];
+    for (uint32_t k : fp)
+    {
+      const double mz = ax.mzOf(sl.tof[k], bf), w = sl.inten[k], imq = sl.imq[k];
+      const double reach = 6.0 * (mz / 1e6) * mass_ppm; // the grid search reach: 3 sd at twice the initial sd
+      const TofIdx t0 = ax.tofOf(mz - reach > 0.0 ? mz - reach : 1e-9, bf), t1 = ax.tofOf(mz + reach, bf);
+      long best = -1;
+      double bd = std::numeric_limits<double>::infinity();
+      for (Size bk = (Size)(t0 >> sh); bk <= (Size)(t1 >> sh) && bk < grid.size(); ++bk)
+      {
+        for (uint32_t h : grid[bk])
+        {
+          const HillHot& H = hot[h];
+          if ((long)H.ext_f == (long)f) { continue; }
+          if (std::abs(imq - H.cim) > imq_tol) { continue; }
+          const double d = std::abs(mz - H.cmz);
+          if (d > 3.0 * H.sd) { continue; }
+          if (d < bd || (d == bd && (long)h < best))
+          {
+            bd = d;
+            best = (long)h;
+          }
+        }
+      }
+      const uint32_t nbk = (uint32_t)(sl.tof[k] >> sh);
+      if (best >= 0)
+      {
+        Hill& H = hills[(Size)best];
+        HillHot& Q = hot[(Size)best];
+        iwm(mz, w, Q.cmz, H.cnt, H.den);
+        iwm(imq, w, Q.cim, H.cnt_im, H.den_im);
+        sd_robust(mz, w, Q.cmz, Q.sd, H.wsum);
+        H.got.emplace_back((uint32_t)f, k);
+        H.top = std::max(H.top, (float)w);
+        Q.ext_f = (int32_t)f;
+        Q.missed = 0;
+        if (nbk != H.bucket)
+        {
+          grid_del(H.bucket, (uint32_t)best);
+          H.bucket = nbk;
+          grid[nbk].push_back((uint32_t)best);
+        }
+      }
+      else
+      {
+        Hill H;
+        HillHot Q;
+        Q.cmz = mz;
+        H.cnt = w * mz;
+        H.den = w;
+        iwm(mz, w, Q.cmz, H.cnt, H.den); // the seed counted twice, as run_ does
+        Q.cim = imq;
+        H.cnt_im = w * imq;
+        H.den_im = w;
+        iwm(imq, w, Q.cim, H.cnt_im, H.den_im);
+        Q.sd = (Q.cmz / 1e6) * mass_ppm;
+        H.wsum = w;
+        H.top = (float)w;
+        Q.ext_f = (int32_t)f;
+        Q.missed = 0;
+        H.bucket = nbk;
+        if (! got_pool.empty())
+        {
+          H.got = std::move(got_pool.back());
+          got_pool.pop_back();
+        }
+        H.got.emplace_back((uint32_t)f, k);
+        hills.push_back(std::move(H));
+        hot.push_back(Q);
+        const uint32_t h = (uint32_t)(hills.size() - 1);
+        grid[nbk].push_back(h);
+        open.push_back(h);
+      }
+    }
+    still.clear();
+    for (uint32_t h : open)
+    {
+      HillHot& H = hot[h];
+      if ((long)H.ext_f != (long)f && tp.frame_live[f] && ++H.missed > max_missed) { close(h); }
+      else { still.push_back(h); }
+    }
+    open.swap(still);
+  }
+  for (uint32_t h : open) { close(h); }
+  if (any2) // [hybrid] the exact seed walk, only from the sparse hills' peaks, around what the single pass traced
+  {
+    vector<Trace> more = detectTracesInteger(sl, tp, store, mass_ppm, im_tol, noise, min_len_sec, band, &seed2, &taken2);
+    out.insert(out.end(), std::make_move_iterator(more.begin()), std::make_move_iterator(more.end()));
+  }
+  return out;
+}
+
+/// [cmp] DIASPEXTRACT_TRACER=compare: runs both tracers on a band, returns the exact traces, and classifies each exact
+/// trace by the single-pass hill that holds its apex peak. Totals are printed to stderr at exit.
+struct CmpStats
+{
+  std::atomic<uint64_t> n_exact{0}, n_single{0}, single_new{0}, by_mask[16]{}, frag[5]{}, low_cov{0}, len_e[16]{}, len_h[16]{};
+  ~CmpStats()
+  {
+    if (n_exact == 0) return;
+    fprintf(stderr, "[cmp] exact %llu single %llu single_not_in_exact %llu\n", (unsigned long long)n_exact, (unsigned long long)n_single, (unsigned long long)single_new);
+    for (int m = 0; m < 16; ++m)
+      if (by_mask[m]) fprintf(stderr, "[cmp] apex hill mask %2d (own%d apex%d span%d rate%d): %llu  mean exact pts %.1f hill pts %.1f\n", m, m & 1, (m >> 1) & 1, (m >> 2) & 1, (m >> 3) & 1,
+                              (unsigned long long)by_mask[m], (double)len_e[m] / by_mask[m], (double)len_h[m] / by_mask[m]);
+    fprintf(stderr, "[cmp] hills per exact trace 1:%llu 2:%llu 3:%llu 4:%llu 5+:%llu; emitted apex hill with <50%% of the trace's intensity: %llu\n",
+            (unsigned long long)frag[0], (unsigned long long)frag[1], (unsigned long long)frag[2], (unsigned long long)frag[3], (unsigned long long)frag[4], (unsigned long long)low_cov);
+  }
+};
+static CmpStats g_cmp;
+
+vector<Trace> compareTracers(const PeakSlab& sl, const TracePrep& tp, TraceStore& store, double mass_ppm, double im_tol, double noise,
+                             double min_apex, double min_len_sec, const vector<TofIdx>& bnd, int band)
+{
+  vector<vector<uint32_t>> em, sm;
+  vector<pair<uint8_t, vector<uint32_t>>> hl;
+  g_cmp_members = &em;
+  vector<Trace> out = detectTracesInteger(sl, tp, store, mass_ppm, im_tol, noise, min_len_sec, band);
+  g_cmp_members = &sm;
+  g_cmp_hills = &hl;
+  TraceStore scratch;
+  detectTracesSinglePass(sl, tp, scratch, mass_ppm, im_tol, noise, min_apex, min_len_sec, bnd, band, 0);
+  g_cmp_members = nullptr;
+  g_cmp_hills = nullptr;
+  std::unordered_map<uint32_t, uint32_t> hill_of; // peak -> hill
+  hill_of.reserve(hl.size() * 4);
+  for (uint32_t h = 0; h < hl.size(); ++h)
+    for (uint32_t k : hl[h].second) hill_of[k] = h;
+  std::unordered_set<uint32_t> in_exact;
+  for (const auto& e : em)
+    for (uint32_t k : e) in_exact.insert(k);
+  for (const auto& e : em)
+  {
+    uint32_t kap = e[0];
+    double tot = 0.0;
+    for (uint32_t k : e)
+    {
+      tot += sl.inten[k];
+      if (sl.inten[k] > sl.inten[kap]) kap = k;
+    }
+    auto it = hill_of.find(kap);
+    if (it == hill_of.end()) continue; // band-margin edge case
+    const auto& H = hl[it->second];
+    std::unordered_set<uint32_t> hs;
+    double in_h = 0.0;
+    for (uint32_t k : e)
+    {
+      auto jt = hill_of.find(k);
+      if (jt != hill_of.end()) hs.insert(jt->second);
+      if (jt != hill_of.end() && jt->second == it->second) in_h += sl.inten[k];
+    }
+    g_cmp.n_exact++;
+    g_cmp.by_mask[H.first]++;
+    g_cmp.len_e[H.first] += e.size();
+    g_cmp.len_h[H.first] += H.second.size();
+    g_cmp.frag[std::min<Size>(hs.size(), 5) - 1]++;
+    if (H.first == 0 && in_h < 0.5 * tot) g_cmp.low_cov++;
+  }
+  for (const auto& s : sm)
+  {
+    g_cmp.n_single++;
+    uint32_t kap = s[0];
+    for (uint32_t k : s)
+      if (sl.inten[k] > sl.inten[kap]) kap = k;
+    if (! in_exact.count(kap)) g_cmp.single_new++;
   }
   return out;
 }
@@ -5059,6 +5619,12 @@ protected:
                           "The two find partly different peptides; integer uses much less memory.",
                           false);
     setValidStrings_("trace:detector", {"openms", "integer"});
+    registerStringOption_("trace:ms2_tracer", "<mode>", "trim",
+                          "MS2 tracing of the integer detector. 'trim' (default) traces each m/z band in one pass and keeps the longest valid "
+                          "stretch around each trace's apex; 'exact' is the tracer of 1.9.6 and earlier. trim is about 20 % faster and found "
+                          "6-8 % more peptides on 43 diaPASEF runs at unchanged entrapment FDP.",
+                          false);
+    setValidStrings_("trace:ms2_tracer", {"trim", "exact"});
     registerDoubleOption_("trace:ms2_split_valleys", "<chrom_fwhm>", 7.0,
                           "Split fragment traces at chromatographic valleys; the value is the "
                           "expected peak width (seconds). 0 = off.",
@@ -7192,7 +7758,30 @@ protected:
           const uint32_t* e0 = frag_rt.idx.data() + frag_rt.off[(Size)r + 1];
           const uint32_t* it = std::lower_bound(b0, e0, (uint32_t)lo);
           const uint32_t* ie = std::lower_bound(it, e0, (uint32_t)hi);
-          for (; it != ie; ++it) visit(*it);
+          // [prefetch] The candidates are scattered over the window's fragments (1/K0 order): hint the fields visit() reads
+          // first eight candidates ahead, and the profile span four ahead (through the record hinted four steps before).
+          // Hints only: the visit order and every value read are unchanged.
+          const Size n_arena = wst.inten.size();
+          for (; it != ie; ++it)
+          {
+            if (ie - it > 8)
+            {
+              const uint32_t q = it[8];
+              __builtin_prefetch(&fg.invnorm[q]);
+              __builtin_prefetch(&frag_traces[q]);
+              __builtin_prefetch(&fg.nz_lo[q]);
+              __builtin_prefetch(&fg.nz_hi[q]);
+              __builtin_prefetch(&fg.nz_apex[q]);
+            }
+            if (ie - it > 4 && p_hi >= 0)
+            {
+              const Trace& t4 = frag_traces[it[4]];
+              const long k4 = std::max(0L, (long)p_lo - (long)t4.frame0);
+              const Size a4 = (Size)t4.off + (Size)k4;
+              if (a4 < n_arena) __builtin_prefetch(&wst.inten[a4]);
+            }
+            visit(*it);
+          }
         }
         // back to the full scan's order (ascending fragment index): everything after this loop depends on it
         if (surv_fi.size() > 1 && ! std::is_sorted(surv_fi.begin(), surv_fi.end()))
@@ -8775,6 +9364,14 @@ protected:
     const double ms1_snr = getDoubleOption_("trace:ms1_chrom_peak_snr");
     const double ms2_snr = getDoubleOption_("trace:ms2_chrom_peak_snr");
     const double ms2_minlen = getDoubleOption_("trace:ms2_min_length_sec");
+    // [single] 0 = exact, 5 = trim (default). DIASPEXTRACT_TRACER (single, single2, compare, hybrid, trim, exact) is read only
+    // while trace:ms2_tracer is at its default, so an explicit -trace:ms2_tracer exact always gives the exact tracer.
+    const int single_tracer = [&] {
+      const char* e = std::getenv("DIASPEXTRACT_TRACER");
+      const std::string opt = getStringOption_("trace:ms2_tracer");
+      const std::string m = e && *e && opt == "trim" ? std::string(e) : opt;
+      return m == "single" ? 1 : m == "single2" ? 2 : m == "compare" ? 3 : m == "hybrid" ? 4 : m == "trim" ? 5 : 0;
+    }();
     const double ms2_split = getDoubleOption_("trace:ms2_split_valleys");
     // [split-scan-time] ONE scalar for the whole run, from the MS1 frame times: one MS1 frame per
     // cycle, so it is the MS2 cadence too. Per window it would differ in the last bits (and per
@@ -10140,23 +10737,53 @@ protected:
                   }
                 }
                 TracePrep tprep = prepareTracing(cs, ms2_noise, ms2_snr, bnd, tlo, thi); // once per cell
-                if (nb == 1) per[ci][0] = detectTracesInteger(cs, tprep, bst[ci][0], mass_ppm, delta_im, ms2_noise, ms2_minlen);
+                if (nb == 1) per[ci][0] = single_tracer == 3 ? compareTracers(cs, tprep, bst[ci][0], mass_ppm, delta_im, ms2_noise, ms2_snr * ms2_noise, ms2_minlen, bnd, -1)
+                                         : single_tracer ? detectTracesSinglePass(cs, tprep, bst[ci][0], mass_ppm, delta_im, ms2_noise, ms2_snr * ms2_noise, ms2_minlen, bnd, -1, 0, single_tracer == 4, single_tracer == 5)
+                                                     : detectTracesInteger(cs, tprep, bst[ci][0], mass_ppm, delta_im, ms2_noise, ms2_minlen);
                 else
                 {
                   vector<vector<Trace>>& pc = per[ci];
                   vector<TraceStore>& bc = bst[ci];
                   std::exception_ptr band_err; // [task-err] rethrown into the window body's catch
-#pragma omp taskloop grainsize(1) default(shared)
-                  for (int b = 0; b < nb; ++b)
-                  {
-                    try
+                  // [lpt] Bands are claimed heaviest first (seed count) from a shared cursor by the window's own thread and up to
+                  // nb - 1 helper tasks: the window's thread takes the heaviest band itself, so it is not left waiting at the
+                  // taskgroup end for a heavy band another thread started late (longest-processing-time-first). Each band writes
+                  // only its own slots (pc[b], bc[b]), so the claim order changes nothing in the output.
+                  vector<int> bord(nb);
+                  for (int b = 0; b < nb; ++b) bord[b] = b;
+                  std::stable_sort(bord.begin(), bord.end(),
+                                   [&](int x, int y) { return tprep.seg[x + 1] - tprep.seg[x] > tprep.seg[y + 1] - tprep.seg[y]; });
+                  std::atomic<int> bcur {0};
+                  auto band_pull = [&]() {
+                    for (;;)
                     {
-                      teamAssist(1); // [pipe] a chunk of the pipelined tile reader or writer, if one is live
-                      pc[b] = detectTracesInteger(cs, tprep, bc[b], mass_ppm, delta_im, ms2_noise, ms2_minlen, b);
+                      const int i = bcur.fetch_add(1);
+                      if (i >= nb) break;
+                      const int b = bord[i];
+                      try
+                      {
+                        teamAssist(1); // [pipe] a chunk of the pipelined tile reader or writer, if one is live
+                        pc[b] = single_tracer == 3 ? compareTracers(cs, tprep, bc[b], mass_ppm, delta_im, ms2_noise, ms2_snr * ms2_noise, ms2_minlen, bnd, b)
+                                           : single_tracer ? detectTracesSinglePass(cs, tprep, bc[b], mass_ppm, delta_im, ms2_noise, ms2_snr * ms2_noise, ms2_minlen, bnd, b, single_tracer == 2 ? 32 : 0, single_tracer == 4, single_tracer == 5)
+                                         : detectTracesInteger(cs, tprep, bc[b], mass_ppm, delta_im, ms2_noise, ms2_minlen, b);
+                      }
+                      catch (...)
+                      {
+                        taskErr(band_err);
+                      }
                     }
-                    catch (...)
+                  };
+                  if (onPipeDriver() || ! omp_in_parallel()) { band_pull(); }
+                  else
+                  {
+#pragma omp taskgroup
                     {
-                      taskErr(band_err);
+                      for (int h = 1; h < nb; ++h)
+                      {
+#pragma omp task default(shared)
+                        band_pull();
+                      }
+                      band_pull();
                     }
                   }
                   if (band_err) std::rethrow_exception(band_err);

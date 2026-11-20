@@ -32,11 +32,15 @@
 #include "OmsString.h"
 #include <omp.h>
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <functional>
+#include <iterator>
+#include <limits>
 #include <map>
 #include <numeric>
 #include <tuple>
@@ -124,15 +128,113 @@ namespace Internal
     std::vector<std::pair<double, double>> pts;        ///< (RT, intensity) points
     std::vector<std::pair<OpenMS::Size, double>> gpts; ///< (window grid index, intensity) points
   };
+  /// @brief A window's fragments in apex-RT order as flat arrays (one allocation per array, points contiguous in fragment order).
+  struct Frags
+  {
+    std::vector<double> apex, mz, inten; ///< per fragment: apex RT, m/z, apex intensity
+    std::vector<uint32_t> off;           ///< per fragment: first point; off[n] = number of points
+    std::vector<uint32_t> g;             ///< per point: window grid index
+    std::vector<double> in;              ///< per point: intensity
+    std::vector<uint32_t> multi;         ///< fragments with more than one point, in apex order
+    std::vector<uint32_t> s_off, s_idx;  ///< single-point fragments by grid index (s_off[g] .. s_off[g + 1]), each by m/z
+    OpenMS::Size size() const { return apex.size(); }
+    Frags() = default;
+    void swap(Frags& o)
+    {
+      apex.swap(o.apex); mz.swap(o.mz); inten.swap(o.inten); off.swap(o.off); g.swap(o.g); in.swap(o.in);
+      multi.swap(o.multi); s_off.swap(o.s_off); s_idx.swap(o.s_idx);
+    }
+    /// @brief Flattens @p fr (already in apex order) and frees it.
+    explicit Frags(std::vector<Frag>& fr)
+    {
+      const OpenMS::Size n = fr.size();
+      OpenMS::Size np = 0;
+      for (const auto& f : fr) { np += f.gpts.size(); }
+      if (np >= std::numeric_limits<uint32_t>::max()) { throw OpenMS::Exception::OutOfRange(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION); } // 32-bit offsets
+      apex.resize(n); mz.resize(n); inten.resize(n); off.resize(n + 1); g.resize(np); in.resize(np);
+      OpenMS::Size j = 0;
+      for (OpenMS::Size k = 0; k < n; ++k)
+      {
+        apex[k] = fr[k].apex_rt; mz[k] = fr[k].mz; inten[k] = fr[k].inten; off[k] = (uint32_t)j;
+        for (const auto& q : fr[k].gpts) { g[j] = (uint32_t)q.first; in[j] = q.second; ++j; }
+      }
+      off[n] = (uint32_t)j;
+      std::vector<Frag>().swap(fr);
+      // single-point fragments per grid index, by m/z (assemble's fast path); the others in apex order
+      uint32_t ng = 0;
+      for (uint32_t x : g) { ng = std::max(ng, x + 1); }
+      s_off.assign(ng + 1, 0);
+      for (OpenMS::Size k = 0; k < n; ++k)
+      {
+        if (off[k + 1] - off[k] == 1) { ++s_off[g[off[k]] + 1]; }
+        else { multi.push_back((uint32_t)k); }
+      }
+      for (uint32_t x = 0; x < ng; ++x) { s_off[x + 1] += s_off[x]; }
+      s_idx.resize(s_off[ng]);
+      std::vector<uint32_t> fill(s_off.begin(), s_off.end() - 1);
+      for (OpenMS::Size k = 0; k < n; ++k)
+      {
+        if (off[k + 1] - off[k] == 1) { s_idx[fill[g[off[k]]]++] = (uint32_t)k; }
+      }
+      for (uint32_t x = 0; x < ng; ++x)
+      {
+        std::sort(s_idx.begin() + s_off[x], s_idx.begin() + s_off[x + 1], [&](uint32_t a, uint32_t b) { return mz[a] < mz[b] || (mz[a] == mz[b] && a < b); });
+      }
+    }
+  };
+
+  /**
+    @brief A mass trace as the non-IMS path reads it: its points (RT order) in a shared array, centroid m/z, apex intensity.
+
+    The subset of OpenMS::MassTrace this path uses, with the same values (FWHM is never estimated by
+    MassTraceDetection: 0).
+  */
+  struct LTrace
+  {
+    const OpenMS::Peak2D* b; ///< first point
+    OpenMS::Size n;          ///< number of points
+    double cmz, maxi;        ///< centroid m/z (MassTrace::updateWeightedMeanMZ), largest raw intensity (getMaxIntensity(false))
+    const OpenMS::Peak2D* begin() const { return b; }
+    const OpenMS::Peak2D* end() const { return b + n; }
+    std::reverse_iterator<const OpenMS::Peak2D*> rbegin() const { return std::reverse_iterator<const OpenMS::Peak2D*>(b + n); }
+    OpenMS::Size getSize() const { return n; }
+    double getCentroidMZ() const { return cmz; }
+    double getFWHM() const { return 0.0; }
+    double getMaxIntensity(bool) const { return maxi; }
+  };
+  /// @brief A window's mass traces: LTraces over one point array.
+  struct Traces
+  {
+    std::vector<OpenMS::Peak2D> pts;
+    std::vector<LTrace> t;
+    OpenMS::Size size() const { return t.size(); }
+    const LTrace& operator[](OpenMS::Size i) const { return t[i]; }
+    std::vector<LTrace>::const_iterator begin() const { return t.begin(); }
+    std::vector<LTrace>::const_iterator end() const { return t.end(); }
+    /// @brief Appends trace bounds [p0, pts.size()) with its centroid m/z; pointers are fixed by finish().
+    void add(OpenMS::Size p0, double cmz)
+    {
+      double mx = 0.0;
+      for (OpenMS::Size i = p0; i < pts.size(); ++i)
+      {
+        if (pts[i].getIntensity() > mx) { mx = pts[i].getIntensity(); }
+      }
+      t.push_back(LTrace {reinterpret_cast<const OpenMS::Peak2D*>(p0), pts.size() - p0, cmz, mx});
+    }
+    void finish()
+    {
+      for (auto& x : t) { x.b = pts.data() + reinterpret_cast<OpenMS::Size>(x.b); }
+    }
+  };
 
   /**
     @brief The RT of a trace's most intense point.
     @param[in] t The mass trace.
-    @return The apex RT; the centroid RT for an empty trace.
+    @return The apex RT (the first of equal maxima).
   */
-  inline double apexRT(const OpenMS::MassTrace& t)
+  inline double apexRT(const LTrace& t)
   {
-    double best = -1, rt = t.getCentroidRT();
+    double best = -1, rt = 0;
     for (const auto& p : t)
     {
       if (p.getIntensity() > best)
@@ -150,7 +252,7 @@ namespace Internal
     @param[in] ppm Mass error tolerance (ppm).
     @return The detected mass traces.
   */
-  inline std::vector<OpenMS::MassTrace> traces(const OpenMS::PeakMap& m, double ppm)
+  inline Traces tracesOpenMS(const OpenMS::PeakMap& m, double ppm)
   {
     OpenMS::MassTraceDetection mtd;
     mtd.setLogType(OpenMS::ProgressLogger::NONE); // windows run in parallel: progress lines would interleave
@@ -160,7 +262,249 @@ namespace Internal
     mtd.setParameters(p);
     std::vector<OpenMS::MassTrace> mt;
     mtd.run(m, mt);
-    return mt;
+    Traces out;
+    for (const auto& x : mt)
+    {
+      const OpenMS::Size p0 = out.pts.size();
+      for (const auto& q : x) { out.pts.push_back(q); }
+      out.add(p0, x.getCentroidMZ());
+    }
+    out.finish();
+    return out;
+  }
+
+  /**
+    @brief Mass traces of a map, the same as OpenMS MassTraceDetection with its defaults, mass_error_ppm = @p ppm and
+    min_trace_length = 0 (tracesOpenMS), without its per-trace allocations; frees the map's spectra as it reads them.
+
+    Falls back to tracesOpenMS when a spectrum has data arrays (ion mobility or FWHM arrays change what MassTraceDetection
+    does; OpenMS also validates integer and string arrays against the peak count).
+    @param[in,out] m The spectra to trace (all of MS level 1, sorted by m/z); left empty.
+    @param[in] ppm Mass error tolerance (ppm).
+    @return The traces in MassTraceDetection's order, with its centroid m/z.
+  */
+  inline Traces traces(OpenMS::PeakMap& m, double ppm)
+  {
+    for (const auto& s : m)
+    {
+      if (! s.getFloatDataArrays().empty() || ! s.getIntegerDataArrays().empty() || ! s.getStringDataArrays().empty() || s.getMSLevel() != 1)
+      {
+        Traces t = tracesOpenMS(m, ppm);
+        m.clear(true);
+        return t;
+      }
+    }
+    constexpr double NOISE = 10.0, SNR = 3.0; // MassTraceDetection defaults noise_threshold_int, chrom_peak_snr
+    constexpr OpenMS::Size OUTLIERS = 5;      // trace_termination_outliers (criterion "outlier")
+    constexpr double MIN_SAMPLE_RATE = 0.5;
+    const OpenMS::Size ns = m.size();
+    if (ns < 3)
+    {
+      throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "Input map consists of too few MS1 spectra (less than 3!). Aborting...",
+                                            DIAspeXtract::String(ns));
+    }
+    // step 1: peaks above the noise threshold (flat), apex candidates above SNR x noise
+    // one 16-byte record per peak: the binary search's last probe, the intensity and the visited flag share a cache line
+    struct PK
+    {
+      double mz;
+      float in;
+      uint32_t vis;
+    };
+    std::vector<double> rt(ns);
+    std::vector<PK> pk;
+    std::vector<OpenMS::Size> off(ns + 1, 0);
+    struct Apex
+    {
+      double intensity;
+      uint32_t scan, peak;
+    };
+    std::vector<Apex> ap;
+    for (OpenMS::Size i = 0; i < ns; ++i)
+    {
+      OpenMS::MSSpectrum& s = m[i];
+      rt[i] = s.getRT();
+      uint32_t k = 0;
+      for (const auto& q : s)
+      {
+        const double v = q.getIntensity();
+        if (v > NOISE)
+        {
+          if (v > SNR * NOISE) { ap.push_back(Apex {v, (uint32_t)i, k}); }
+          pk.push_back(PK {q.getMZ(), q.getIntensity(), 0});
+          ++k;
+        }
+      }
+      off[i + 1] = pk.size();
+      s.clear(true); // frees the peaks (and the meta data)
+      s.shrink_to_fit();
+    }
+    m.clear(true);
+    // stable sort by intensity: an LSD radix sort on the float bits (positive floats order as their bit patterns; the
+    // intensities are floats widened to double), stable like std::stable_sort
+    {
+      std::vector<Apex> tmp(ap.size());
+      for (int sh = 0; sh < 32; sh += 8)
+      {
+        OpenMS::Size cnt[257] = {0};
+        for (const auto& x : ap) { ++cnt[((std::bit_cast<uint32_t>((float)x.intensity) >> sh) & 255) + 1]; }
+        for (int d = 0; d < 256; ++d) { cnt[d + 1] += cnt[d]; }
+        for (const auto& x : ap) { tmp[cnt[(std::bit_cast<uint32_t>((float)x.intensity) >> sh) & 255]++] = x; }
+        ap.swap(tmp);
+      }
+    }
+    Traces out;
+    std::vector<std::pair<OpenMS::Size, OpenMS::Size>> down, up; // (scan, flat peak index) gathered below and above the apex
+    const PK* const PM = pk.data();
+    // per scan, an m/z bin index (about 4 peaks per bin) that narrows the binary search of nearest(): bin(x) =
+    // floor((x - lo) * inv), clamped, is monotonic in x, so the first peak >= mz lies in bin(mz) or is the first of a later bin
+    std::vector<double> blo(ns), binv(ns);
+    std::vector<uint32_t> bn(ns), boff(ns + 1, 0), bfirst;
+    if (pk.size() / 4 + 2 * ns >= std::numeric_limits<uint32_t>::max()) { throw OpenMS::Exception::OutOfRange(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION); } // 32-bit bin offsets
+    for (OpenMS::Size i = 0; i < ns; ++i)
+    {
+      const OpenMS::Size np = off[i + 1] - off[i];
+      const uint32_t nb = (uint32_t)std::max<OpenMS::Size>(1, np / 4);
+      bn[i] = nb;
+      boff[i + 1] = boff[i] + nb + 1;
+      blo[i] = np ? PM[off[i]].mz : 0.0;
+      const double span = np ? PM[off[i + 1] - 1].mz - blo[i] : 0.0;
+      binv[i] = span > 0 ? nb / span : 0.0;
+    }
+    bfirst.resize(boff[ns]);
+    auto binOf = [&](OpenMS::Size i, double mz) -> uint32_t {
+      const double t = (mz - blo[i]) * binv[i];
+      if (! (t > 0)) { return 0; }
+      return t >= bn[i] ? bn[i] - 1 : (uint32_t)t;
+    };
+    for (OpenMS::Size i = 0; i < ns; ++i)
+    {
+      uint32_t* f = bfirst.data() + boff[i];
+      uint32_t b = 0;
+      for (OpenMS::Size j = off[i]; j < off[i + 1]; ++j)
+      {
+        const uint32_t pb = binOf(i, PM[j].mz);
+        while (b <= pb) { f[b++] = (uint32_t)(j - off[i]); }
+      }
+      while (b <= bn[i]) { f[b++] = (uint32_t)(off[i + 1] - off[i]); }
+    }
+    // MSSpectrum::findNearest on scan i's peaks: the first peak at or above mz, or the one before it when that is not farther
+    auto nearest = [&](OpenMS::Size i, double mz) -> OpenMS::Size {
+      const PK* b = PM + off[i];
+      const PK* e = PM + off[i + 1];
+      const uint32_t* f = bfirst.data() + boff[i];
+      const uint32_t q = binOf(i, mz);
+      const PK* it = std::lower_bound(b + f[q], b + f[q + 1], mz, [](const PK& p, double x) { return p.mz < x; });
+      if (it == b) { return off[i]; }
+      if (it == e) { return off[i + 1] - 1; }
+      return (std::fabs(it->mz - mz) < std::fabs((it - 1)->mz - mz)) ? (OpenMS::Size)(it - PM) : (OpenMS::Size)(it - 1 - PM);
+    };
+    for (auto a = ap.crbegin(); a != ap.crend(); ++a)
+    {
+      const OpenMS::Size apx = off[a->scan] + a->peak;
+      if (pk[apx].vis) { continue; }
+      const double amz = pk[apx].mz;
+      const float ain = pk[apx].in;
+      double centroid = amz, counter = (double)ain * amz, denom = ain;
+      auto wmean = [&](double val, double w) { // MassTraceDetection::updateIterativeWeightedMean_
+        const double ct = 1.0 + (w * val) / counter;
+        const double dt = 1.0 + w / denom;
+        centroid *= (ct / dt);
+        counter *= ct;
+        denom *= dt;
+      };
+      wmean(amz, ain);
+      double sd = (centroid / 1e6) * ppm, wsum = ain;
+      down.clear();
+      up.clear();
+      OpenMS::Size di = a->scan, ui = a->scan, d_scans = 0, u_scans = 0, d_miss = 0, u_miss = 0;
+      bool d_on = true, u_on = true;
+      auto step = [&](OpenMS::Size i, std::vector<std::pair<OpenMS::Size, OpenMS::Size>>& got, OpenMS::Size& miss) {
+        if (off[i] == off[i + 1]) { return; } // empty spectra leave the counters alone
+        const OpenMS::Size c = nearest(i, centroid);
+        const double cmz = pk[c].mz;
+        if (cmz <= centroid + 3 * sd && cmz >= centroid - 3 * sd && ! pk[c].vis)
+        {
+          const double cin = pk[c].in;
+          got.emplace_back(i, c);
+          wmean(cmz, cin);
+          // updateWeightedSDEstimateRobust with the point as a Peak2D (float intensity)
+          const float fin = (float)cin;
+          const double d1 = pmath::log(wsum) + 2 * pmath::log(sd);
+          const double d2 = pmath::log((double)fin) + 2 * pmath::log(std::abs(cmz - centroid));
+          const double dd = std::sqrt(pmath::exp(d1) + pmath::exp(d2));
+          const double ws = wsum + fin;
+          const double tsd = dd / std::sqrt(ws);
+          if (tsd > std::numeric_limits<double>::epsilon()) { sd = tsd; }
+          wsum = ws;
+          miss = 0;
+        }
+        else { ++miss; }
+      };
+      // the next scans' bin entries and peaks are cache misses: fetch them one and two steps ahead (no effect on results)
+      auto ahead = [&](OpenMS::Size i1, OpenMS::Size i2, bool has2) {
+        __builtin_prefetch(PM + off[i1] + bfirst[boff[i1] + binOf(i1, centroid)]);
+        if (has2) { __builtin_prefetch(bfirst.data() + boff[i2] + binOf(i2, centroid)); }
+      };
+      while ((di > 0 && d_on) || (ui < ns - 1 && u_on))
+      {
+        if (di > 1 && d_on) { ahead(di - 2, di > 2 ? di - 3 : 0, di > 2); }
+        if (ui + 2 < ns && u_on) { ahead(ui + 2, ui + 3 < ns ? ui + 3 : 0, ui + 3 < ns); }
+        if (di > 0 && d_on)
+        {
+          step(di - 1, down, d_miss);
+          --di;
+          ++d_scans;
+          if (d_miss > OUTLIERS) { d_on = false; }
+        }
+        if (ui < ns - 1 && u_on)
+        {
+          step(ui + 1, up, u_miss);
+          ++ui;
+          ++u_scans;
+          if (u_miss > OUTLIERS) { u_on = false; }
+        }
+      }
+      const OpenMS::Size npts = down.size() + 1 + up.size();
+      const OpenMS::Size adjusted = d_scans + u_scans + 1 - d_miss - u_miss;
+      if (! (static_cast<double>(npts) / static_cast<double>(adjusted) >= MIN_SAMPLE_RATE)) { continue; }
+      // (min_trace_length 0 and no maximum: every RT range passes)
+      pk[apx].vis = 1;
+      for (const auto& c : down) { pk[c.second].vis = 1; }
+      for (const auto& c : up) { pk[c.second].vis = 1; }
+      const OpenMS::Size p0 = out.pts.size();
+      auto put = [&](OpenMS::Size c, double r) {
+        OpenMS::Peak2D q;
+        q.setRT(r);
+        q.setMZ(pk[c].mz);
+        q.setIntensity(pk[c].in);
+        out.pts.push_back(q);
+      };
+      for (auto it = down.rbegin(); it != down.rend(); ++it) { put(it->second, rt[it->first]); }
+      put(apx, rt[a->scan]);
+      for (const auto& c : up) { put(c.second, rt[c.first]); }
+      double cmz;
+      if (npts == 1) { cmz = out.pts[p0].getMZ(); }
+      else
+      { // MassTrace::updateWeightedMeanMZ
+        double wsm = 0.0, tw = 0.0;
+        for (OpenMS::Size i = p0; i < out.pts.size(); ++i)
+        {
+          const double w = out.pts[i].getIntensity();
+          tw += w;
+          wsm += w * out.pts[i].getMZ();
+        }
+        if (tw < std::numeric_limits<double>::epsilon())
+        {
+          throw OpenMS::Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "All weights were equal to zero! Empty trace? Aborting...",
+                                                DIAspeXtract::String(tw));
+        }
+        cmz = wsm / tw;
+      }
+      out.add(p0, cmz);
+    }
+    out.finish();
+    return out;
   }
 
   /**
@@ -267,7 +611,7 @@ namespace Internal
     @return One precursor (src 1) per mono trace found.
   */
   // ponytail: greedy, highest charge first, no averagine check; add an intensity-pattern test if charge errors show up
-  inline std::vector<Prec> envelopes(const std::vector<OpenMS::MassTrace>& mt,
+  inline std::vector<Prec> envelopes(const Traces& mt,
                                      double ppm,
                                      double lo,
                                      double hi,
@@ -288,7 +632,7 @@ namespace Internal
     }
     auto partner = [&](OpenMS::Size k, double target) -> long { // co-eluting trace at target m/z
       const double tol = target * ppm * 1e-6;
-      const OpenMS::MassTrace& a = mt[o[k]];
+      const LTrace& a = mt[o[k]];
       const double half = std::max(a.getFWHM() * 0.5, coelute); // isotopes share scans: one scan of apex jitter
       long best = -1;
       double bi = -1;
@@ -307,7 +651,7 @@ namespace Internal
     };
     std::vector<Prec> out;
     auto emit = [&](OpenMS::Size k, int z) {
-      const OpenMS::MassTrace& t = mt[o[k]];
+      const LTrace& t = mt[o[k]];
       Prec p {mz[k], art[k], t.begin()->getRT(), t.rbegin()->getRT(), t.getMaxIntensity(false), z, {}, {}, 1};
       for (const auto& pk : t)
       {
@@ -498,7 +842,7 @@ namespace Internal
     @return An MS2 centroid spectrum with one precursor, or an empty spectrum if fewer than min_frags fragments remain.
   */
   inline OpenMS::MSSpectrum assemble(const Prec& p,
-                                     const std::vector<Frag>& fr,
+                                     const Frags& fr,
                                      const std::vector<double>& grid,
                                      double cycle,
                                      const Params& opts,
@@ -511,15 +855,18 @@ namespace Internal
     OpenMS::Size g1 = std::upper_bound(grid.begin(), grid.end(), p.rt_hi) - grid.begin();
     g0 -= std::min(g0, (OpenMS::Size)opts.span_pad);
     g1 = std::min(grid.size(), g1 + opts.span_pad); // the precursor is 0 outside its hill
-    std::vector<double> pp;
+    thread_local std::vector<double> pp;
+    pp.clear();
     for (OpenMS::Size g = g0; g < g1; ++g)
     {
       pp.push_back(interp(p.rt_pts, p.int_pts, grid[g]));
     }
     const bool few = pp.size() < 3;
     const double neutral = p.z * (p.mz - PROTON);
-    std::vector<std::pair<double, double>> pk; // (intensity, m/z)
-    std::vector<double> fp(pp.size());
+    thread_local std::vector<std::pair<double, double>> pk; // (intensity, m/z)
+    pk.clear();
+    thread_local std::vector<double> fp;
+    fp.resize(pp.size());
     // split traces (TOF) are short against the precursor span: their r comes from their own points (one-pass sums).
     // ponytail: unsplit traces keep the two-pass dense form, so Orbitrap output stays bit-identical
     const bool sparse = opts.split > 0;
@@ -548,18 +895,57 @@ namespace Internal
     }
     else
     {
-      const auto first = std::lower_bound(fr.begin(), fr.end(), a0, [](const Frag& f, double t) { return f.apex_rt < t; });
-      for (OpenMS::Size k = first - fr.begin(); k < fr.size() && fr[k].apex_rt <= a1; ++k)
+      const double* const fmz = fr.mz.data();
+      const double* const fap = fr.apex.data();
+      const uint32_t* const foff = fr.off.data();
+      const uint32_t* const fg = fr.g.data();
+      const double* const fin = fr.in.data();
+      const double mz_max = neutral - 56.0;
+      const OpenMS::Size nfr = fr.size();
+      // TOF fast path (split traces, padded span): single-point fragments by scan, where r depends on the scan only
+      // (b cancels); a scan whose r is below min_corr by a margin far above rounding skips all its single-point fragments
+      const bool fast = sparse && pad && ! few && opts.min_corr > 0 && ! opts.drop_precursor;
+      if (fast && va > 0)
       {
-        const Frag& f = fr[k];
-        if (f.mz - PROTON > neutral - 56.0)
+        const double thr = opts.min_corr * std::sqrt(va * (nn - 1)) * (1 - 1e-9);
+        const OpenMS::Size ge = std::min<OpenMS::Size>(g1, fr.s_off.empty() ? 0 : fr.s_off.size() - 1);
+        for (OpenMS::Size g = g0; g < ge; ++g)
+        {
+          const double y = pp[g - g0], t = nn * y - sa;
+          if (t + 1e-12 * (nn * std::fabs(y) + std::fabs(sa)) < thr) { continue; }
+          for (uint32_t x = fr.s_off[g], xe = fr.s_off[g + 1]; x < xe; ++x)
+          {
+            const uint32_t k = fr.s_idx[x];
+            const double f_mz = fmz[k];
+            if (f_mz - PROTON > mz_max) { break; } // by m/z: all the rest are heavier
+            const double b = fin[foff[k]];
+            const double sb = b, sbb = b * b, sab = pp[g - g0] * b; // the general loop's sums for one point
+            const double vb = nn * sbb - sb * sb;
+            const double num = nn * sab - sa * sb;
+            if (! (vb > 0) || ! (num > 0)) { continue; }
+            if (num * num * (1 + 1e-9) < opts.min_corr * opts.min_corr * (va * vb)) { continue; }
+            const double r = num / std::sqrt(va * vb);
+            if (r < opts.min_corr) { continue; }
+            pk.emplace_back(fr.inten[k] * pmath::pow(r, opts.weight_pow), f_mz);
+          }
+        }
+      }
+      const uint32_t* const fmulti = fr.multi.data();
+      const OpenMS::Size nmulti = fr.multi.size();
+      for (OpenMS::Size x = fast ? std::lower_bound(fr.multi.begin(), fr.multi.end(), a0, [&](uint32_t k, double t) { return fap[k] < t; }) - fr.multi.begin()
+                                 : std::lower_bound(fr.apex.begin(), fr.apex.end(), a0) - fr.apex.begin();
+           fast ? x < nmulti && fap[fmulti[x]] <= a1 : x < nfr && fap[x] <= a1; ++x)
+      {
+        const OpenMS::Size k = fast ? fmulti[x] : x;
+        const double f_mz = fmz[k];
+        if (f_mz - PROTON > mz_max)
         {
           continue; // heavier than the precursor allows at z = 1
         }
         if (opts.drop_precursor)
         {
-          const double iso = std::round((f.mz - p.mz) * p.z / C13);
-          if (iso >= -1 && iso <= 3 && std::fabs(f.mz - p.mz - iso * C13 / p.z) <= f.mz * opts.ppm * 1e-6)
+          const double iso = std::round((f_mz - p.mz) * p.z / C13);
+          if (iso >= -1 && iso <= 3 && std::fabs(f_mz - p.mz - iso * C13 / p.z) <= f_mz * opts.ppm * 1e-6)
           {
             continue; // unfragmented precursor
           }
@@ -567,57 +953,109 @@ namespace Internal
         if (! few)
         {
           double r;
+          uint32_t j = foff[k];
+          const uint32_t je = foff[k + 1];
           if (sparse)
           {
             double sb = 0, sbb = 0, sab = 0;
-            for (auto it = std::lower_bound(f.gpts.begin(), f.gpts.end(), std::make_pair(g0, -1.0)); it != f.gpts.end() && it->first < g1; ++it)
+            while (j < je && fg[j] < g0) { ++j; }
+            for (; j < je && fg[j] < g1; ++j)
             {
-              sb += it->second;
-              sbb += it->second * it->second;
-              sab += pp[it->first - g0] * it->second;
+              const double b = fin[j];
+              sb += b;
+              sbb += b * b;
+              sab += pp[fg[j] - g0] * b;
             }
             const double vb = nn * sbb - sb * sb;
-            r = (va > 0 && vb > 0) ? (nn * sab - sa * sb) / std::sqrt(va * vb) : 0.0;
+            const double num = nn * sab - sa * sb;
+            if (opts.min_corr > 0) // fragments that surely fail min_corr skip the square root and division
+            {
+              if (! (va > 0 && vb > 0) || ! (num > 0)) { continue; } // r <= 0 < min_corr
+              // r^2 below min_corr^2 by a relative margin far above the rounding of r: r < min_corr as computed below too
+              if (num * num * (1 + 1e-9) < opts.min_corr * opts.min_corr * (va * vb)) { continue; }
+            }
+            r = (va > 0 && vb > 0) ? num / std::sqrt(va * vb) : 0.0;
           }
           else
           {
             std::fill(fp.begin(), fp.end(), 0.0);
-            for (const auto& q : f.gpts)
+            for (; j < je; ++j)
             {
-              if (q.first >= g0 && q.first < g1) { fp[q.first - g0] = q.second; }
+              if (fg[j] >= g0 && fg[j] < g1) { fp[fg[j] - g0] = fin[j]; }
             }
             r = pearson(pp, fp);
           }
           if (r < opts.min_corr) { continue; }
-          pk.emplace_back(f.inten * pmath::pow(r, opts.weight_pow), f.mz);
+          pk.emplace_back(fr.inten[k] * pmath::pow(r, opts.weight_pow), f_mz);
           continue;
         }
-        const double d = (f.apex_rt - p.rt) / cycle;
-        pk.emplace_back(f.inten * pmath::exp(-d * d * opts.weight_pow / 4.0), f.mz);
+        const double d = (fap[k] - p.rt) / cycle;
+        pk.emplace_back(fr.inten[k] * pmath::exp(-d * d * opts.weight_pow / 4.0), f_mz);
       }
       if (raw) { *raw = pk; }
     }
     if ((int)pk.size() < opts.min_frags) { return s; }
     if (opts.comp_boost > 0)
     {
-      std::sort(pk.begin(), pk.end(), [](const auto& a, const auto& b) { return a.second < b.second; });
+      // a peak with a complement (another peak q, m/z sum within target +- tol) gets the boost. The peaks go into 1-Th
+      // buckets (lists in a reused head table), so the search needs no sort; what follows does not depend on pk's order
       const double target = neutral + 2 * PROTON, tol = target * 2 * opts.ppm * 1e-6;
-      std::vector<char> hit(pk.size(), 0);
-      for (OpenMS::Size i = 0, j = pk.size(); i < pk.size(); ++i) // j: first peak too heavy to pair with i
+      constexpr int NB = 1 << 14; // buckets of 1 Th: m/z 0 .. 16384
+      thread_local std::vector<int> head(NB, -1);
+      thread_local std::vector<int> nxt;
+      thread_local std::vector<char> hit;
+      const OpenMS::Size n = pk.size();
+      nxt.resize(n);
+      hit.assign(n, 0);
+      bool inside = true;
+      for (OpenMS::Size i = 0; i < n && inside; ++i) { inside = pk[i].second >= 0 && pk[i].second < NB; }
+      if (inside)
       {
-        while (j > 0 && pk[i].second + pk[j - 1].second > target + tol)
+        for (OpenMS::Size i = 0; i < n; ++i)
         {
-          --j;
+          const int b = (int)pk[i].second;
+          nxt[i] = head[b];
+          head[b] = (int)i;
         }
-        for (OpenMS::Size q = j; q-- > 0 && pk[i].second + pk[q].second >= target - tol;)
+        for (OpenMS::Size i = 0; i < n; ++i)
         {
-          if (q != i)
+          const double a = pk[i].second;
+          // clamp in double before the cast: an absurd tolerance must not overflow int
+          const int b0 = (int)std::max(0.0, std::floor(target - tol - a - 1e-6)), b1 = (int)std::min((double)(NB - 1), std::floor(target + tol - a + 1e-6));
+          for (int b = b0; b <= b1 && ! hit[i]; ++b)
           {
-            hit[i] = hit[q] = 1; // a peak is not its own complement
+            for (int q = head[b]; q >= 0; q = nxt[q])
+            {
+              const double sum = a + pk[q].second;
+              if ((OpenMS::Size)q != i && sum >= target - tol && ! (sum > target + tol))
+              {
+                hit[i] = 1; // a peak is not its own complement
+                break;
+              }
+            }
+          }
+        }
+        for (OpenMS::Size i = 0; i < n; ++i) { head[(int)pk[i].second] = -1; }
+      }
+      else // m/z outside the bucket range: the sorted two-pointer search
+      {
+        std::sort(pk.begin(), pk.end(), [](const auto& a, const auto& b) { return a.second < b.second; });
+        for (OpenMS::Size i = 0, j = pk.size(); i < pk.size(); ++i) // j: first peak too heavy to pair with i
+        {
+          while (j > 0 && pk[i].second + pk[j - 1].second > target + tol)
+          {
+            --j;
+          }
+          for (OpenMS::Size q = j; q-- > 0 && pk[i].second + pk[q].second >= target - tol;)
+          {
+            if (q != i)
+            {
+              hit[i] = hit[q] = 1; // a peak is not its own complement
+            }
           }
         }
       }
-      for (OpenMS::Size i = 0; i < pk.size(); ++i)
+      for (OpenMS::Size i = 0; i < n; ++i)
       {
         if (hit[i]) { pk[i].first *= opts.comp_boost; }
       }
@@ -843,125 +1281,71 @@ inline Stats run(OpenMS::PeakMap& exp,
     }
     return n;
   };
-  const auto tb = clk::now();
-  std::vector<Internal::Prec> seeds;
-  const std::vector<Internal::Prec> bio
-    = Internal::biosaur(std::move(m1), opts, keys.front().first - 1.0, top + 1.0, opts.hill_seeds > 0 ? &seeds : nullptr);
-  log("[noims] Biosaur2: " + DIAspeXtract::String(bio.size()) + " isotope-pattern features as precursors in "
-      + DIAspeXtract::String(std::chrono::duration<double>(clk::now() - tb).count()) + " s");
-
+  // Biosaur2 (MS1) and the windows' MS2 traces and fragments do not depend on each other: Biosaur2 runs as one task
+  // (its parallel loops then run serially, as a nested region; its output does not depend on the thread count) while
+  // the other threads trace the windows; the windows' precursors and spectra follow once both are done.
   std::vector<OpenMS::Size> order(n_windows); // heaviest window first, so the largest ones do not start last
   std::iota(order.begin(), order.end(), 0);
   std::stable_sort(order.begin(), order.end(), [&](OpenMS::Size a, OpenMS::Size b) { return wpeaks[a] > wpeaks[b]; });
   std::vector<std::vector<OpenMS::MSSpectrum>> res(n_windows);
   std::vector<OpenMS::Size> nprec(n_windows, 0), ntr2(n_windows, 0);
   std::vector<double> busy(n_windows, 0.0), t_mtd(n_windows, 0.0), t_frag(n_windows, 0.0);
-  std::vector<OpenMS::Size> nfrag(n_windows, 0);
+  std::vector<OpenMS::Size> nfrag(n_windows, 0), nsing(n_windows, 0);
+  std::vector<Internal::Frags> wfr(n_windows);           // per window: fragments (phase A -> B)
+  std::vector<std::vector<Internal::Prec>> wenv(n_windows); // per window: owned MS2 envelopes with MS1 support (phase A -> B)
   std::exception_ptr err;
   OpenMS::Size n_done = 0;
-  progress.startProgress(0, (OpenMS::SignedSize)n_windows, "extracting pseudo-spectra (isolation windows)");
-#pragma omp parallel for schedule(dynamic, 1)
-  for (long o = 0; o < (long)n_windows; ++o)
+  std::vector<Internal::Prec> seeds, bio_v;
+  double t_bio = 0;
+  OpenMS::Size p1 = 0, p2 = 0; // MS1 and MS2 peaks
+  for (const auto& sp : m1) { p1 += sp.size(); }
+  for (OpenMS::Size w = 0; w < n_windows; ++w) { p2 += wpeaks[w]; }
+  // overlap Biosaur2 with the MS2 traces only when there is enough MS2 work to hide it behind (serial, it takes about twice
+  // its parallel time); NOIMS_OVERLAP=0/1 forces it (experiments)
+  const char* ov_env = std::getenv("NOIMS_OVERLAP");
+  const bool overlap = ov_env ? std::atoi(ov_env) != 0 : (double)p2 >= 15.0 * (double)p1 * std::max(1.0, st.threads / 16.0);
+  log("[noims] " + DIAspeXtract::String(p1) + " MS1 peaks, " + DIAspeXtract::String(p2) + " MS2 peaks; Biosaur2 " + (overlap ? "alongside" : "before")
+      + " the MS2 traces");
+  if (! overlap)
   {
-    try
-    {
-      const OpenMS::Size w = order[o];
-      if (scans[w].size() < 3)
-      {
-        continue; // MassTraceDetection needs 3 scans
-      }
-      const auto tw = clk::now();
-      const double lo = keys[w].first, hi = keys[w].second;
-      std::vector<Internal::Prec> prec;
-      for (auto it = std::lower_bound(bio.begin(), bio.end(), lo, [](const Internal::Prec& p, double m) { return p.mz < m; });
-           it != bio.end() && it->mz < hi; ++it)
-      {
-        if (owner(it->mz) == (long)w) { prec.push_back(*it); }
-      }
-
-      // MS2 traces on the window's scan grid
-      const std::vector<OpenMS::MassTrace> ft = Internal::traces(m2[w], opts.ms2_ppm > 0 ? opts.ms2_ppm : opts.ppm);
-      ntr2[w] = ft.size();
-      t_mtd[w] = std::chrono::duration<double>(clk::now() - tw).count();
-      m2[w].clear(true);
-      // unfragmented precursors seen in MS2, unless MS1 already has them (same z, 1 cycle, ppm)
-      std::vector<Internal::Prec> q = Internal::envelopes(ft, opts.ppm, lo, hi, 1.01 * cycle, opts.env_all_charges, opts.env_pattern);
-      const OpenMS::Size n1 = prec.size();
-      for (auto& c : q)
-      {
-        if (owner(c.mz) != (long)w) { continue; }
-        bool dup = false;
-        for (OpenMS::Size i = 0; i < n1 && ! dup; ++i)
+    const auto tb = clk::now();
+    bio_v = Internal::biosaur(std::move(m1), opts, keys.front().first - 1.0, top + 1.0, opts.hill_seeds > 0 ? &seeds : nullptr);
+    t_bio = std::chrono::duration<double>(clk::now() - tb).count();
+  }
+  const int max_levels = omp_get_max_active_levels();
+  omp_set_max_active_levels(1); // Biosaur2's loops inside its task stay serial
+  progress.startProgress(0, (OpenMS::SignedSize)n_windows, "extracting pseudo-spectra (isolation windows)");
+  // phase B of one window (precursors, spectra, hill seeds): reads only that window's phase-A results and Biosaur2's output
+  auto phase_b = [&](long o) {
+        try
         {
-          dup = prec[i].z == c.z && std::fabs(prec[i].mz - c.mz) <= c.mz * opts.ppm * 1e-6 && std::fabs(prec[i].rt - c.rt) <= cycle;
-        }
-        if (! dup && opts.env_ms1_support > 0 && ms1Support(c.mz, c.rt) < opts.env_ms1_support) { continue; }
-        if (! dup) { prec.push_back(std::move(c)); }
-      }
-      nprec[w] = prec.size();
-      const std::vector<double>& gr = grid[w];
-      std::vector<Internal::Frag> fr;
-      fr.reserve(ft.size());
-      std::vector<double> prof;
-      for (const auto& t : ft)
-      {
-        if (t.getMaxIntensity(false) < opts.min_frag_intensity || (int)t.getSize() < opts.min_frag_points) { continue; }
-        Internal::Frag f {t.getCentroidMZ(), Internal::apexRT(t), t.getMaxIntensity(false), {}, {}};
-        for (const auto& pk : t)
-        {
-          f.pts.emplace_back(pk.getRT(), pk.getIntensity());
-          f.gpts.emplace_back(std::lower_bound(gr.begin(), gr.end(), pk.getRT() - 1e-6) - gr.begin(), pk.getIntensity());
-        }
-        std::vector<OpenMS::Size> cut;
-        if (opts.split > 0 && f.gpts.size() >= 3)
-        {
-          const OpenMS::Size g0 = f.gpts.front().first;
-          prof.assign(f.gpts.back().first - g0 + 1, 0.0);
-          for (const auto& q : f.gpts)
+          const OpenMS::Size w = order[o];
+          if (scans[w].size() >= 3)
           {
-            prof[q.first - g0] = q.second;
-          }
-          cut = Internal::valleys(prof, g0, opts.split);
-        }
-        if (cut.empty())
-        {
-          fr.push_back(std::move(f));
-          continue;
-        }
-        // one fragment per elution peak: its own apex, intensity and intensity-weighted m/z
-        cut.push_back(SIZE_MAX);
-        OpenMS::Size k = 0;
-        for (OpenMS::Size c : cut)
-        {
-          Internal::Frag g {0, 0, -1, {}, {}};
-          double sw = 0;
-          for (auto it = t.begin() + k; k < f.gpts.size() && f.gpts[k].first < c; ++k, ++it)
-          {
-            g.pts.push_back(f.pts[k]);
-            g.gpts.push_back(f.gpts[k]);
-            g.mz += it->getMZ() * it->getIntensity();
-            sw += it->getIntensity();
-            if (it->getIntensity() > g.inten)
+            const auto tw = clk::now();
+            const std::vector<Internal::Prec>& bio = bio_v;
+            const double lo = keys[w].first, hi = keys[w].second;
+            std::vector<Internal::Prec> prec;
+            for (auto it = std::lower_bound(bio.begin(), bio.end(), lo, [](const Internal::Prec& p, double m) { return p.mz < m; });
+                 it != bio.end() && it->mz < hi; ++it)
             {
-              g.inten = it->getIntensity();
-              g.apex_rt = it->getRT();
+              if (owner(it->mz) == (long)w) { prec.push_back(*it); }
             }
-          }
-          if (g.gpts.empty()) { continue; }
-          g.mz = sw > 0 ? g.mz / sw : t.getCentroidMZ();
-          if (g.inten >= opts.min_frag_intensity && (int)g.gpts.size() >= opts.min_frag_points) { fr.push_back(std::move(g)); }
-        }
-      }
-      std::sort(fr.begin(), fr.end(), [](const Internal::Frag& a, const Internal::Frag& b) {
-        return std::tie(a.apex_rt, a.mz, a.inten, a.pts) < std::tie(b.apex_rt, b.mz, b.inten, b.pts);
-      });
-      for (auto& f : fr)
-      {
-        std::vector<std::pair<double, double>>().swap(f.pts); // pts only break sort ties; gpts serve the rest
-      }
-      nfrag[w] = fr.size();
-      t_frag[w] = std::chrono::duration<double>(clk::now() - tw).count() - t_mtd[w];
-
+            // MS2 envelopes unless MS1 already has them (same z, 1 cycle, ppm)
+            const OpenMS::Size n1 = prec.size();
+            for (auto& c : wenv[w])
+            {
+              bool dup = false;
+              for (OpenMS::Size i = 0; i < n1 && ! dup; ++i)
+              {
+                dup = prec[i].z == c.z && std::fabs(prec[i].mz - c.mz) <= c.mz * opts.ppm * 1e-6 && std::fabs(prec[i].rt - c.rt) <= cycle;
+              }
+              if (! dup && c.src == 1) { prec.push_back(std::move(c)); }
+            }
+            std::vector<Internal::Prec>().swap(wenv[w]);
+            nprec[w] = prec.size();
+            const std::vector<double>& gr = grid[w];
+            const Internal::Frags& frs = wfr[w];
       // one slot per precursor, filled by tasks that idle threads can take
       std::vector<OpenMS::MSSpectrum> slot(prec.size());
       std::exception_ptr terr;
@@ -971,7 +1355,7 @@ inline Stats run(OpenMS::PeakMap& exp,
       {
         try
         {
-          slot[i] = Internal::assemble(prec[i], fr, gr, cycle, opts, lo, hi);
+          slot[i] = Internal::assemble(prec[i], frs, gr, cycle, opts, lo, hi);
         }
         catch (...)
         {
@@ -1034,7 +1418,7 @@ inline Stats run(OpenMS::PeakMap& exp,
           {
             std::vector<std::pair<double, double>> raw;
             const auto one = [&](long j, std::vector<std::pair<double, double>>* r) {
-              s2[j] = Internal::assemble(sd[j], fr, gr, cycle, opts, lo, hi, r);
+              s2[j] = Internal::assemble(sd[j], frs, gr, cycle, opts, lo, hi, r);
               if (s2[j].getMSLevel() == 2)
               {
                 np2[j] = Internal::complementPairs(s2[j], sd[j].z * (sd[j].mz - Internal::PROTON), opts.ms2_ppm > 0 ? opts.ms2_ppm : opts.ppm,
@@ -1067,17 +1451,153 @@ inline Stats run(OpenMS::PeakMap& exp,
           ++nprec[w];
         }
       }
-      busy[w] = std::chrono::duration<double>(clk::now() - tw).count();
+            Internal::Frags().swap(wfr[w]);
+            busy[w] += std::chrono::duration<double>(clk::now() - tw).count();
+          }
 #pragma omp critical(noims_progress)
-      progress.setProgress((OpenMS::SignedSize)++n_done);
-    }
-    catch (...)
+          progress.setProgress((OpenMS::SignedSize)++n_done);
+        }
+        catch (...)
+        {
+          Internal::keepFirst(err);
+        }
+  };
+#pragma omp parallel
+#pragma omp single
+  {
+#pragma omp task default(shared) if (overlap)
+    if (overlap)
     {
-      Internal::keepFirst(err);
+      try
+      {
+        const auto tb = clk::now();
+        bio_v = Internal::biosaur(std::move(m1), opts, keys.front().first - 1.0, top + 1.0, opts.hill_seeds > 0 ? &seeds : nullptr);
+        t_bio = std::chrono::duration<double>(clk::now() - tb).count();
+      }
+      catch (...)
+      {
+        Internal::keepFirst(err);
+      }
     }
-  }
+    for (long o = 0; o < (long)n_windows; ++o)
+    {
+#pragma omp task default(shared) firstprivate(o)
+      {
+        try
+        {
+          const OpenMS::Size w = order[o];
+          if (scans[w].size() >= 3) // MassTraceDetection needs 3 scans
+          {
+            const auto tw = clk::now();
+            const double lo = keys[w].first, hi = keys[w].second;
+      // MS2 traces on the window's scan grid
+      const Internal::Traces ft = Internal::traces(m2[w], opts.ms2_ppm > 0 ? opts.ms2_ppm : opts.ppm);
+      ntr2[w] = ft.size();
+      t_mtd[w] = std::chrono::duration<double>(clk::now() - tw).count();
+      m2[w].clear(true);
+      // unfragmented precursors seen in MS2 (the MS1 duplicates are dropped once Biosaur2 is done)
+      for (auto& c : Internal::envelopes(ft, opts.ppm, lo, hi, 1.01 * cycle, opts.env_all_charges, opts.env_pattern))
+      {
+        if (owner(c.mz) != (long)w) { continue; }
+        c.src = opts.env_ms1_support > 0 && ms1Support(c.mz, c.rt) < opts.env_ms1_support ? -1 : 1; // -1: kept only as a duplicate
+        wenv[w].push_back(std::move(c));
+      }
+      const std::vector<double>& gr = grid[w];
+      std::vector<Internal::Frag> fr;
+      fr.reserve(ft.size());
+      std::vector<double> prof;
+      for (const auto& t : ft)
+      {
+        if (t.getMaxIntensity(false) < opts.min_frag_intensity || (int)t.getSize() < opts.min_frag_points) { continue; }
+        Internal::Frag f {t.getCentroidMZ(), Internal::apexRT(t), t.getMaxIntensity(false), {}, {}};
+        for (const auto& pk : t)
+        {
+          f.pts.emplace_back(pk.getRT(), pk.getIntensity());
+          f.gpts.emplace_back(std::lower_bound(gr.begin(), gr.end(), pk.getRT() - 1e-6) - gr.begin(), pk.getIntensity());
+        }
+        std::vector<OpenMS::Size> cut;
+        if (opts.split > 0 && f.gpts.size() >= 3)
+        {
+          const OpenMS::Size g0 = f.gpts.front().first;
+          prof.assign(f.gpts.back().first - g0 + 1, 0.0);
+          for (const auto& q : f.gpts)
+          {
+            prof[q.first - g0] = q.second;
+          }
+          cut = Internal::valleys(prof, g0, opts.split);
+        }
+        if (cut.empty())
+        {
+          fr.push_back(std::move(f));
+          continue;
+        }
+        // one fragment per elution peak: its own apex, intensity and intensity-weighted m/z
+        cut.push_back(SIZE_MAX);
+        OpenMS::Size k = 0;
+        for (OpenMS::Size c : cut)
+        {
+          Internal::Frag g {0, 0, -1, {}, {}};
+          double sw = 0;
+          for (auto it = t.begin() + k; k < f.gpts.size() && f.gpts[k].first < c; ++k, ++it)
+          {
+            g.pts.push_back(f.pts[k]);
+            g.gpts.push_back(f.gpts[k]);
+            g.mz += it->getMZ() * it->getIntensity();
+            sw += it->getIntensity();
+            if (it->getIntensity() > g.inten)
+            {
+              g.inten = it->getIntensity();
+              g.apex_rt = it->getRT();
+            }
+          }
+          if (g.gpts.empty()) { continue; }
+          g.mz = sw > 0 ? g.mz / sw : t.getCentroidMZ();
+          if (g.inten >= opts.min_frag_intensity && (int)g.gpts.size() >= opts.min_frag_points) { fr.push_back(std::move(g)); }
+        }
+      }
+      std::sort(fr.begin(), fr.end(), [](const Internal::Frag& a, const Internal::Frag& b) {
+        return std::tie(a.apex_rt, a.mz, a.inten, a.pts) < std::tie(b.apex_rt, b.mz, b.inten, b.pts);
+      });
+      for (auto& f : fr)
+      {
+        std::vector<std::pair<double, double>>().swap(f.pts); // pts only break sort ties; gpts serve the rest
+      }
+      nfrag[w] = fr.size();
+      wfr[w] = Internal::Frags(fr);
+      nsing[w] = wfr[w].s_idx.size();
+      t_frag[w] = std::chrono::duration<double>(clk::now() - tw).count() - t_mtd[w];
+
+            busy[w] = std::chrono::duration<double>(clk::now() - tw).count();
+          }
+          if (! overlap) // Biosaur2 is done: this window's phase B starts now, not after the slowest window's phase A
+          {
+#pragma omp task default(shared) firstprivate(o)
+            phase_b(o);
+          }
+        }
+        catch (...)
+        {
+          Internal::keepFirst(err);
+        }
+      }
+    }
+#pragma omp taskwait
+    if (overlap) // Biosaur2 ran alongside: every window's phase B waits for it here; otherwise each window chained it (phase_b)
+    {
+      const bool phase_a_ok = ! err; // read once: phase-B tasks write err (under noims_err) while this loop submits
+      for (long o = 0; o < (long)n_windows && phase_a_ok; ++o)
+      {
+#pragma omp task default(shared) firstprivate(o)
+        phase_b(o);
+      }
+    }
+#pragma omp taskwait
+  } // the parallel region's barrier also waits for the phase-B tasks the windows chained
+  omp_set_max_active_levels(max_levels);
   progress.endProgress();
   if (err) { std::rethrow_exception(err); }
+  log("[noims] Biosaur2: " + DIAspeXtract::String(bio_v.size()) + " isotope-pattern features as precursors in " + DIAspeXtract::String(t_bio)
+      + " s (" + (overlap ? "alongside" : "before") + " the MS2 traces)");
 
   for (OpenMS::Size w = 0; w < n_windows; ++w)
   {
@@ -1111,8 +1631,23 @@ inline Stats run(OpenMS::PeakMap& exp,
     sf += t_frag[w];
     nf += nfrag[w];
   }
-  log("[noims] " + DIAspeXtract::String(nf) + " fragments; window busy: MS2 traces " + DIAspeXtract::String(sm) + " s, envelopes and fragments "
+  OpenMS::Size n_sing = 0;
+  for (OpenMS::Size w = 0; w < n_windows; ++w) { n_sing += nsing[w]; }
+  log("[noims] " + DIAspeXtract::String(nf) + " fragments (" + DIAspeXtract::String(n_sing) + " single-point); window busy: MS2 traces " + DIAspeXtract::String(sm) + " s, envelopes and fragments "
       + DIAspeXtract::String(sf) + " s, spectra " + DIAspeXtract::String(st.busy_s - sm - sf) + " s");
+  {
+    OpenMS::Size wa = 0, wb = 0; // the windows with the longest phase A (traces, fragments) and phase B (spectra)
+    for (OpenMS::Size w = 1; w < n_windows; ++w)
+    {
+      if (t_mtd[w] + t_frag[w] > t_mtd[wa] + t_frag[wa]) { wa = w; }
+      if (busy[w] - t_mtd[w] - t_frag[w] > busy[wb] - t_mtd[wb] - t_frag[wb]) { wb = w; }
+    }
+    if (n_windows > 0)
+    {
+      log("[noims] slowest window: phase A " + DIAspeXtract::String(t_mtd[wa] + t_frag[wa]) + " s (MS2 traces " + DIAspeXtract::String(t_mtd[wa])
+          + " s), phase B " + DIAspeXtract::String(busy[wb] - t_mtd[wb] - t_frag[wb]) + " s");
+    }
+  }
   st.wall_s = std::chrono::duration<double>(clk::now() - t0).count();
   log("[noims] " + DIAspeXtract::String(st.ms2_traces) + " MS2 traces, " + DIAspeXtract::String(st.precursors) + " precursors, "
       + DIAspeXtract::String(st.spectra) + " spectra, " + DIAspeXtract::String(st.peaks) + " peaks; " + DIAspeXtract::String(st.wall_s)

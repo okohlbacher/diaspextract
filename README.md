@@ -239,6 +239,7 @@ apply to diaPASEF input only; input without ion mobility reads `-threads`, `-noi
 | `DIASPEXTRACT_PIPE_TILES=1` | 2 | environment variable: one tile at a time instead of two. Less memory, longer run, same spectra |
 | `-perf:stream_load` | true | `false` loads the whole run first: much more memory, a longer run and different spectra |
 | `-trace:detector` | integer | `openms` uses OpenMS mass-trace detection on whole windows, without tiles. The two find partly different peptides; `integer` needs the flight-time calibration of a `.d` and uses much less memory |
+| `-trace:ms2_tracer` | trim | `exact` restores the fragment tracer of 1.9.6 and earlier; `trim` is about 20 % faster and finds 6 to 8 % more peptides |
 | `-dnoise:ms1` | true | MS1 noise removal for `.d` input; `false` turns it off and changes the spectra |
 
 Every option, with its default and valid values, is in [docs/options.md](docs/options.md) and in

@@ -1,5 +1,45 @@
 # Changelog
 
+## v1.9.7 — 2026-11-20
+
+**New default fragment tracer for diaPASEF (changes the spectra); faster on all three data types.** SWATH and Orbitrap
+output and the diaPASEF output of `-trace:ms2_tracer exact` are byte-identical to 1.9.6.
+
+### Changed
+
+- **`-trace:ms2_tracer trim` is the default** (new option; `exact` is the tracer of 1.9.6 and earlier). `trim` traces each
+  m/z band in one pass and keeps the longest valid stretch around each trace's apex. On 43 diaPASEF runs (27 HeLa of
+  PXD017703, 16 TNBC of PXD047793; trim against exact, same node, 16 threads, peptides at 1 % FDR, medians):
+
+  | | Wall time | Sage | MSFragger | ProSE | Entrapment FDP |
+  |:--|--:|--:|--:|--:|--:|
+  | HeLa (27) | -21 % | +5.7 % | +8.1 % | +5.3 % | unchanged |
+  | TNBC (16) | -18 % | +6.5 % | +6.5 % | +6.8 % | unchanged |
+
+  No run loses peptides with any of the three engines. Peak memory: +8 % (HeLa), +0.5 % (TNBC). The output is thread-,
+  tile- and pipeline-invariant, as before.
+- **Exact tracer faster, output identical:** software prefetch in its frame search, the heaviest m/z band of a window is
+  claimed first, and idle threads walk seeds ahead speculatively (`DIASPEXTRACT_SPEC=0` turns that off). HeLa run 32,
+  16 threads: 7:40 -> 6:07.
+- **SWATH and Orbitrap (non-IMS path) faster, output identical:** a flat fragment store, an own exact implementation of
+  OpenMS mass-trace detection with packed peaks and an m/z bin index, a bucket search for complementary fragments, an early
+  exit for fragments that cannot reach the minimum correlation, and each window's spectra start as soon as its own traces
+  are done when Biosaur2 ran first.
+
+  | 16 threads (one socket) | 1.9.6 | 1.9.7 |
+  |:--|--:|--:|
+  | TripleTOF 6600, 32 fixed windows | 3:39 | 1:32 |
+  | TripleTOF 5600, 64 variable windows | 1:34 | 0:42 |
+  | Orbitrap (PXD032263) | 19.8 s | 15.4 s |
+  | Orbitrap (PXD063917) | 8.4 s | 5.1 s |
+
+  At 64 threads the 6600 run takes 0:51 instead of 1:27, the 5600 run 0:27 instead of 0:44.
+
+### Fixed
+
+- A spectrum with integer or string data arrays goes through OpenMS's mass-trace detection, which validates them.
+- The non-IMS path refuses inputs whose fragment points or bin offsets would overflow 32 bits instead of wrapping.
+
 ## v1.9.6 — 2026-11-19
 
 **Faster; spectra unchanged.** Every spectrum is byte-identical to 1.9.5 (spectrum-list digest on the diaPASEF HeLa runs

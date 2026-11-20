@@ -715,7 +715,7 @@ dependencies = [
 
 [[package]]
 name = "diaspextract-gui"
-version = "1.9.6"
+version = "1.9.7"
 dependencies = [
  "serde",
  "serde_json",

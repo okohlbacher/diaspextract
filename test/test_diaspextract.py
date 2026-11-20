@@ -36,7 +36,7 @@ checks that fail if the things most likely to break do break:
       26. FAIMS mzPeak     the same run as an mzPeak archive (FileConverter on PATH or DIASPEXTRACT_TEST_FILECONVERTER): read
                            whole at the defaults, never streamed, and the mzML's spectra (skipped without FileConverter)
       23. real .d          DIASPEXTRACT_TEST_D set: a real diaPASEF run at the defaults is streamed, dnoise-filtered and
-                           traced by the integer detector, writes spectra, and is thread-, tile- and tile-pipeline-invariant
+                           traced by the integer detector, writes spectra, and is thread-, tile- and tile-pipeline-invariant (trace:ms2_tracer exact: thread-invariant)
                            (skipped without it); with DIASPEXTRACT_TEST_D_DIGEST set, its spectra digest must equal it
 
 These exercise the default (OpenMS) detector only. `trace:detector=integer` refuses to run
@@ -1121,6 +1121,8 @@ def main():
             else:
                 print(f"        real .d spectra digest {base} (set DIASPEXTRACT_TEST_D_DIGEST to pin it)")
             assert go("t1", 1) == base, "real .d: 1 thread differs from 4"
+            ex = ("-trace:ms2_tracer", "exact")
+            assert go("exact_t1", 1, ex) == go("exact", 4, ex), "real .d: trace:ms2_tracer exact differs between 1 and 4 threads"
             cells = ("-tile:rt_sec", "20")
             one = go("one_tile", 4, cells + ("-tile:cells_per_tile", "0"))
             assert go("per_cell", 4, cells + ("-tile:cells_per_tile", "1")) == one, "real .d: one tile per cell differs from one tile"

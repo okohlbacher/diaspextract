@@ -21,7 +21,7 @@
   elsewhere). The fragment m/z error is estimated from amino-acid mass differences between fragments, the precursor m/z
   error from the unfragmented precursor in its own spectrum; each is corrected only between 3 and 20 ppm (fragments from
   1 ppm on a TripleTOF 5600). On a TripleTOF 5600 the defaults also change to `-noims:min_corr 0.4` and
-  `-noims:seed_mono off`. On the six 5600 runs of PXD002952 (precursors 3 to 14 ppm low): ProSE +5 % to +70 %, Sage
+  `-noims:seed_mono off`. On the six 5600 runs of PXD002952 (precursors 3 to 14 ppm low): ProSE +8 % to +78 %, Sage
   +5 % to +70 % peptides at 1 % FDR, MSFragger +2 % to +4 %, entrapment FDP 0.90 % to 1.18 %. TripleTOF 6600 runs
   change by 0 % to +1.4 % (a precursor correction of 3 to 4 ppm on four of seven runs).
 - **Faster on Linux.** The tool sets glibc's malloc tunables (huge pages, heap retention) and starts itself once more:

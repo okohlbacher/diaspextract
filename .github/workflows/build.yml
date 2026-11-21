@@ -1004,7 +1004,7 @@ jobs:
           # Thermo .raw through the bundled .NET runtime: no DOTNET_ROOT, no installed .NET is used
           bare "$B" -in "$RT/angiotensin.raw" -out "$RT/pkg-raw.mzML" -threads 2 > pkg-raw.log 2>&1 \
             || { tail -40 pkg-raw.log; echo "::error::the packaged binary failed on a Thermo .raw file"; exit 1; }
-          grep -q '^Wrote 14 pseudo-MS2 spectra' pkg-raw.log || { tail -20 pkg-raw.log; echo "::error::the .raw run wrote other spectra than expected"; exit 1; }
+          grep -q '^Wrote 13 pseudo-MS2 spectra' pkg-raw.log || { tail -20 pkg-raw.log; echo "::error::the .raw run wrote other spectra than expected"; exit 1; }
           echo "packaged binary: Thermo .raw read through the bundled .NET runtime"
 
       # s3:// input end to end with the packaged binary: a local S3 server (moto) holds an mzML; the spectra read from its

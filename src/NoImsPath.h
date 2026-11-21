@@ -109,6 +109,17 @@ namespace Internal
 #pragma omp critical(noims_err)
     if (! e) { e = std::current_exception(); }
   }
+  /// @brief A spin-wait hint to the CPU (pause on x86, yield on ARM).
+  inline void cpuRelax()
+  {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__) || defined(__arm__)
+    __asm__ __volatile__("yield");
+#else
+    std::this_thread::yield();
+#endif
+  }
   constexpr double FEW_APEX_CYCLES = 1.0; ///< precursors with < 3 window scans: fragment apex within this many cycles of the precursor apex
 
   /// @brief A precursor candidate with its MS1 (or MS2 envelope) elution profile.
@@ -160,7 +171,7 @@ namespace Internal
         done.store(0, std::memory_order_relaxed);
         claim.store((++seq << 40) | ((uint64_t)m << 20), std::memory_order_release);
         work();
-        while (done.load(std::memory_order_acquire) < (uint32_t)m) { __builtin_ia32_pause(); }
+        while (done.load(std::memory_order_acquire) < (uint32_t)m) { cpuRelax(); }
       }
     }
   };
@@ -1502,15 +1513,22 @@ inline Stats run(OpenMS::PeakMap& exp,
   std::vector<Internal::RoundJob> jobs(n_windows);
   for (OpenMS::Size w = 0; w < n_windows; ++w) { jobs[w].open.store(help && scans[w].size() >= 3 ? 1 : 0); }
   std::atomic<long> unstarted {(long)n_windows}; // window tasks no thread has begun
+  std::atomic<long> parked {0};                  // helpers waiting for the last window to start
   std::function<void()> helper;
   helper = [&]() {
     for (;;)
     {
-      if (unstarted.load(std::memory_order_acquire) > 0) // a window needs this thread more: queue up behind it
-      {
+      if (unstarted.load() > 0) // a window needs this thread more: park; the task that starts the last window respawns it
+      {                         // (no re-queued task: with per-thread LIFO deques, as in LLVM's libomp, the thread would
+        parked.fetch_add(1);    // pop it again forever and never steal the windows)
+        if (unstarted.load() > 0) { return; }
+        const long p = parked.exchange(0); // the last window was taken meanwhile and may have missed this one
+        if (p == 0) { return; }
+        for (long k = 1; k < p; ++k)
+        {
 #pragma omp task default(shared)
-        helper();
-        return;
+          helper();
+        }
       }
       long best = -1;
       int bh = HELP_CAP;
@@ -1534,7 +1552,7 @@ inline Stats run(OpenMS::PeakMap& exp,
       for (int idle = 0; j.open.load(std::memory_order_acquire);)
       {
         if (j.work()) { idle = 0; }
-        else if (++idle < 256) { __builtin_ia32_pause(); }
+        else if (++idle < 256) { Internal::cpuRelax(); }
         else { std::this_thread::sleep_for(std::chrono::microseconds(20)); }
       }
       j.helpers.fetch_sub(1);
@@ -1740,7 +1758,14 @@ inline Stats run(OpenMS::PeakMap& exp,
     {
 #pragma omp task default(shared) firstprivate(o)
       {
-        unstarted.fetch_sub(1, std::memory_order_release);
+        if (unstarted.fetch_sub(1) == 1) // the last window: the parked helpers come back
+        {
+          for (long k = parked.exchange(0); k > 0; --k)
+          {
+#pragma omp task default(shared)
+            helper();
+          }
+        }
         try
         {
           const OpenMS::Size w = order[o];

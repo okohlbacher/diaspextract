@@ -8,6 +8,20 @@
   uses OpenMS's `Angiotensin_AllScans.raw`): the file takes the path for input without ion mobility, writes spectra, is
   thread-invariant, and gives the precursors of its mzML conversion.
 
+### Changed
+
+- **New defaults without ion mobility (change the SWATH and Orbitrap spectra; diaPASEF output is unchanged).** An option
+  given explicitly keeps its value.
+  - TOF: `-noims:max_fragments 600` (was 200, 300 with fixed windows). On the 13 runs of PXD002952: ProSE +4.7 %,
+    MSFragger +1.2 %, Sage +0.4 % peptides at 1 % FDR, entrapment FDP unchanged.
+  - Orbitrap and FTICR: `-noims:ppm 5`, `-noims:split 0.3`, `-noims:max_fragments 600` (was 10 ppm, no split, 200). On
+    PXD032263 / PXD063917: ProSE +22.6 / +30.2 %, MSFragger +12.5 / +53.7 %, Sage +7.0 / +25.6 %, entrapment FDP
+    1.43 / 1.31 % (was 1.34 / 1.22 %).
+- **Faster on Linux.** The tool sets glibc's malloc tunables (huge pages, heap retention) and starts itself once more:
+  30 % to 34 % less wall time on SWATH and Orbitrap runs at 64 threads, 5 % to 11 % on diaPASEF, output unchanged.
+  `DIASPEXTRACT_NO_HUGEPAGES=1` or a `GLIBC_TUNABLES` of your own turns it off. The single-pass tracers also skip
+  unused preparation (4 % to 9 % on diaPASEF).
+
 ### Fixed
 
 - `docs/options.md` did not list Thermo `.raw` and `s3://` input under `-in` (both read since 1.9.0).

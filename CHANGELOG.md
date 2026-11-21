@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## v1.9.8 — 2026-11-21
+
+**New defaults without ion mobility and m/z recalibration of TOF output (change the SWATH and Orbitrap spectra); faster
+from 64 threads on.** diaPASEF output is byte-identical to 1.9.7.
 
 ### Added
 
@@ -24,6 +27,11 @@
   `-noims:seed_mono off`. On the six 5600 runs of PXD002952 (precursors 3 to 14 ppm low): ProSE +8 % to +78 %, Sage
   +5 % to +70 % peptides at 1 % FDR, MSFragger +2 % to +4 %, entrapment FDP 0.90 % to 1.18 %. TripleTOF 6600 runs
   change by 0 % to +1.4 % (a precursor correction of 3 to 4 ppm on four of seven runs).
+- **Faster above 64 threads without ion mobility.** Threads without an isolation window of their own help trace the MS2
+  traces of the windows still running, fragment sorting is shared, Biosaur2 runs alongside on 8 threads, and the per-window
+  assembly loops are bounded. Wall time on an EPYC 9654, 64 / 128 threads: SWATH 6600 −16 % / −31 %, SWATH 5600 −13 % /
+  −33 %, Orbitrap −16 % / −16 %; unchanged at 16 threads. Output is identical at every thread count; peak memory rises by
+  1 to 9 GB.
 - **Faster on Linux.** The tool sets glibc's malloc tunables (huge pages, heap retention) and starts itself once more:
   30 % to 34 % less wall time on SWATH and Orbitrap runs at 64 threads, 5 % to 11 % on diaPASEF, output unchanged.
   `DIASPEXTRACT_NO_HUGEPAGES=1` or a `GLIBC_TUNABLES` of your own turns it off. The single-pass tracers also skip

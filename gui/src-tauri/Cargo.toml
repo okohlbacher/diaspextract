@@ -1,6 +1,6 @@
 [package]
 name = "diaspextract-gui"
-version = "1.9.7"
+version = "1.9.8"
 description = "DIAspeXtract desktop app"
 authors = ["Oliver Kohlbacher and contributors"]
 license = "BSD-3-Clause"

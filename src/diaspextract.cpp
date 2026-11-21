@@ -116,7 +116,7 @@ static inline double spxFileTimeSec(FILETIME a, FILETIME b) // two FILETIMEs (10
 // The release version. The standalone CMake build passes it from project(VERSION); the in-tree
 // OpenMS build does not, so the fallback here is the same number.
 #ifndef DIASPEXTRACT_VERSION
-  #define DIASPEXTRACT_VERSION "1.9.7"
+  #define DIASPEXTRACT_VERSION "1.9.8"
 #endif
 
 using namespace OpenMS;

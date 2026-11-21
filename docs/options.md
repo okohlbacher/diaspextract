@@ -30,7 +30,7 @@ Sections: [Input and output](#input-and-output) · [Speed and memory](#speed-and
 
 | option | default | what it does |
 |---|---|---|
-| `-in` | required | The DIA run: a Bruker `.d` directory (diaPASEF), an mzML file with or without ion mobility, or an mzPeak archive (mzPeak needs a build with mzPeak support). A `.d` is read frame by frame; an mzML is always read whole. Input without ion mobility at MS1 takes [its own path](#input-without-ion-mobility). |
+| `-in` | required | The DIA run: a Bruker `.d` directory (diaPASEF), an mzML file with or without ion mobility, a Thermo `.raw` file, or an mzPeak archive (mzPeak needs a build with mzPeak support). A `.d` is read frame by frame; an mzML or `.raw` file is always read whole. A `.raw` file is read with Thermo's RawFileReader through .NET; the release bundles carry the runtime (`dotnet/`), a build of your own needs a .NET runtime, 8 or newer (`DOTNET_ROOT` selects one). An mzML, mzPeak or `.raw` file can also be an `s3://bucket/key` URI, with `region`, `endpoint_override` and `scheme` as query parameters and the credentials from the AWS environment; the object is copied to a temporary file for the run. Input without ion mobility at MS1 takes [its own path](#input-without-ion-mobility). |
 | `-out` | required | The output spectra. The format follows the extension: `.mzML`, or `.mzpeak` in a build with mzPeak support. Search engines read mzML, so write `.mzML` if a search comes next. mzPeak output runs as one tile and needs the whole run's memory. |
 | `-out_type` | (empty) | Sets the output format instead of the `-out` extension. Values: empty, `mzML`, `mzpeak`. Empty follows the extension; an unknown extension gives mzPeak (mzML in a build without mzPeak support). |
 

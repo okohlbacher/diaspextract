@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Test for Thermo `.raw` input** in `test/test_diaspextract.py` (set `DIASPEXTRACT_TEST_RAW` to a `.raw` file; CI
+  uses OpenMS's `Angiotensin_AllScans.raw`): the file takes the path for input without ion mobility, writes spectra, is
+  thread-invariant, and gives the precursors of its mzML conversion.
+
+### Fixed
+
+- `docs/options.md` did not list Thermo `.raw` and `s3://` input under `-in` (both read since 1.9.0).
+
 ## v1.9.7 — 2026-11-20
 
 **New default fragment tracer for diaPASEF (changes the spectra); faster on all three data types.** SWATH and Orbitrap

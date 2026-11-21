@@ -607,6 +607,7 @@ jobs:
           curl -fsSL --retry 3 -o "$RT/angiotensin.raw" "$TEST_RAW_URL"
           echo "$TEST_RAW_SHA256  $RT/angiotensin.raw" | "$PY" -c "import hashlib,sys; h,f=sys.stdin.read().split(); sys.exit(hashlib.sha256(open(f,'rb').read()).hexdigest()!=h)" \
             || { echo "::error::angiotensin.raw does not match its SHA-256"; exit 1; }
+          echo "DIASPEXTRACT_TEST_RAW=$RT/angiotensin.raw" | tee -a "$GITHUB_ENV"
 
       # Check 23 runs the real .d through the default path (streaming loader, exact calibration, dnoise, tiles) five
       # times. With the repository variable DIASPEXTRACT_TEST_D_DIGEST set, its digest must equal it -- on all five

@@ -38,6 +38,10 @@ checks that fail if the things most likely to break do break:
       23. real .d          DIASPEXTRACT_TEST_D set: a real diaPASEF run at the defaults is streamed, dnoise-filtered and
                            traced by the integer detector, writes spectra, and is thread-, tile- and tile-pipeline-invariant (trace:ms2_tracer exact: thread-invariant)
                            (skipped without it); with DIASPEXTRACT_TEST_D_DIGEST set, its spectra digest must equal it
+      27. Thermo .raw      DIASPEXTRACT_TEST_RAW set: a Thermo .raw file at the defaults takes the non-IMS path, writes
+                           spectra and is thread-invariant; with a FileConverter that reads .raw, the mzML converted from
+                           it gives the same precursors (skipped without the file, or when the build has no Thermo
+                           reader or finds no .NET runtime)
 
 These exercise the default (OpenMS) detector only. `trace:detector=integer` refuses to run
 without the vendor flight-time calibration, which a synthetic mzML cannot carry, so it is judged on
@@ -1134,6 +1138,41 @@ def main():
         check("a real diaPASEF .d: spectra written, thread-, tile- and pipeline-invariant", c23)
     else:
         print("  SKIP  a real diaPASEF .d end to end: set DIASPEXTRACT_TEST_D to one (bench/slice_d.py cuts a small one)")
+
+    # 27: a Thermo .raw file end to end (DIASPEXTRACT_TEST_RAW; CI uses OpenMS's Angiotensin_AllScans.raw), at the defaults.
+    #     The reader hosts .NET: a build without it, or a machine without a .NET runtime, skips. The run converted to
+    #     mzML first (FileConverter, same reader) must give the same precursors; fragment intensities are not compared
+    #     bit for bit: retention times lose their last bits in the mzML's decimal text, which moved 2,134 of 14.1 million
+    #     32-bit intensities by one unit in the last place on an Exploris run (PXD034623), nothing else.
+    real_raw = os.environ.get("DIASPEXTRACT_TEST_RAW")
+    if real_raw:
+        env = {k: v for k, v in os.environ.items() if not k.startswith("DIASPEXTRACT_")}
+        def go_raw(tag, inp, threads):
+            o = os.path.join(work, f"raw_{tag}.mzML")
+            r = subprocess.run([binary, "-in", inp, "-out", o, "-threads", str(threads)], capture_output=True, text=True, env=env)
+            return r.returncode, r.stdout + r.stderr, o
+        rc0, log0, o4 = go_raw("t4", real_raw, 4)
+        if rc0 != 0 and re.search(r"Thermo RAW|hostfxr|\.NET|dotnet", log0):
+            print("  SKIP  a Thermo .raw file end to end: this build or machine cannot read .raw: " + log0.strip().splitlines()[-1][:200])
+        else:
+            def c27():
+                assert rc0 == 0, "the .raw run failed:\n" + log0[-1500:]
+                assert "using the separate non-IMS path" in log0, "the .raw run did not take the non-IMS path:\n" + log0[-800:]
+                assert int(re.search(r"Wrote (\d+) pseudo-MS2 spectra", log0).group(1)) > 0, "the .raw run wrote no spectrum"
+                rc1, log1, o1 = go_raw("t1", real_raw, 1)
+                assert rc1 == 0 and digest(o1) == digest(o4), "the .raw spectra differ between 1 and 4 threads"
+                if conv:
+                    mz = os.path.join(work, "raw_converted.mzML")
+                    cr = subprocess.run([conv, "-in", real_raw, "-out", mz], capture_output=True, text=True, env=env)
+                    if cr.returncode != 0:
+                        print("        (no comparison with a converted mzML: this FileConverter does not read .raw)")
+                        return
+                    rcm, logm, om = go_raw("via_mzml", mz, 4)
+                    assert rcm == 0, "the run on the converted mzML failed:\n" + logm[-1500:]
+                    assert precursors(om) == precursors(o4), "the .raw input and its mzML conversion give different precursors"
+            check("a Thermo .raw file: non-IMS path, spectra written, thread-invariant, the converted mzML's precursors", c27)
+    else:
+        print("  SKIP  a Thermo .raw file end to end: set DIASPEXTRACT_TEST_RAW to one")
 
     print(f"\n{len(ran) - len(fails)}/{len(ran)} checks passed" + (f"; FAILED: {', '.join(fails)}" if fails else ""))
     return 1 if fails else 0

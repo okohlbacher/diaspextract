@@ -955,6 +955,18 @@
       "advanced": true
     },
     {
+      "name": "noims:calibrate",
+      "section": "noims",
+      "type": "string",
+      "default": "off",
+      "description": "Non-IMS path: per-run m/z recalibration of the written spectra, without a database search: off; auto = fragment m/z from amino-acid mass differences between fragments, precursor m/z from the unfragmented precursor in its own spectrum; a correction is applied only between 3 and 20 ppm.",
+      "advanced": true,
+      "choices": [
+        "off",
+        "auto"
+      ]
+    },
+    {
       "name": "noims:tag_source",
       "section": "noims",
       "type": "string",

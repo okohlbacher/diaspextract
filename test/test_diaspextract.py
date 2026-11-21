@@ -1020,6 +1020,10 @@ def main():
         assert any(abs(mz - mono) < 0.01 and z == 2 for mz, z in ps), "the z=2 precursor is missing: %s" % ps
         assert digest(o1) == digest(o4), "the non-IMS spectra differ between 1 and 4 threads"
         assert not os.path.exists(o1 + ".part"), "the .part was left behind"
+        # [hugepages] on Linux the tool restarts itself once with glibc.malloc.hugetlb=1: off, or with the user's own tunables, same spectra
+        for k, v in (("DIASPEXTRACT_NO_HUGEPAGES", "1"), ("GLIBC_TUNABLES", "glibc.malloc.arena_max=4")):
+            oh = os.path.join(work, "noims_hp.mzML"); run(binary, ni, oh, threads=4, env=dict(os.environ, **{k: v}))
+            assert digest(oh) == digest(o1), "the non-IMS spectra differ with %s=%s" % (k, v)
         for label, kw in (("profile spectra", dict(kind="profile")), ("IM at MS2 only", dict(ms2_im=True))):
             bad = os.path.join(work, "noims_bad.mzML"); synth_noims(bad, **kw)
             r = run(binary, bad, os.path.join(work, "noims_bad.out.mzML"), expect_fail=True)

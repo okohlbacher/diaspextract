@@ -56,6 +56,9 @@
 #include <vector>
 #include <cstdlib> // getenv
 #include <cstring> // memcpy
+#if defined(__linux__)
+#include <unistd.h> // execv [hugepages]
+#endif
 #include <optional>
 #include <memory> // [outer] unique_ptr
 #include <time.h> // clock_gettime(CLOCK_THREAD_CPUTIME_ID): [dnoise] filter CPU
@@ -2476,6 +2479,7 @@ struct TracePrep
   /// of frame f starts at peak `fidx[f * (nbk+1) + bucket]`, so best() narrows its search by arithmetic.
   vector<uint32_t> fidx;
   TofIdx tlo = 0;
+  TofIdx thi = 0; ///< the window's highest bin (every cell's bins lie in [tlo, thi], asserted by the caller)
   unsigned tsh = 0;
   uint32_t nbk = 0;
   /**
@@ -2575,13 +2579,15 @@ void buildTofIndex(const PeakSlab& sl, TracePrep& tp, TofIdx tlo, TofIdx thi)
   @param[in] bnd Band edges, or {0, 0}
   @param[in] tlo Lowest bin
   @param[in] thi Highest bin
+  @param[in] seeds false: only frame_live, seg and thi are filled (the single-pass tracers need no more)
   @return The preparation
   @par Exceptions
     Rethrows the first exception of a parallel part, of whatever type it was.
 */
-TracePrep prepareTracing(const PeakSlab& sl, double noise, double snr, const vector<TofIdx>& bnd, TofIdx tlo, TofIdx thi)
+TracePrep prepareTracing(const PeakSlab& sl, double noise, double snr, const vector<TofIdx>& bnd, TofIdx tlo, TofIdx thi, bool seeds = true)
 {
   TracePrep tp;
+  tp.thi = thi;
   const Size n_frames = sl.frames(), n_points = sl.tof.size();
   // Membership IS inten > noise (no per-peak map); seeds are counted first so `order` is sized exactly.
   tp.frame_live.assign(n_frames, 0);
@@ -2647,6 +2653,9 @@ TracePrep prepareTracing(const PeakSlab& sl, double noise, double snr, const vec
     }
   }
   tp.seg[nseg] = n_seed;
+  // [trim-prep] the single-pass tracers read frame_live and the per-band seed counts (seg) only: no seed list, no sort,
+  // no flight-time index
+  if (! seeds) { return tp; }
   tp.order.resize(n_seed);
   forTasks(nt, [&](long c) {
     Size* cc = &cur[(Size)c * nseg];
@@ -2793,7 +2802,13 @@ vector<Trace> detectTracesInteger(const PeakSlab& sl,
         }
       }
     }
-    const uint32_t s0 = (uint32_t)(lower_bound(sl.tof.begin() + r0, sl.tof.begin() + r1, lo_t) - sl.tof.begin());
+    // [tofidx] the bucket holds about 8 peaks: a forward scan finds the same first peak with tof >= lo_t as the binary search
+    uint32_t s0 = r0;
+    if (r1 - r0 <= 16)
+    {
+      while (s0 < r1 && sl.tof[s0] < lo_t) { ++s0; }
+    }
+    else { s0 = (uint32_t)(lower_bound(sl.tof.begin() + r0, sl.tof.begin() + r1, lo_t) - sl.tof.begin()); }
     long bk = -1;
     double bd = std::numeric_limits<double>::infinity();
     for (uint32_t k = s0; k < b && sl.tof[k] <= hi_t; ++k)
@@ -3163,8 +3178,11 @@ vector<Trace> detectTracesSinglePass(const PeakSlab& sl,
   vector<Hill> hills;
   vector<HillHot> hot;
   vector<vector<pair<uint32_t, uint32_t>>> got_pool; // [pool] closed hills' member lists, reused (capacity kept)
-  TofIdx tmax = 0;
-  for (Size k = 0; k < n_points; ++k) { tmax = std::max(tmax, sl.tof[k]); }
+  TofIdx tmax = tp.thi; // an upper bound of the cell's bins sizes the grid; only buckets that hold a hill are ever read
+  if (tmax == 0)
+  {
+    for (Size k = 0; k < n_points; ++k) { tmax = std::max(tmax, sl.tof[k]); }
+  }
   const unsigned sh = 4;
   vector<vector<uint32_t>> grid(((Size)tmax >> sh) + 2);
   auto grid_del = [&](uint32_t bk, uint32_t h) {
@@ -10736,7 +10754,8 @@ protected:
                                                           String(clo) + "-" + String(chi) + " vs " + String(tlo) + "-" + String(thi));
                   }
                 }
-                TracePrep tprep = prepareTracing(cs, ms2_noise, ms2_snr, bnd, tlo, thi); // once per cell
+                // once per cell; the seed list only for the tracers that walk seeds (exact, compare, hybrid's second pass)
+                TracePrep tprep = prepareTracing(cs, ms2_noise, ms2_snr, bnd, tlo, thi, single_tracer == 0 || single_tracer == 3 || single_tracer == 4);
                 if (nb == 1) per[ci][0] = single_tracer == 3 ? compareTracers(cs, tprep, bst[ci][0], mass_ppm, delta_im, ms2_noise, ms2_snr * ms2_noise, ms2_minlen, bnd, -1)
                                          : single_tracer ? detectTracesSinglePass(cs, tprep, bst[ci][0], mass_ppm, delta_im, ms2_noise, ms2_snr * ms2_noise, ms2_minlen, bnd, -1, 0, single_tracer == 4, single_tracer == 5)
                                                      : detectTracesInteger(cs, tprep, bst[ci][0], mass_ppm, delta_im, ms2_noise, ms2_minlen);
@@ -11484,6 +11503,20 @@ extern char** environ;
 */
 int main(int argc, const char** argv)
 {
+#if defined(__linux__) && defined(__GLIBC__)
+  // [hugepages] glibc's malloc backs its heaps with transparent huge pages when glibc.malloc.hugetlb=1 (glibc 2.35+; older
+  // versions ignore the name): 5 % (diaPASEF, 16 threads) to 19 % (SWATH, 64 threads) less wall time with unchanged output
+  // and memory. Keeping freed heap memory (trim_threshold 16 GB, top_pad 256 MB) instead of returning it to the kernel after
+  // every large free takes another 14 % off SWATH and Orbitrap runs at 64 threads; peak memory stayed within 1 GB. A tunable
+  // is read once at process start, so the tool sets them and starts itself again. A GLIBC_TUNABLES the user set is left
+  // alone, and DIASPEXTRACT_NO_HUGEPAGES=1 turns this off. If the exec fails the run goes on as it is.
+  if (std::getenv("GLIBC_TUNABLES") == nullptr && std::getenv("DIASPEXTRACT_NO_HUGEPAGES") == nullptr)
+  {
+    setenv("GLIBC_TUNABLES", "glibc.malloc.hugetlb=1:glibc.malloc.trim_threshold=17179869184:glibc.malloc.top_pad=268435456", 1);
+    execv("/proc/self/exe", const_cast<char* const*>(argv));
+    unsetenv("GLIBC_TUNABLES");
+  }
+#endif
   // The tool was SpeXtractor (variables SPEXTRACTOR_*) and then DIAspeXtractor (DIASPEXTRACTOR_*); it is DIAspeXtract
   // now, and every variable is DIASPEXTRACT_* (so are the three the patched libOpenMS reads). An old name would be
   // ignored without a word -- a chain's A/B would measure the default -- so any variable under either old prefix refuses

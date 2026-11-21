@@ -32,6 +32,7 @@
 #include "OmsString.h"
 #include <omp.h>
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <chrono>
 #include <cmath>
@@ -43,6 +44,7 @@
 #include <limits>
 #include <map>
 #include <numeric>
+#include <thread>
 #include <tuple>
 #include <vector>
 
@@ -118,6 +120,52 @@ namespace Internal
     int src = 0;                         ///< source: 0 MS1 feature, 1 MS2 envelope, 3 MS1 hill seed
   };
   /**
+    @brief [par] Shares the chunks of one window's work with helper threads.
+
+    The window's thread opens a round of n independent chunks (run); it and every attached helper (work) claim chunks until
+    none is left. claim holds the round's sequence number, n and the next chunk in one word, so a claim (compare-exchange)
+    is always one of the open round.
+  */
+  struct RoundJob
+  {
+    static constexpr uint64_t M20 = (1u << 20) - 1;
+    std::atomic<uint64_t> claim {0}; ///< bits 63-40 round sequence, 39-20 number of chunks, 19-0 next chunk
+    std::atomic<uint32_t> done {0};  ///< chunks finished in the open round
+    std::atomic<int> helpers {0};    ///< helper threads attached
+    std::atomic<int> open {0};       ///< 1 from before the window starts until its shared work is over
+    const std::function<void(long)>* fn = nullptr; ///< runs one chunk of the open round; must not throw
+    uint64_t seq = 0;
+    /// @brief Claims and runs chunks of the open round until none is left. @return Whether it ran one.
+    bool work()
+    {
+      bool any = false;
+      for (;;)
+      {
+        uint64_t v = claim.load(std::memory_order_acquire);
+        if ((v & M20) >= ((v >> 20) & M20)) { return any; }
+        if (! claim.compare_exchange_weak(v, v + 1, std::memory_order_acq_rel)) { continue; }
+        (*fn)((long)(v & M20));
+        done.fetch_add(1, std::memory_order_release);
+        any = true;
+      }
+    }
+    /// @brief Runs f(0) .. f(n - 1), each once, on this thread and the attached helpers; returns when all are done.
+    void run(const std::function<void(long)>& f, long n)
+    {
+      for (long b = 0; b < n; b += (long)M20) // (20 bits per round)
+      {
+        const long m = std::min<long>(n - b, (long)M20);
+        const std::function<void(long)> g = [&](long i) { f(b + i); };
+        fn = b ? &g : &f;
+        done.store(0, std::memory_order_relaxed);
+        claim.store((++seq << 40) | ((uint64_t)m << 20), std::memory_order_release);
+        work();
+        while (done.load(std::memory_order_acquire) < (uint32_t)m) { __builtin_ia32_pause(); }
+      }
+    }
+  };
+
+  /**
     @brief A fragment trace.
 
     `pts` are (RT, intensity), `gpts` the same points as (grid index, intensity).
@@ -144,25 +192,52 @@ namespace Internal
       apex.swap(o.apex); mz.swap(o.mz); inten.swap(o.inten); off.swap(o.off); g.swap(o.g); in.swap(o.in);
       multi.swap(o.multi); s_off.swap(o.s_off); s_idx.swap(o.s_idx);
     }
-    /// @brief Flattens @p fr (already in apex order) and frees it.
-    explicit Frags(std::vector<Frag>& fr)
+    /// @brief Flattens @p fr (already in apex order) and frees it; @p job shares the copies and sorts with its helpers.
+    explicit Frags(std::vector<Frag>& fr, RoundJob* job = nullptr)
     {
       const OpenMS::Size n = fr.size();
+      const auto share = [&](const std::function<void(long)>& f, long nc) {
+        if (job) { job->run(f, nc); }
+        else
+        {
+          for (long c = 0; c < nc; ++c) { f(c); }
+        }
+      };
+      std::exception_ptr err;
+      off.resize(n + 1);
       OpenMS::Size np = 0;
-      for (const auto& f : fr) { np += f.gpts.size(); }
-      if (np >= std::numeric_limits<uint32_t>::max()) { throw OpenMS::Exception::OutOfRange(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION); } // 32-bit offsets
-      apex.resize(n); mz.resize(n); inten.resize(n); off.resize(n + 1); g.resize(np); in.resize(np);
-      OpenMS::Size j = 0;
       for (OpenMS::Size k = 0; k < n; ++k)
       {
-        apex[k] = fr[k].apex_rt; mz[k] = fr[k].mz; inten[k] = fr[k].inten; off[k] = (uint32_t)j;
-        for (const auto& q : fr[k].gpts) { g[j] = (uint32_t)q.first; in[j] = q.second; ++j; }
+        if (np >= std::numeric_limits<uint32_t>::max()) { throw OpenMS::Exception::OutOfRange(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION); } // 32-bit offsets
+        off[k] = (uint32_t)np;
+        np += fr[k].gpts.size();
       }
-      off[n] = (uint32_t)j;
+      if (np >= std::numeric_limits<uint32_t>::max()) { throw OpenMS::Exception::OutOfRange(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION); } // 32-bit offsets
+      off[n] = (uint32_t)np;
+      apex.resize(n); mz.resize(n); inten.resize(n); g.resize(np); in.resize(np);
+      constexpr long CH = 8192;
+      const long nch = ((long)n + CH - 1) / CH;
+      std::vector<uint32_t> cmax(nch, 0); // per chunk: largest grid index + 1
+      share([&](long c) {
+        uint32_t mx = 0;
+        for (OpenMS::Size k = (OpenMS::Size)c * CH; k < std::min<OpenMS::Size>(n, (OpenMS::Size)(c + 1) * CH); ++k)
+        {
+          apex[k] = fr[k].apex_rt; mz[k] = fr[k].mz; inten[k] = fr[k].inten;
+          OpenMS::Size j = off[k];
+          for (const auto& q : fr[k].gpts)
+          {
+            g[j] = (uint32_t)q.first; in[j] = q.second; ++j;
+            mx = std::max(mx, (uint32_t)q.first + 1);
+          }
+          std::vector<std::pair<OpenMS::Size, double>>().swap(fr[k].gpts);
+          std::vector<std::pair<double, double>>().swap(fr[k].pts);
+        }
+        cmax[c] = mx;
+      }, nch);
       std::vector<Frag>().swap(fr);
       // single-point fragments per grid index, by m/z (assemble's fast path); the others in apex order
       uint32_t ng = 0;
-      for (uint32_t x : g) { ng = std::max(ng, x + 1); }
+      for (uint32_t x : cmax) { ng = std::max(ng, x); }
       s_off.assign(ng + 1, 0);
       for (OpenMS::Size k = 0; k < n; ++k)
       {
@@ -176,10 +251,21 @@ namespace Internal
       {
         if (off[k + 1] - off[k] == 1) { s_idx[fill[g[off[k]]]++] = (uint32_t)k; }
       }
-      for (uint32_t x = 0; x < ng; ++x)
-      {
-        std::sort(s_idx.begin() + s_off[x], s_idx.begin() + s_off[x + 1], [&](uint32_t a, uint32_t b) { return mz[a] < mz[b] || (mz[a] == mz[b] && a < b); });
-      }
+      constexpr long GCH = 16;
+      share([&](long c) {
+        try
+        {
+          for (uint32_t x = (uint32_t)(c * GCH); x < std::min<uint32_t>(ng, (uint32_t)((c + 1) * GCH)); ++x)
+          {
+            std::sort(s_idx.begin() + s_off[x], s_idx.begin() + s_off[x + 1], [&](uint32_t a, uint32_t b) { return mz[a] < mz[b] || (mz[a] == mz[b] && a < b); });
+          }
+        }
+        catch (...)
+        {
+          keepFirst(err);
+        }
+      }, ((long)ng + GCH - 1) / GCH);
+      if (err) { std::rethrow_exception(err); }
     }
   };
 
@@ -281,9 +367,10 @@ namespace Internal
     does; OpenMS also validates integer and string arrays against the peak count).
     @param[in,out] m The spectra to trace (all of MS level 1, sorted by m/z); left empty.
     @param[in] ppm Mass error tolerance (ppm).
+    @param[in,out] job Shares the trace walks with the helper threads attached to it (see [par] below); null = serial. The result does not depend on it.
     @return The traces in MassTraceDetection's order, with its centroid m/z.
   */
-  inline Traces traces(OpenMS::PeakMap& m, double ppm)
+  inline Traces traces(OpenMS::PeakMap& m, double ppm, RoundJob* job = nullptr)
   {
     for (const auto& s : m)
     {
@@ -399,10 +486,11 @@ namespace Internal
       if (it == e) { return off[i + 1] - 1; }
       return (std::fabs(it->mz - mz) < std::fabs((it - 1)->mz - mz)) ? (OpenMS::Size)(it - PM) : (OpenMS::Size)(it - 1 - PM);
     };
-    for (auto a = ap.crbegin(); a != ap.crend(); ++a)
-    {
-      const OpenMS::Size apx = off[a->scan] + a->peak;
-      if (pk[apx].vis) { continue; }
+    typedef std::vector<std::pair<OpenMS::Size, OpenMS::Size>> Pts;
+    // one trace from apex a under the current visited flags, which it only reads: its points below and above the apex in walk
+    // order. false = it fails the sample rate (no trace).
+    auto walk = [&](const Apex& a, Pts& down, Pts& up) -> bool {
+      const OpenMS::Size apx = off[a.scan] + a.peak;
       const double amz = pk[apx].mz;
       const float ain = pk[apx].in;
       double centroid = amz, counter = (double)ain * amz, denom = ain;
@@ -417,7 +505,7 @@ namespace Internal
       double sd = (centroid / 1e6) * ppm, wsum = ain;
       down.clear();
       up.clear();
-      OpenMS::Size di = a->scan, ui = a->scan, d_scans = 0, u_scans = 0, d_miss = 0, u_miss = 0;
+      OpenMS::Size di = a.scan, ui = a.scan, d_scans = 0, u_scans = 0, d_miss = 0, u_miss = 0;
       bool d_on = true, u_on = true;
       auto step = [&](OpenMS::Size i, std::vector<std::pair<OpenMS::Size, OpenMS::Size>>& got, OpenMS::Size& miss) {
         if (off[i] == off[i + 1]) { return; } // empty spectra leave the counters alone
@@ -467,11 +555,16 @@ namespace Internal
       }
       const OpenMS::Size npts = down.size() + 1 + up.size();
       const OpenMS::Size adjusted = d_scans + u_scans + 1 - d_miss - u_miss;
-      if (! (static_cast<double>(npts) / static_cast<double>(adjusted) >= MIN_SAMPLE_RATE)) { continue; }
+      return static_cast<double>(npts) / static_cast<double>(adjusted) >= MIN_SAMPLE_RATE;
       // (min_trace_length 0 and no maximum: every RT range passes)
+    };
+    // marks the trace's points visited and appends it
+    auto emit = [&](const Apex& a, const std::pair<OpenMS::Size, OpenMS::Size>* dn, OpenMS::Size nd, const std::pair<OpenMS::Size, OpenMS::Size>* upp, OpenMS::Size nu) {
+      const OpenMS::Size apx = off[a.scan] + a.peak;
+      const OpenMS::Size npts = nd + 1 + nu;
       pk[apx].vis = 1;
-      for (const auto& c : down) { pk[c.second].vis = 1; }
-      for (const auto& c : up) { pk[c.second].vis = 1; }
+      for (OpenMS::Size i = 0; i < nd; ++i) { pk[dn[i].second].vis = 1; }
+      for (OpenMS::Size i = 0; i < nu; ++i) { pk[upp[i].second].vis = 1; }
       const OpenMS::Size p0 = out.pts.size();
       auto put = [&](OpenMS::Size c, double r) {
         OpenMS::Peak2D q;
@@ -480,9 +573,9 @@ namespace Internal
         q.setIntensity(pk[c].in);
         out.pts.push_back(q);
       };
-      for (auto it = down.rbegin(); it != down.rend(); ++it) { put(it->second, rt[it->first]); }
-      put(apx, rt[a->scan]);
-      for (const auto& c : up) { put(c.second, rt[c.first]); }
+      for (OpenMS::Size i = nd; i-- > 0;) { put(dn[i].second, rt[dn[i].first]); }
+      put(apx, rt[a.scan]);
+      for (OpenMS::Size i = 0; i < nu; ++i) { put(upp[i].second, rt[upp[i].first]); }
       double cmz;
       if (npts == 1) { cmz = out.pts[p0].getMZ(); }
       else
@@ -502,6 +595,88 @@ namespace Internal
         cmz = wsm / tw;
       }
       out.add(p0, cmz);
+    };
+    // [par] The apexes are taken in rounds, most intense first. A round's traces are walked in parallel (by this thread and the
+    // helper threads attached to job) against the visited flags as they stand, then committed in apex order: a trace whose
+    // apex an earlier trace of the round took is dropped, as the serial loop skips it; one that lost a point to an earlier
+    // trace is walked again. A walk depends on the flags of the peaks it accepts only, flags are never cleared, and the commit
+    // checks exactly those: the traces and their order are those of the serial loop for every round size and thread count.
+    constexpr OpenMS::Size GR = 64, CPW = 4; // walks per chunk, chunks per worker and round
+    struct Sp
+    {
+      uint32_t beg, nd, nu;
+      bool ok;
+    };
+    std::vector<Apex> cand;
+    std::vector<Sp> sp;
+    std::vector<Pts> cbuf, cdown, cup;
+    std::exception_ptr terr;
+    long nc = 0;
+    const std::function<void(long)> chunk = [&](long ch) {
+      try
+      {
+        Pts& b = cbuf[ch];
+        b.clear();
+        for (long i = ch * (long)GR; i < std::min(nc, (ch + 1) * (long)GR); ++i)
+        {
+          sp[i].ok = walk(cand[i], cdown[ch], cup[ch]);
+          sp[i].beg = (uint32_t)b.size();
+          sp[i].nd = (uint32_t)cdown[ch].size();
+          sp[i].nu = (uint32_t)cup[ch].size();
+          b.insert(b.end(), cdown[ch].begin(), cdown[ch].end());
+          b.insert(b.end(), cup[ch].begin(), cup[ch].end());
+        }
+      }
+      catch (...)
+      {
+        keepFirst(terr);
+      }
+    };
+    for (auto a = ap.crbegin(); a != ap.crend();)
+    {
+      const OpenMS::Size h = job ? (OpenMS::Size)std::max(0, job->helpers.load(std::memory_order_relaxed)) : 0;
+      if (h == 0) // nobody to share with: the serial loop, for a while
+      {
+        for (OpenMS::Size k = 0; a != ap.crend() && k < 4096; ++a, ++k)
+        {
+          if (pk[off[a->scan] + a->peak].vis) { continue; }
+          if (walk(*a, down, up)) { emit(*a, down.data(), down.size(), up.data(), up.size()); }
+        }
+        continue;
+      }
+      const OpenMS::Size R = GR * CPW * (h + 1);
+      cand.clear();
+      for (; a != ap.crend() && cand.size() < R; ++a)
+      {
+        if (! pk[off[a->scan] + a->peak].vis) { cand.push_back(*a); }
+      }
+      nc = (long)cand.size();
+      const long nch = (nc + (long)GR - 1) / (long)GR;
+      if (nch == 0) { continue; }
+      if (sp.size() < (OpenMS::Size)nc) { sp.resize(nc); }
+      if (cbuf.size() < (OpenMS::Size)nch)
+      {
+        cbuf.resize(nch);
+        cdown.resize(nch);
+        cup.resize(nch);
+      }
+      job->run(chunk, nch);
+      if (terr) { std::rethrow_exception(terr); }
+      for (long i = 0; i < nc; ++i)
+      {
+        if (pk[off[cand[i].scan] + cand[i].peak].vis) { continue; }
+        const auto* q = cbuf[i / (long)GR].data() + sp[i].beg;
+        bool clean = true;
+        for (uint32_t k = 0; k < sp[i].nd + sp[i].nu && clean; ++k) { clean = ! pk[q[k].second].vis; }
+        if (clean)
+        {
+          if (sp[i].ok) { emit(cand[i], q, sp[i].nd, q + sp[i].nd, sp[i].nu); }
+        }
+        else
+        {
+          if (walk(cand[i], down, up)) { emit(cand[i], down.data(), down.size(), up.data(), up.size()); }
+        }
+      }
     }
     out.finish();
     return out;
@@ -1303,7 +1478,13 @@ inline Stats run(OpenMS::PeakMap& exp,
   // overlap Biosaur2 with the MS2 traces only when there is enough MS2 work to hide it behind (serial, it takes about twice
   // its parallel time); NOIMS_OVERLAP=0/1 forces it (experiments)
   const char* ov_env = std::getenv("NOIMS_OVERLAP");
-  const bool overlap = ov_env ? std::atoi(ov_env) != 0 : (double)p2 >= 15.0 * (double)p1 * std::max(1.0, st.threads / 16.0);
+  // [par] with at least BIO_TEAM threads beyond the windows, Biosaur2 runs alongside on a nested team of BIO_TEAM threads
+  // (its own loops then are parallel; it uses about that many); the other spare threads help the windows from the start,
+  // these when it is done. NOIMS_NEST=0 turns this off (experiments).
+  constexpr long BIO_TEAM = 8;
+  const long spare = (long)st.threads - (long)n_windows;
+  const bool nest = spare >= BIO_TEAM && ! (std::getenv("NOIMS_NEST") && std::atoi(std::getenv("NOIMS_NEST")) == 0) && ! (ov_env && std::atoi(ov_env) == 0);
+  const bool overlap = nest || (ov_env ? std::atoi(ov_env) != 0 : (double)p2 >= 15.0 * (double)p1 * std::max(1.0, st.threads / 16.0));
   log("[noims] " + DIAspeXtract::String(p1) + " MS1 peaks, " + DIAspeXtract::String(p2) + " MS2 peaks; Biosaur2 " + (overlap ? "alongside" : "before")
       + " the MS2 traces");
   if (! overlap)
@@ -1312,9 +1493,59 @@ inline Stats run(OpenMS::PeakMap& exp,
     bio_v = Internal::biosaur(std::move(m1), opts, keys.front().first - 1.0, top + 1.0, opts.hill_seeds > 0 ? &seeds : nullptr);
     t_bio = std::chrono::duration<double>(clk::now() - tb).count();
   }
+  // [par] Threads without a window help the windows that trace: each attaches to the open window with the fewest helpers
+  // (the larger one on a tie, at most HELP_CAP per window) and takes chunks of its rounds until that window is done. One
+  // helper per thread beyond the windows starts with them, and one more each time a window's traces are done.
+  // NOIMS_HELP=0 turns the helpers off (experiments); the output is the same.
+  constexpr int HELP_CAP = 8;
+  const bool help = st.threads > 1 && ! (std::getenv("NOIMS_HELP") && std::atoi(std::getenv("NOIMS_HELP")) == 0);
+  std::vector<Internal::RoundJob> jobs(n_windows);
+  for (OpenMS::Size w = 0; w < n_windows; ++w) { jobs[w].open.store(help && scans[w].size() >= 3 ? 1 : 0); }
+  std::atomic<long> unstarted {(long)n_windows}; // window tasks no thread has begun
+  std::function<void()> helper;
+  helper = [&]() {
+    for (;;)
+    {
+      if (unstarted.load(std::memory_order_acquire) > 0) // a window needs this thread more: queue up behind it
+      {
+#pragma omp task default(shared)
+        helper();
+        return;
+      }
+      long best = -1;
+      int bh = HELP_CAP;
+      for (OpenMS::Size o = 0; o < n_windows; ++o)
+      {
+        const Internal::RoundJob& j = jobs[order[o]];
+        const int h = j.helpers.load(std::memory_order_relaxed);
+        if (j.open.load(std::memory_order_acquire) && h < bh)
+        {
+          bh = h;
+          best = (long)order[o];
+        }
+      }
+      if (best < 0) { return; }
+      Internal::RoundJob& j = jobs[best];
+      if (j.helpers.fetch_add(1) >= HELP_CAP)
+      {
+        j.helpers.fetch_sub(1);
+        continue;
+      }
+      for (int idle = 0; j.open.load(std::memory_order_acquire);)
+      {
+        if (j.work()) { idle = 0; }
+        else if (++idle < 256) { __builtin_ia32_pause(); }
+        else { std::this_thread::sleep_for(std::chrono::microseconds(20)); }
+      }
+      j.helpers.fetch_sub(1);
+    }
+  };
   const int max_levels = omp_get_max_active_levels();
-  omp_set_max_active_levels(1); // Biosaur2's loops inside its task stay serial
+  omp_set_max_active_levels(nest ? 2 : 1); // Biosaur2's loops inside its task stay serial unless it has a nested team
   progress.startProgress(0, (OpenMS::SignedSize)n_windows, "extracting pseudo-spectra (isolation windows)");
+  // libgomp runs a taskloop inline (serially) once more than 64 tasks per thread are pending in the team: with every window
+  // in phase B at once, loops of 256 precursors each pass that. At most tl_tasks tasks per loop keep them shared.
+  const long tl_tasks = std::max<long>(4, 16 * (long)st.threads / (long)n_windows);
   // phase B of one window (precursors, spectra, hill seeds): reads only that window's phase-A results and Biosaur2's output
   auto phase_b = [&](long o) {
         try
@@ -1350,7 +1581,7 @@ inline Stats run(OpenMS::PeakMap& exp,
       std::vector<OpenMS::MSSpectrum> slot(prec.size());
       std::exception_ptr terr;
       const long np = (long)prec.size();
-#pragma omp taskloop grainsize(256) default(shared)
+#pragma omp taskloop num_tasks(std::min<long>(tl_tasks, np / 256 + 1)) default(shared)
       for (long i = 0; i < np; ++i)
       {
         try
@@ -1411,7 +1642,7 @@ inline Stats run(OpenMS::PeakMap& exp,
         std::vector<OpenMS::MSSpectrum> s2(sd.size());
         std::vector<int> np2(sd.size(), 0);
         const long ns = (long)sd.size();
-#pragma omp taskloop grainsize(128) default(shared)
+#pragma omp taskloop num_tasks(std::min<long>(tl_tasks, ns / 256 + 1)) default(shared)
         for (long i = 0; i < ns; i += 2)
         {
           try
@@ -1462,27 +1693,54 @@ inline Stats run(OpenMS::PeakMap& exp,
           Internal::keepFirst(err);
         }
   };
+  std::atomic<int> bio_state {overlap ? 0 : 1}; // Biosaur2 alongside: 0 running, 1 done, 2 failed (changed under critical noims_bio)
+  bool bio_v_ok = false;
+  std::vector<long> b_wait;        // windows through phase A before Biosaur2 was done
 #pragma omp parallel
 #pragma omp single
   {
+    if (nest) { omp_set_num_threads(1); } // inherited by the tasks made here: only Biosaur2's task opens a nested team
 #pragma omp task default(shared) if (overlap)
     if (overlap)
     {
       try
       {
         const auto tb = clk::now();
+        if (nest) { omp_set_num_threads((int)BIO_TEAM); }
         bio_v = Internal::biosaur(std::move(m1), opts, keys.front().first - 1.0, top + 1.0, opts.hill_seeds > 0 ? &seeds : nullptr);
         t_bio = std::chrono::duration<double>(clk::now() - tb).count();
+        bio_v_ok = true;
       }
       catch (...)
       {
         Internal::keepFirst(err);
+      }
+      std::vector<long> bw; // the windows whose phase A ended meanwhile
+#pragma omp critical(noims_bio)
+      {
+        bio_state.store(bio_v_ok ? 1 : 2);
+        bw.swap(b_wait);
+      }
+      for (long o : bw)
+      {
+        if (! bio_v_ok) { break; }
+#pragma omp task default(shared) firstprivate(o)
+        phase_b(o);
+      }
+      if (nest) // the nested team is gone: its threads help now
+      {
+        for (long k = BIO_TEAM; help && k > 0; --k)
+        {
+#pragma omp task default(shared)
+          helper();
+        }
       }
     }
     for (long o = 0; o < (long)n_windows; ++o)
     {
 #pragma omp task default(shared) firstprivate(o)
       {
+        unstarted.fetch_sub(1, std::memory_order_release);
         try
         {
           const OpenMS::Size w = order[o];
@@ -1491,7 +1749,13 @@ inline Stats run(OpenMS::PeakMap& exp,
             const auto tw = clk::now();
             const double lo = keys[w].first, hi = keys[w].second;
       // MS2 traces on the window's scan grid
-      const Internal::Traces ft = Internal::traces(m2[w], opts.ms2_ppm > 0 ? opts.ms2_ppm : opts.ppm);
+      struct Close // the helpers leave when the window's shared work is over, however it ends
+      {
+        Internal::RoundJob& j;
+        ~Close() { j.open.store(0, std::memory_order_release); }
+      };
+      Close close {jobs[w]};
+      const Internal::Traces ft = Internal::traces(m2[w], opts.ms2_ppm > 0 ? opts.ms2_ppm : opts.ppm, help ? &jobs[w] : nullptr);
       ntr2[w] = ft.size();
       t_mtd[w] = std::chrono::duration<double>(clk::now() - tw).count();
       m2[w].clear(true);
@@ -1503,76 +1767,145 @@ inline Stats run(OpenMS::PeakMap& exp,
         wenv[w].push_back(std::move(c));
       }
       const std::vector<double>& gr = grid[w];
-      std::vector<Internal::Frag> fr;
-      fr.reserve(ft.size());
-      std::vector<double> prof;
-      for (const auto& t : ft)
-      {
-        if (t.getMaxIntensity(false) < opts.min_frag_intensity || (int)t.getSize() < opts.min_frag_points) { continue; }
-        Internal::Frag f {t.getCentroidMZ(), Internal::apexRT(t), t.getMaxIntensity(false), {}, {}};
-        for (const auto& pk : t)
+      // [par] the fragments of the traces, in chunks that the helpers share; each chunk sorted, then merged pairwise. Fragments
+      // that compare equal are equal in every field (the grid points follow from the points), so the order is that of one sort.
+      const auto frag_less = [](const Internal::Frag& a, const Internal::Frag& b) {
+        return std::tie(a.apex_rt, a.mz, a.inten, a.pts) < std::tie(b.apex_rt, b.mz, b.inten, b.pts);
+      };
+      constexpr long FCH = 4096;
+      const long nt = (long)ft.size(), nfc = (nt + FCH - 1) / FCH;
+      std::vector<std::vector<Internal::Frag>> part(nfc);
+      std::exception_ptr ferr;
+      const std::function<void(long)> build = [&](long fc) {
+        try
         {
-          f.pts.emplace_back(pk.getRT(), pk.getIntensity());
-          f.gpts.emplace_back(std::lower_bound(gr.begin(), gr.end(), pk.getRT() - 1e-6) - gr.begin(), pk.getIntensity());
-        }
-        std::vector<OpenMS::Size> cut;
-        if (opts.split > 0 && f.gpts.size() >= 3)
-        {
-          const OpenMS::Size g0 = f.gpts.front().first;
-          prof.assign(f.gpts.back().first - g0 + 1, 0.0);
-          for (const auto& q : f.gpts)
+          std::vector<Internal::Frag>& po = part[fc];
+          std::vector<double> prof;
+          for (long ti = fc * FCH; ti < std::min(nt, (fc + 1) * FCH); ++ti)
           {
-            prof[q.first - g0] = q.second;
-          }
-          cut = Internal::valleys(prof, g0, opts.split);
-        }
-        if (cut.empty())
-        {
-          fr.push_back(std::move(f));
-          continue;
-        }
-        // one fragment per elution peak: its own apex, intensity and intensity-weighted m/z
-        cut.push_back(SIZE_MAX);
-        OpenMS::Size k = 0;
-        for (OpenMS::Size c : cut)
-        {
-          Internal::Frag g {0, 0, -1, {}, {}};
-          double sw = 0;
-          for (auto it = t.begin() + k; k < f.gpts.size() && f.gpts[k].first < c; ++k, ++it)
-          {
-            g.pts.push_back(f.pts[k]);
-            g.gpts.push_back(f.gpts[k]);
-            g.mz += it->getMZ() * it->getIntensity();
-            sw += it->getIntensity();
-            if (it->getIntensity() > g.inten)
+            const auto& t = ft[ti];
+            if (t.getMaxIntensity(false) < opts.min_frag_intensity || (int)t.getSize() < opts.min_frag_points) { continue; }
+            Internal::Frag f {t.getCentroidMZ(), Internal::apexRT(t), t.getMaxIntensity(false), {}, {}};
+            for (const auto& pk : t)
             {
-              g.inten = it->getIntensity();
-              g.apex_rt = it->getRT();
+              f.pts.emplace_back(pk.getRT(), pk.getIntensity());
+              f.gpts.emplace_back(std::lower_bound(gr.begin(), gr.end(), pk.getRT() - 1e-6) - gr.begin(), pk.getIntensity());
+            }
+            std::vector<OpenMS::Size> cut;
+            if (opts.split > 0 && f.gpts.size() >= 3)
+            {
+              const OpenMS::Size g0 = f.gpts.front().first;
+              prof.assign(f.gpts.back().first - g0 + 1, 0.0);
+              for (const auto& q : f.gpts)
+              {
+                prof[q.first - g0] = q.second;
+              }
+              cut = Internal::valleys(prof, g0, opts.split);
+            }
+            if (cut.empty())
+            {
+              po.push_back(std::move(f));
+              continue;
+            }
+            // one fragment per elution peak: its own apex, intensity and intensity-weighted m/z
+            cut.push_back(SIZE_MAX);
+            OpenMS::Size k = 0;
+            for (OpenMS::Size c : cut)
+            {
+              Internal::Frag g {0, 0, -1, {}, {}};
+              double sw = 0;
+              for (auto it = t.begin() + k; k < f.gpts.size() && f.gpts[k].first < c; ++k, ++it)
+              {
+                g.pts.push_back(f.pts[k]);
+                g.gpts.push_back(f.gpts[k]);
+                g.mz += it->getMZ() * it->getIntensity();
+                sw += it->getIntensity();
+                if (it->getIntensity() > g.inten)
+                {
+                  g.inten = it->getIntensity();
+                  g.apex_rt = it->getRT();
+                }
+              }
+              if (g.gpts.empty()) { continue; }
+              g.mz = sw > 0 ? g.mz / sw : t.getCentroidMZ();
+              if (g.inten >= opts.min_frag_intensity && (int)g.gpts.size() >= opts.min_frag_points) { po.push_back(std::move(g)); }
             }
           }
-          if (g.gpts.empty()) { continue; }
-          g.mz = sw > 0 ? g.mz / sw : t.getCentroidMZ();
-          if (g.inten >= opts.min_frag_intensity && (int)g.gpts.size() >= opts.min_frag_points) { fr.push_back(std::move(g)); }
+          std::sort(po.begin(), po.end(), frag_less);
+        }
+        catch (...)
+        {
+          Internal::keepFirst(ferr);
+        }
+      };
+      if (help) { jobs[w].run(build, nfc); }
+      else
+      {
+        for (long c = 0; c < nfc; ++c) { build(c); }
+      }
+      if (ferr) { std::rethrow_exception(ferr); }
+      std::vector<Internal::Frag> fr;
+      std::vector<OpenMS::Size> fb(1, 0); // chunk bounds in fr
+      {
+        OpenMS::Size n = 0;
+        for (const auto& po : part) { n += po.size(); }
+        fr.reserve(n);
+        for (auto& po : part)
+        {
+          std::move(po.begin(), po.end(), std::back_inserter(fr));
+          std::vector<Internal::Frag>().swap(po);
+          fb.push_back(fr.size());
         }
       }
-      std::sort(fr.begin(), fr.end(), [](const Internal::Frag& a, const Internal::Frag& b) {
-        return std::tie(a.apex_rt, a.mz, a.inten, a.pts) < std::tie(b.apex_rt, b.mz, b.inten, b.pts);
-      });
-      for (auto& f : fr)
+      for (OpenMS::Size step = 1; step + 1 < fb.size(); step *= 2)
       {
-        std::vector<std::pair<double, double>>().swap(f.pts); // pts only break sort ties; gpts serve the rest
+        const std::function<void(long)> merge = [&](long k) {
+          try
+          {
+            const OpenMS::Size a = (OpenMS::Size)k * 2 * step, m = a + step, e = std::min(a + 2 * step, fb.size() - 1);
+            if (m < fb.size() - 1) { std::inplace_merge(fr.begin() + fb[a], fr.begin() + fb[m], fr.begin() + fb[e], frag_less); }
+          }
+          catch (...)
+          {
+            Internal::keepFirst(ferr);
+          }
+        };
+        const long nm = (long)((fb.size() - 1 + 2 * step - 1) / (2 * step));
+        if (help) { jobs[w].run(merge, nm); }
+        else
+        {
+          for (long k = 0; k < nm; ++k) { merge(k); }
+        }
+        if (ferr) { std::rethrow_exception(ferr); }
       }
       nfrag[w] = fr.size();
-      wfr[w] = Internal::Frags(fr);
+      wfr[w] = Internal::Frags(fr, help ? &jobs[w] : nullptr); // (frees the points that only broke sort ties)
+      jobs[w].open.store(0, std::memory_order_release); // the rest is this thread's alone
       nsing[w] = wfr[w].s_idx.size();
       t_frag[w] = std::chrono::duration<double>(clk::now() - tw).count() - t_mtd[w];
 
             busy[w] = std::chrono::duration<double>(clk::now() - tw).count();
           }
-          if (! overlap) // Biosaur2 is done: this window's phase B starts now, not after the slowest window's phase A
+          // this window's phase B starts as soon as Biosaur2 is done too, not after the slowest window's phase A
+          bool go = ! overlap;
+          if (overlap)
+          {
+#pragma omp critical(noims_bio)
+            {
+              const int bs = bio_state.load();
+              go = bs == 1;
+              if (bs == 0) { b_wait.push_back(o); }
+            }
+          }
+          if (go)
           {
 #pragma omp task default(shared) firstprivate(o)
             phase_b(o);
+          }
+          if (help) // this thread is free now
+          {
+#pragma omp task default(shared)
+            helper();
           }
         }
         catch (...)
@@ -1581,17 +1914,11 @@ inline Stats run(OpenMS::PeakMap& exp,
         }
       }
     }
-#pragma omp taskwait
-    if (overlap) // Biosaur2 ran alongside: every window's phase B waits for it here; otherwise each window chained it (phase_b)
+    for (long k = (long)n_windows + (nest ? BIO_TEAM : 0); help && k < (long)st.threads; ++k)
     {
-      const bool phase_a_ok = ! err; // read once: phase-B tasks write err (under noims_err) while this loop submits
-      for (long o = 0; o < (long)n_windows && phase_a_ok; ++o)
-      {
-#pragma omp task default(shared) firstprivate(o)
-        phase_b(o);
-      }
+#pragma omp task default(shared)
+      helper();
     }
-#pragma omp taskwait
   } // the parallel region's barrier also waits for the phase-B tasks the windows chained
   omp_set_max_active_levels(max_levels);
   progress.endProgress();

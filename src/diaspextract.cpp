@@ -5924,6 +5924,12 @@ protected:
     setValidStrings_("noims:seed_mono", {"off", "on"});
     registerStringOption_("noims:ms2_shift", "<ppm|auto>", "0",
                           "Non-IMS path: shift of the fragment m/z in ppm; auto = estimated from the y1 ions of tryptic peptides.", false, true);
+    registerStringOption_("noims:calibrate", "<mode>", "off",
+                          "Non-IMS path: per-run m/z recalibration of the written spectra, without a database search: off; auto = fragment m/z from "
+                          "amino-acid mass differences between fragments, precursor m/z from the unfragmented precursor in its own spectrum; a "
+                          "correction is applied only between 3 and 20 ppm.",
+                          false, true);
+    setValidStrings_("noims:calibrate", {"off", "auto"});
     registerStringOption_(
       "noims:tag_source", "<mode>", "off",
       "Non-IMS path: write each spectrum's precursor source as userParam precursor_source (0 MS1 feature, 1 MS2 envelope, 2 corrected envelope, "
@@ -8486,6 +8492,180 @@ protected:
   // MS1 at 20 ppm: +0.3 to +3.2 % on 5600 runs 008, 010-012 against 15 ppm, estimated FDP 1.05 % (15 ppm: 1.12 %).
   static constexpr double TOF5600_PPM = 20.0, TOF5600_MS2_PPM = 6.0, TOF5600_SPLIT = 0.3, TOF5600_COMP_BOOST = 1.0;
   static constexpr int TOF5600_SPAN_PAD = 8;
+  // With the m/z calibration (calibrateNoIms_): correlation 0.4 and hill seeds without the monoisotopic check. On the six 5600 runs
+  // against 0.5 / on: ProSE +3.1 to +6.3 %, Sage -1.0 to +2.4 %, MSFragger + Percolator +0.2 to +8.1 %, entrapment FDP 0.90 to 1.18 %.
+  static constexpr double TOF5600_MIN_CORR = 0.4;
+
+  /**
+    @brief Background-subtracted centroid of a histogram over [-lim, lim] ppm.
+
+    The background is the mean count beyond 0.7 lim; the centroid is iterated within +-core.
+
+    @param[in] h Histogram (equal bins over [-lim, lim])
+    @param[in] lim Half range (ppm)
+    @param[in] core Half width of the centroid window (ppm)
+    @param[out] n Counts above background in the final window
+    @return The centre in ppm, NaN without counts above background
+  */
+  static double calibCentre_(const std::vector<double>& h, double lim, double core, double& n)
+  {
+    const Size nb = h.size();
+    const auto x = [&](Size i) { return -lim + (i + 0.5) * 2 * lim / nb; };
+    double bg = 0;
+    Size nbg = 0;
+    for (Size i = 0; i < nb; ++i)
+    {
+      if (std::fabs(x(i)) > 0.7 * lim) { bg += h[i]; ++nbg; }
+    }
+    bg /= std::max<Size>(nbg, 1);
+    double c = 0;
+    n = 0;
+    for (int it = 0; it < 8; ++it)
+    {
+      double tot = 0, sum = 0;
+      for (Size i = 0; i < nb; ++i)
+      {
+        if (std::fabs(x(i) - c) <= core) { tot += h[i] - bg; sum += (h[i] - bg) * x(i); }
+      }
+      if (tot <= 0) { n = 0; return std::numeric_limits<double>::quiet_NaN(); }
+      c = sum / tot;
+      n = tot;
+    }
+    return c;
+  }
+
+  /**
+    @brief [calib] Per-run m/z recalibration of the non-IMS pseudo-spectra without a database search.
+
+    Fragments: pairs among a spectrum's 120 most intense peaks that differ by an amino-acid residue mass give the slope of the
+    absolute m/z error per m/z bin; integrated from m/z 0 and averaged over the peaks it is the fragment error. Precursors: the
+    unfragmented precursor in its own spectrum (peaks within 30 ppm of the precursor m/z) carries the fragment error, so its
+    offset to the precursor m/z is the precursor error relative to the (corrected) fragments. Each correction is applied only
+    if it lies between 3 and 20 ppm and has enough ions; otherwise that m/z stays as it is. On TripleTOF 5600 runs of PXD002952
+    (precursors 8 to 11 ppm low, fragments 7 to 11 ppm low after the y1 shift) this raised ProSE peptides at 1 % FDR by 23 % to
+    69 % and Sage peptides by 21 % to 65 % with unchanged entrapment FDP; TripleTOF 6600 and Orbitrap runs stay below 3 ppm.
+
+    @param[in,out] res The pseudo-spectra (precursor and fragment m/z are rescaled)
+    @param[in] frag_min Smallest fragment correction applied (ppm). 3 in general: on TripleTOF 6600 runs the y1 shift leaves about
+      -2 ppm, and removing that lost 1 % to 2 % of peptides. 1 on a TripleTOF 5600, where correcting residuals of 1.6 and 2.8 ppm gained 1.5 % and 2.2 %.
+  */
+  void calibrateNoIms_(PeakMap& res, double frag_min)
+  {
+    static const double RES[] = {57.02146372, 71.03711381, 87.03202840, 97.05276385, 99.06841391, 101.04767847, 113.08406398, 114.04292744, 115.02694303,
+                                 128.05857751, 128.09496302, 129.04259309, 131.04048491, 137.05891186, 147.06841391, 156.10111102, 160.03064850,
+                                 163.06332853, 186.07931295}; // residues, C carbamidomethylated
+    static const double FB[] = {0, 200, 300, 400, 500, 600, 700, 800, 1000, 1200, 1500, 2000, 3000}; // fragment m/z bins
+    const Size NR = sizeof(RES) / sizeof(RES[0]), NB = sizeof(FB) / sizeof(FB[0]) - 1, NH = 240, TOP = 120;
+    const double LIM = 30.0, CORE = 12.0, MIN_PPM = 3.0, MAX_PPM = 20.0;
+    std::vector<std::vector<double>> lad(NB * NR, std::vector<double>(NH, 0.0));
+    std::vector<double> lad_mid(NB * NR, 0.0), lad_n(NB * NR, 0.0), cnt(NB, 0.0), surv(NH, 0.0);
+    const auto hbin = [&](double u) { return std::min<Size>(NH - 1, (Size)((u + LIM) / (2 * LIM) * NH)); };
+    const auto fbin = [&](double m) { return (Size)(std::upper_bound(FB, FB + NB + 1, m) - FB) - 1; };
+    const Size every = std::max<Size>(1, res.size() / 30000);
+    double n_surv = 0;
+    std::vector<double> mz;
+    std::vector<std::pair<float, double>> byint;
+    for (Size si = 0; si < res.size(); ++si)
+    {
+      const MSSpectrum& sp = res[si];
+      if (sp.getPrecursors().empty()) { continue; }
+      const double pmz = sp.getPrecursors()[0].getMZ();
+      for (auto it = sp.MZBegin(pmz * (1 - LIM * 1e-6)); it != sp.end() && it->getMZ() < pmz * (1 + LIM * 1e-6); ++it)
+      {
+        const double u = (it->getMZ() - pmz) / pmz * 1e6;
+        if (u > -LIM && u < LIM) { surv[hbin(u)] += 1; n_surv += 1; }
+      }
+      if (si % every != 0) { continue; }
+      byint.clear();
+      for (const auto& pk : sp) { byint.emplace_back(pk.getIntensity(), pk.getMZ()); }
+      if (byint.size() > TOP)
+      {
+        std::partial_sort(byint.begin(), byint.begin() + TOP, byint.end(), [](const auto& a, const auto& b) { return a.first != b.first ? a.first > b.first : a.second < b.second; });
+        byint.resize(TOP);
+      }
+      mz.clear();
+      for (const auto& x : byint) { mz.push_back(x.second); }
+      std::sort(mz.begin(), mz.end());
+      for (double m : mz)
+      {
+        if (m >= FB[0] && m < FB[NB]) { cnt[fbin(m)] += 1; }
+      }
+      for (Size i = 0; i < mz.size(); ++i)
+      {
+        for (Size j = i + 1; j < mz.size() && mz[j] - mz[i] < 186.3; ++j)
+        {
+          const double d = mz[j] - mz[i];
+          if (d <= 56.9) { continue; }
+          Size k = std::min<Size>(NR - 1, std::max<Size>(1, (Size)(std::lower_bound(RES, RES + NR, d) - RES)));
+          if (d - RES[k - 1] < RES[k] - d) { --k; }
+          const double mid = (mz[i] + mz[j]) / 2, u = (d - RES[k]) / mid * 1e6;
+          if (std::fabs(u) >= LIM || mid < FB[0] || mid >= FB[NB]) { continue; }
+          const Size c = fbin(mid) * NR + k;
+          lad[c][hbin(u)] += 1;
+          lad_mid[c] += mid;
+          lad_n[c] += 1;
+        }
+      }
+    }
+    // slope of delta(m) = m e(m) per m/z bin, integrated from 0; bins without an estimate take the previous (or the first) slope
+    std::vector<double> g(NB, std::numeric_limits<double>::quiet_NaN());
+    for (Size b = 0; b < NB; ++b)
+    {
+      double num = 0, den = 0;
+      for (Size k = 0; k < NR; ++k)
+      {
+        const Size c = b * NR + k;
+        if (lad_n[c] < 2000) { continue; }
+        double n = 0;
+        const double ctr = calibCentre_(lad[c], LIM, CORE, n);
+        if (n < 500 || std::isnan(ctr)) { continue; }
+        const double mm = lad_mid[c] / lad_n[c], w = n * (RES[k] / mm) * (RES[k] / mm);
+        num += w * ctr * mm / RES[k];
+        den += w;
+      }
+      if (den > 0) { g[b] = num / den; }
+    }
+    double first = std::numeric_limits<double>::quiet_NaN();
+    for (Size b = 0; b < NB && std::isnan(first); ++b) { first = g[b]; }
+    double frag = 0;
+    if (! std::isnan(first))
+    {
+      double delta = 0, last = first, sum = 0, tot = 0;
+      for (Size b = 0; b < NB; ++b)
+      {
+        if (! std::isnan(g[b])) { last = g[b]; }
+        const double e = (delta + last * (FB[b + 1] - FB[b]) / 2) / ((FB[b] + FB[b + 1]) / 2);
+        delta += last * (FB[b + 1] - FB[b]);
+        sum += e * cnt[b];
+        tot += cnt[b];
+      }
+      frag = tot > 0 ? sum / tot : 0;
+    }
+    const double frag_est = frag;
+    if (! (std::fabs(frag) > frag_min && std::fabs(frag) < MAX_PPM)) { frag = 0; }
+    // precursor error relative to the corrected fragments
+    double n_s = 0;
+    const double u = n_surv >= 5000 ? calibCentre_(surv, LIM, CORE, n_s) : std::numeric_limits<double>::quiet_NaN();
+    const double prec_est = std::isnan(u) || n_s < 1000 ? 0 : -(u - frag);
+    const double prec = std::fabs(prec_est) > MIN_PPM && std::fabs(prec_est) < MAX_PPM ? prec_est : 0;
+    writeLogInfo_("[noims] calibration: fragment m/z error " + String(frag_est) + " ppm (corrected by " + String(-frag) + "), precursor m/z error "
+                  + String(prec_est) + " ppm (corrected by " + String(-prec) + ", " + String((Size)n_s) + " precursor peaks)");
+    if (frag == 0 && prec == 0) { return; }
+    const double fs = 1.0 - frag * 1e-6, ps = 1.0 - prec * 1e-6;
+    for (MSSpectrum& sp : res)
+    {
+      if (frag != 0)
+      {
+        for (auto& pk : sp) { pk.setMZ(pk.getMZ() * fs); }
+      }
+      if (prec != 0)
+      {
+        auto pcs = sp.getPrecursors();
+        for (auto& pc : pcs) { pc.setMZ(pc.getMZ() * ps); }
+        sp.setPrecursors(pcs);
+      }
+    }
+  }
 
   /**
     @brief Validate the non-IMS input, apply the TOF defaults when the instrument is a TOF, and run NoIms::run.
@@ -8568,6 +8748,10 @@ protected:
     // ponytail: "explicit" = named on the command line; a value set only in an -ini file counts if it differs from the general default
     const auto dflt
       = [](const char* o, bool at_default) { return at_default && g_noims_cli.find(std::string("-noims:") + o + " ") == std::string::npos; };
+    // [calib] on by default for TOF input only (Orbitrap offsets are below what the estimators resolve)
+    bool calibrate = getStringOption_("noims:calibrate") == "auto";
+    double calib_frag_min = 3.0; // smallest fragment correction (ppm); 1 on a TripleTOF 5600, see calibrateNoIms_
+    if (inst == "tof" && g_noims_cli.find("-noims:calibrate ") == std::string::npos) { calibrate = true; }
     if (inst != "tof")
     {
       // [orbi] Orbitrap and FTICR input: 5 ppm traces, fragment cap 600, MS2 traces split at valleys below 0.3 (1.9.7: 10 ppm, 200, no
@@ -8582,6 +8766,7 @@ protected:
     if (inst == "tof")
     {
       const bool tof5600 = exp.getInstrument().getName().find("5600") != std::string::npos;
+      if (tof5600) { calib_frag_min = 1.0; }
       // fixed windows: at least 90 % of the distinct MS2 isolation windows lie within 1 m/z of the median width (an edge window
       // without overlap on one side is narrower)
       std::set<std::pair<long, long>> wins;
@@ -8607,7 +8792,7 @@ protected:
       // tuned on PXD002952 run 008 against Sage peptides at 1 %: tighter tolerances, flatter correlation weight, wider RT span,
       // complement boost, averagine-checked MS2 envelopes, hill seeds, and a per-run fragment m/z shift
       if (dflt("ppm", noims_opts.ppm == noims_dflt.ppm)) { noims_opts.ppm = tof5600 ? TOF5600_PPM : TOF_PPM; }
-      if (dflt("min_corr", noims_opts.min_corr == noims_dflt.min_corr)) { noims_opts.min_corr = TOF_MIN_CORR; }
+      if (dflt("min_corr", noims_opts.min_corr == noims_dflt.min_corr)) { noims_opts.min_corr = tof5600 ? TOF5600_MIN_CORR : TOF_MIN_CORR; }
       if (dflt("weight_power", noims_opts.weight_pow == noims_dflt.weight_pow)) { noims_opts.weight_pow = fixed ? TOF_FIXED_WEIGHT_POW : TOF_WEIGHT_POW; }
       if (dflt("complement_boost", noims_opts.comp_boost == noims_dflt.comp_boost)) { noims_opts.comp_boost = tof5600 ? TOF5600_COMP_BOOST : TOF_COMP_BOOST; }
       if (dflt("span_pad", noims_opts.span_pad == noims_dflt.span_pad))
@@ -8619,7 +8804,7 @@ protected:
       if (dflt("pair_top", noims_opts.pair_top == noims_dflt.pair_top)) { noims_opts.pair_top = TOF_PAIR_TOP; }
       if (dflt("env_ms1_support", noims_opts.env_ms1_support == noims_dflt.env_ms1_support)) { noims_opts.env_ms1_support = TOF_ENV_MS1_SUPPORT; }
       if (dflt("envelope_pattern", ! noims_opts.env_pattern)) { noims_opts.env_pattern = true; }
-      if (dflt("seed_mono", ! noims_opts.seed_mono)) { noims_opts.seed_mono = true; }
+      if (dflt("seed_mono", ! noims_opts.seed_mono)) { noims_opts.seed_mono = ! tof5600; }
       if (dflt("ms2_shift", ! noims_opts.ms2_shift_auto && noims_opts.ms2_shift == 0)) { noims_opts.ms2_shift_auto = true; }
       writeLogInfo_("[noims] TOF input" + String(tof5600 ? " (TripleTOF 5600)" : fixed ? " (fixed isolation windows)" : "") + ": MS1 at " + String(noims_opts.ppm) + " ppm, MS2 traces at " + String(noims_opts.ms2_ppm) + " ppm split at valleys below " + String(noims_opts.split)
                     + ", precursors of charge >= " + String(noims_opts.min_charge) + " seen in >= " + String(noims_opts.min_hill_scans)
@@ -8628,6 +8813,7 @@ protected:
     ProgressLogger noims_progress;
     noims_progress.setLogType(log_type_);
     DIAspeXtract::NoIms::run(exp, noims_opts, res, [this](const String& m) { writeLogInfo_(m); }, noims_progress); // moves the spectra out of exp
+    if (calibrate) { calibrateNoIms_(res, calib_frag_min); }
     return EXECUTION_OK;
   }
 

@@ -17,6 +17,13 @@
   - Orbitrap and FTICR: `-noims:ppm 5`, `-noims:split 0.3`, `-noims:max_fragments 600` (was 10 ppm, no split, 200). On
     PXD032263 / PXD063917: ProSE +22.6 / +30.2 %, MSFragger +12.5 / +53.7 %, Sage +7.0 / +25.6 %, entrapment FDP
     1.43 / 1.31 % (was 1.34 / 1.22 %).
+- **m/z recalibration of TOF output without a database search** (`-noims:calibrate auto`, the default for TOF input; `off`
+  elsewhere). The fragment m/z error is estimated from amino-acid mass differences between fragments, the precursor m/z
+  error from the unfragmented precursor in its own spectrum; each is corrected only between 3 and 20 ppm (fragments from
+  1 ppm on a TripleTOF 5600). On a TripleTOF 5600 the defaults also change to `-noims:min_corr 0.4` and
+  `-noims:seed_mono off`. On the six 5600 runs of PXD002952 (precursors 3 to 14 ppm low): ProSE +5 % to +70 %, Sage
+  +5 % to +70 % peptides at 1 % FDR, MSFragger +2 % to +4 %, entrapment FDP 0.90 % to 1.18 %. TripleTOF 6600 runs
+  change by 0 % to +1.4 % (a precursor correction of 3 to 4 ppm on four of seven runs).
 - **Faster on Linux.** The tool sets glibc's malloc tunables (huge pages, heap retention) and starts itself once more:
   30 % to 34 % less wall time on SWATH and Orbitrap runs at 64 threads, 5 % to 11 % on diaPASEF, output unchanged.
   `DIASPEXTRACT_NO_HUGEPAGES=1` or a `GLIBC_TUNABLES` of your own turns it off. The single-pass tracers also skip

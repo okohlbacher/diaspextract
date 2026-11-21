@@ -8472,11 +8472,15 @@ protected:
   static constexpr double TOF_MS2_PPM = 6.0, TOF_SPLIT = 0.5, TOF_PPM = 7.0, TOF_MIN_CORR = 0.5, TOF_WEIGHT_POW = 2.0, TOF_COMP_BOOST = 2.0;
   static constexpr int TOF_MIN_CHARGE = 2, TOF_MIN_HILL_SCANS = 3, TOF_SPAN_PAD = 5, TOF_HILL_SEEDS = 3, TOF_PAIR_TOP = 200,
                        TOF_ENV_MS1_SUPPORT = 2;
-  // Fixed-width isolation windows (not on a 5600): split 0.3, correlation weight r^4, cap 300. Tuned on PXD002952 6600 32-fixed runs
+  // Fixed-width isolation windows (not on a 5600): split 0.3, correlation weight r^4 (and, until 1.9.7, cap 300). Tuned on PXD002952 6600 32-fixed runs
   // 002 and 003; on 004-007 it beat the alternative with padding 3 instead of r^4 with both engines (Sage +2.1 / +3.7 %, MSFragger +
   // Percolator +3.8 / +4.6 % against the variable-window values, standard / entrapment database, all four runs).
   static constexpr double TOF_FIXED_SPLIT = 0.3, TOF_FIXED_WEIGHT_POW = 4.0, TOF_FIXED_MS2_PPM = 4.0;
-  static constexpr int TOF_FIXED_MAX_FRAGS = 300;
+  // Fragment cap 600 on every TOF input (1.9.7: 200, 300 with fixed windows). On the 13 PXD002952 runs against 200/300: ProSE +4.7 %
+  // (+1.3 to +7.2 %), MSFragger + Percolator +1.2 %, Sage +0.4 %, entrapment FDP unchanged at 1.07 %; 1000 gains no more and costs time.
+  static constexpr int TOF_MAX_FRAGS = 600;
+  static constexpr double ORBI_PPM = 5.0, ORBI_SPLIT = 0.3;
+  static constexpr int ORBI_MAX_FRAGS = 600;
   // TripleTOF 5600 (lower MS1 resolution: hills break at 7 ppm): wider MS1 and MS2 tolerances, a lower split valley, a wider correlation
   // window and a weaker complement boost. Tuned on PXD002952 5600 runs 007 and 009, confirmed on 008 and 010-012.
   // MS1 at 20 ppm: +0.3 to +3.2 % on 5600 runs 008, 010-012 against 15 ppm, estimated FDP 1.05 % (15 ppm: 1.12 %).
@@ -8548,8 +8552,7 @@ protected:
     // [tof] TOF analyzers (SWATH) record each fragment m/z with more scatter and many unrelated ions per scan: wide MS2
     // traces join neighbouring ions and recurring m/z into one long trace whose single apex reaches one precursor only.
     // TOF input therefore gets narrow MS2 traces split into elution peaks, and fewer precursors: charge >= 2, seen in
-    // >= 3 MS1 scans (charge 1 gave 0.2 % PSMs per spectrum on SWATH). Only options left at their defaults change; Orbitrap and FTICR input keeps
-    // every default.
+    // >= 3 MS1 scans (charge 1 gave 0.2 % PSMs per spectrum on SWATH). Only options left at their defaults change.
     String inst = getStringOption_("noims:instrument");
     if (inst == "auto")
     {
@@ -8561,12 +8564,23 @@ protected:
       }
       inst = tof && ! ft ? "tof" : "orbitrap";
     }
+    const DIAspeXtract::NoIms::Params noims_dflt;
+    // ponytail: "explicit" = named on the command line; a value set only in an -ini file counts if it differs from the general default
+    const auto dflt
+      = [](const char* o, bool at_default) { return at_default && g_noims_cli.find(std::string("-noims:") + o + " ") == std::string::npos; };
+    if (inst != "tof")
+    {
+      // [orbi] Orbitrap and FTICR input: 5 ppm traces, fragment cap 600, MS2 traces split at valleys below 0.3 (1.9.7: 10 ppm, 200, no
+      // split). On PXD032263 / PXD063917 against the 1.9.7 values: ProSE +22.6 / +30.2 %, MSFragger + Percolator +12.5 / +53.7 %,
+      // Sage +7.0 / +25.6 % peptides at 1 % FDR, entrapment FDP 1.43 / 1.31 % (1.9.7: 1.34 / 1.22 %).
+      if (dflt("ppm", noims_opts.ppm == noims_dflt.ppm)) { noims_opts.ppm = ORBI_PPM; }
+      if (dflt("split", noims_opts.split == noims_dflt.split)) { noims_opts.split = ORBI_SPLIT; }
+      if (dflt("max_fragments", noims_opts.max_frags == noims_dflt.max_frags)) { noims_opts.max_frags = ORBI_MAX_FRAGS; }
+      writeLogInfo_("[noims] Orbitrap input: traces at " + String(noims_opts.ppm) + " ppm, MS2 traces split at valleys below " + String(noims_opts.split)
+                    + ", at most " + String(noims_opts.max_frags) + " fragments per spectrum");
+    }
     if (inst == "tof")
     {
-      const DIAspeXtract::NoIms::Params noims_dflt;
-      // ponytail: "explicit" = named on the command line; a value set only in an -ini file counts if it differs from the general default
-      const auto dflt
-        = [](const char* o, bool at_default) { return at_default && g_noims_cli.find(std::string("-noims:") + o + " ") == std::string::npos; };
       const bool tof5600 = exp.getInstrument().getName().find("5600") != std::string::npos;
       // fixed windows: at least 90 % of the distinct MS2 isolation windows lie within 1 m/z of the median width (an edge window
       // without overlap on one side is narrower)
@@ -8600,7 +8614,7 @@ protected:
       {
         noims_opts.span_pad = tof5600 ? TOF5600_SPAN_PAD : TOF_SPAN_PAD;
       }
-      if (fixed && dflt("max_fragments", noims_opts.max_frags == noims_dflt.max_frags)) { noims_opts.max_frags = TOF_FIXED_MAX_FRAGS; }
+      if (dflt("max_fragments", noims_opts.max_frags == noims_dflt.max_frags)) { noims_opts.max_frags = TOF_MAX_FRAGS; }
       if (dflt("hill_seeds", noims_opts.hill_seeds == noims_dflt.hill_seeds)) { noims_opts.hill_seeds = TOF_HILL_SEEDS; }
       if (dflt("pair_top", noims_opts.pair_top == noims_dflt.pair_top)) { noims_opts.pair_top = TOF_PAIR_TOP; }
       if (dflt("env_ms1_support", noims_opts.env_ms1_support == noims_dflt.env_ms1_support)) { noims_opts.env_ms1_support = TOF_ENV_MS1_SUPPORT; }
